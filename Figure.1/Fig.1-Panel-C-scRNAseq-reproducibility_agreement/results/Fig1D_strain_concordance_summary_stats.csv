@@ -1,0 +1,3 @@
+"comparison","n_genes","n_strains","n_same_pairs","n_diff_pairs","median_same_r","median_diff_r","wilcox_p"
+"YPD",5246,83,83,6806,0.931889365478177,0.893754283365798,7.0659011889409e-17
+"Fluconazole",4809,72,72,5112,0.770079652373105,0.753600371129447,0.00616768008917373

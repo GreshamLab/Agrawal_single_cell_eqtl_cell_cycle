@@ -1,0 +1,4 @@
+"comparison","n_genes","n_strains","spearman_r"
+"YPD",5246,83,0.953064596758865
+"Fluconazole",4809,72,0.907722050989458
+"sc 2% glucose vs. Caudal (2024)",5607,71,0.837886930721195

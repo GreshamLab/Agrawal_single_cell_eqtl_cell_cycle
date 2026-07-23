@@ -1,0 +1,5 @@
+"Condition","Replicate","RunLabel","median_reads","median_snps","total_cells"
+"YPD",1,"YPD.1",38873,15948,18465
+"YPD",2,"YPD.2",11849,6853,23247
+"Fluconazole",1,"Fluconazole.1",7004.5,4773.5,6226
+"Fluconazole",2,"Fluconazole.2",15740,9001,6154

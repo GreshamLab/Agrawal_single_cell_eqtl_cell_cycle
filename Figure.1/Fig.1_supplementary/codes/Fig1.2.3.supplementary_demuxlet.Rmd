@@ -1,0 +1,524 @@
+---
+title: "Fig1.Fig2.Fig3.supplementary_demuxlet - — Demuxlet QC and Strain Assignment"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    theme: minimal
+---
+
+Suplementary Fig1: Genotype abundance distribution in each condition - YPD, fluconazole and sc2%glucose
+Supplementary Fig2: Reproducibility of demuxlet strain IDs between separate 10x runs (Don't have reliable replicate 2 of sc2%glucose so will do for YPD.1 and YPD.2 but not sc2%glucose)
+Supplemetary Fig3: What is the common source of demuxlet strain mixup (is it related to genetic relatedness)
+
+
+#Legend suggestion: Supplementary Figure 3 — Within-clade bias in demuxlet ambiguous droplet assignments.
+Each cell shows the number of ambiguous droplets (DROPLET.TYPE = "AMB") whose top-ranked (SNG.BEST.GUESS) and second-ranked (SNG.NEXT.GUESS) strain assignments fall in the indicated phylogenetic clade pair. Clades follow the classification of Peter et al. (2018). Black borders highlight within-clade pairs (diagonal), where both candidate strains belong to the same clade. Concentration of ambiguous droplets along the diagonal indicates that demuxlet uncertainty is driven predominantly by genetic similarity between strains rather than by experimental condition. The Wine/European subclade 1 dominates ambiguous assignments across all conditions, consistent with its overrepresentation in the strain panel. Heatmaps are shown for all conditions combined (top left) and separately for YPD, fluconazole, and sc 2% glucose.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.dpi = 300
+)
+```
+
+```{r libraries}
+library(tidyverse)
+library(patchwork)
+library(ggrepel)
+```
+
+---
+
+# Configuration
+
+```{r config}
+STRAINS_PATH <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/StrainsforSC-RNAseq.csv"
+OUT_DIR      <- "../results"
+dir.create(OUT_DIR, showWarnings = FALSE, recursive = TRUE)
+
+samples <- tribble(
+  ~Condition,    ~Replicate, ~demuxlet_path,
+  "YPD",         1,          "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.1/demuxlet/merged_demuxlet_output_YPD.tsv",
+  "YPD",         2,          "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.2/demuxlet/merged_demuxlet_output_YPD_2_new.tsv",
+  "Fluconazole", 1,          "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Flu.1/demuxlet/merged_demuxlet_output_flu_1.tsv",
+  "Fluconazole", 2,          "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Flu.2/demuxlet/merged_demuxlet_output_flu_2.tsv"
+)
+
+SC2GLU_PATH <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2/demuxlet/merged_demuxlet_output_scglu2.tsv"
+```
+
+---
+
+# Helper functions
+
+```{r helpers}
+# ── Load and minimally clean a demuxlet output file ──────────────────────────
+load_demuxlet <- function(path) {
+  d <- read.delim(path, stringsAsFactors = FALSE)
+  numeric_cols <- c("BEST.LLK", "NUM.READS", "NUM.SNPS", "NEXT.LLK",
+                    "DIFF.LLK.BEST.NEXT", "BEST.POSTERIOR", "SNG.POSTERIOR",
+                    "SNG.BEST.LLK", "SNG.NEXT.LLK", "SNG.ONLY.POSTERIOR",
+                    "DBL.BEST.LLK", "DIFF.LLK.SNG.DBL")
+  for (col in intersect(numeric_cols, colnames(d))) d[[col]] <- as.numeric(d[[col]])
+  na.omit(d)
+}
+
+# ── Strip trailing ",strain,posterior" from BEST.GUESS → clean strain ID ─────
+clean_strain <- function(x) sub(",.*", "", x)
+
+# ── Publication theme ─────────────────────────────────────────────────────────
+pub_theme <- theme_classic(base_size = 9) +
+  theme(
+    axis.title       = element_text(size = 9,  face = "bold", color = "black"),
+    axis.text        = element_text(size = 8,  color = "black"),
+    axis.line        = element_line(linewidth = 0.4),
+    axis.ticks       = element_line(linewidth = 0.35),
+    plot.title       = element_text(size = 9,  face = "bold", hjust = 0.5),
+    panel.grid       = element_blank(),
+    plot.background  = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    legend.key.size  = unit(0.35, "cm"),
+    legend.text      = element_text(size = 7),
+    legend.title     = element_text(size = 8, face = "bold")
+  )
+
+# Condition colour palette (consistent across all panels)
+COND_COLORS <- c(
+  "YPD"          = "#4E79A7",
+  "Fluconazole"  = "#E15759",
+  "sc 2% glucose"= "#59A14F"
+)
+
+DROPLET_COLORS <- c(
+  "Singlet"   = "#4E79A7",
+  "Doublet"   = "#E15759",
+  "Ambiguous" = "#F28E2B"
+)
+```
+
+---
+
+# Load data
+
+```{r load_data}
+strains_sc <- read.csv(STRAINS_PATH, header = TRUE) %>%
+  select(-1, -2) %>%         # drop first two index columns
+  `rownames<-`(NULL)
+
+# Strain metadata lookup (used in Supp Fig 3)
+lookup <- strains_sc %>%
+  select(Standardized.name, Clades, Ecological.origins, Isolation)
+
+# Load all replicated conditions
+demux_list <- samples %>%
+  mutate(
+    Replicate  = as.integer(Replicate),
+    demux_data = map(demuxlet_path, load_demuxlet),
+    label      = paste0(Condition, ".", Replicate)
+  )
+
+# sc 2% glucose (single run, no replicate)
+sc2glu <- load_demuxlet(SC2GLU_PATH) %>%
+  mutate(Condition = "sc 2% glucose", Replicate = 1L)
+
+# Combined tidy frame for Supp Fig 1 (all conditions, all replicates)
+all_demux <- bind_rows(
+  demux_list %>%
+    mutate(Condition = Condition, Replicate = Replicate) %>%
+    unnest(demux_data),
+  sc2glu
+) %>%
+  mutate(
+    Condition    = factor(Condition, levels = c("YPD", "Fluconazole", "sc 2% glucose")),
+    DropletLabel = case_when(
+      DROPLET.TYPE == "SNG" ~ "Singlet",
+      DROPLET.TYPE == "DBL" ~ "Doublet",
+      DROPLET.TYPE == "AMB" ~ "Ambiguous"
+    ),
+    DropletLabel = factor(DropletLabel, levels = c("Singlet", "Doublet", "Ambiguous")),
+    RunLabel     = paste0(Condition, ".", Replicate)
+  )
+```
+
+---
+
+# Supplementary Figure 1 — Genotype abundance distribution
+
+*One panel per condition (YPD, Fluconazole, sc 2% glucose). Within each condition
+replicates are shown side-by-side. Bars show number of singlet-assigned cells per
+strain; colour indicates droplet-type composition across all replicates.*
+
+```{r suppfig1, fig.width=14, fig.height=5}
+# Per-run singlet counts per strain
+strain_counts <- all_demux %>%
+  dplyr::filter(DROPLET.TYPE == "SNG") %>%
+  dplyr::mutate(Strain = clean_strain(BEST.GUESS)) %>%
+  dplyr::count(Condition, Replicate, RunLabel, Strain, name = "n_cells")
+
+make_abundance_panel <- function(cond, include_dgy3 = TRUE) {
+  d <- dplyr::filter(strain_counts, Condition == cond)
+  
+  if (!include_dgy3) d <- dplyr::filter(d, Strain != "DGY3")
+
+  strain_order <- d %>%
+    dplyr::group_by(Strain) %>%
+    dplyr::summarise(mean_n = mean(n_cells), .groups = "drop") %>%
+    dplyr::arrange(mean_n) %>%
+    dplyr::pull(Strain)
+
+  d <- dplyr::mutate(d,
+    Strain   = factor(Strain, levels = strain_order),
+    RunLabel = factor(RunLabel)
+  )
+
+  n_reps  <- dplyr::n_distinct(d$RunLabel)
+  subtitle <- if (include_dgy3) "With S288C" else "Without S288C"
+
+  ggplot(d, aes(x = Strain, y = n_cells, fill = RunLabel)) +
+    geom_bar(stat = "identity", position = position_dodge(preserve = "single"),
+             width = 0.7) +
+    scale_fill_manual(
+      values = if (n_reps == 1) COND_COLORS[[as.character(cond)]] else c("#4E79A7", "#76B7B2"),
+      name   = "Run"
+    ) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+    labs(
+      title    = subtitle,
+      x        = "Strain",
+      y        = "Number of singlet cells"
+    ) +
+    pub_theme +
+    theme(
+      axis.text.x     = element_text(size = 5, angle = 90, hjust = 1, vjust = 0.5),
+      legend.position = if (n_reps == 1) "none" else "right"
+    )
+}
+
+# Print one figure per condition, each with two panels (with/without DGY3)
+for (cond in levels(all_demux$Condition)) {
+  p_with    <- make_abundance_panel(cond, include_dgy3 = TRUE)
+  p_without <- make_abundance_panel(cond, include_dgy3 = FALSE)
+
+  fig <- (p_with / p_without) +
+    plot_annotation(
+      title = paste0("Supplementary Figure 1 — ", cond, ": Genotype abundance distribution"),
+      theme = theme(plot.title = element_text(size = 10, face = "bold", hjust = 0.5))
+    )
+
+  print(fig)
+
+  ggsave(
+    file.path(OUT_DIR, paste0("SuppFig1_", gsub(" ", "_", cond), "_genotype_abundance.pdf")),
+    fig, width = 12, height = 8
+  )
+}
+```
+
+```{r save_suppfig1}
+# ggsave(file.path(OUT_DIR, "SuppFig1_genotype_abundance.pdf"),  suppfig1, width = 14, height = 5)
+# ggsave(file.path(OUT_DIR, "SuppFig1_genotype_abundance.tiff"), suppfig1, width = 14, height = 5,
+#        dpi = 300, compression = "lzw")
+
+```
+
+---
+
+# Supplementary Figure 2 — Reproducibility of demuxlet strain IDs between runs
+
+*For YPD and Fluconazole, we compare the per-strain cell-count fraction between
+replicate 1 and replicate 2. Each point is one strain; axes show the proportion of
+singlet cells assigned to that strain in each run. Spearman r is shown on each
+panel. sc 2% glucose is excluded (no reliable replicate).*
+
+```{r suppfig2_compute}
+# ── Supp Fig 2 — Reproducibility + diagnostic panels ─────────────────────────
+
+# Load gene detection per cell from all_demux (NUM.SNPS is a proxy we already
+# have; for true gene counts we need the Seurat objects — use NUM.READS as a
+# proxy here, or replace with nFeature_RNA if you load Seurat objects later)
+
+singlet_frac <- all_demux %>%
+  dplyr::filter(DROPLET.TYPE == "SNG", Condition != "sc 2% glucose") %>%
+  dplyr::mutate(Strain = clean_strain(BEST.GUESS)) %>%
+  dplyr::count(Condition, Replicate, Strain, name = "n_cells") %>%
+  dplyr::group_by(Condition, Replicate) %>%
+  dplyr::mutate(Fraction = n_cells / sum(n_cells)) %>%
+  dplyr::ungroup()
+
+# Total cells recovered per run
+total_cells <- all_demux %>%
+  dplyr::filter(DROPLET.TYPE == "SNG", Condition != "sc 2% glucose") %>%
+  dplyr::count(Condition, Replicate, RunLabel, name = "total_cells")
+
+# Median reads and SNPs per cell per run (proxies for gene/UMI detection)
+qc_per_run <- all_demux %>%
+  dplyr::filter(DROPLET.TYPE == "SNG", Condition != "sc 2% glucose") %>%
+  dplyr::group_by(Condition, Replicate, RunLabel) %>%
+  dplyr::summarise(
+    median_reads = median(NUM.READS),
+    median_snps  = median(NUM.SNPS),
+    .groups = "drop"
+  ) %>%
+  dplyr::left_join(total_cells, by = c("Condition", "Replicate", "RunLabel"))
+
+# Reproducibility scatter (same as before)
+repro_wide <- singlet_frac %>%
+  dplyr::select(Condition, Replicate, Strain, Fraction) %>%
+  tidyr::pivot_wider(names_from = Replicate, values_from = Fraction,
+                     names_prefix = "Rep", values_fill = 0)
+
+repro_stats <- repro_wide %>%
+  dplyr::group_by(Condition) %>%
+  dplyr::summarise(r = cor(Rep1, Rep2, method = "spearman"), n = n(), .groups = "drop")
+
+
+```
+
+```{r suppfig2, fig.width=7, fig.height=3.5}
+make_repro_scatter <- function(cond) {
+  d <- dplyr::filter(repro_wide, Condition == cond)
+  s <- dplyr::filter(repro_stats, Condition == cond)
+  col <- COND_COLORS[[cond]]
+
+  ggplot(d, aes(x = Rep1, y = Rep2)) +
+    geom_point(alpha = 0.55, size = 1.2, color = col, shape = 16) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed",
+                linewidth = 0.4, color = "grey50") +
+    annotate("text", x = Inf, y = -Inf,
+             label = paste0("Spearman r = ", round(s$r, 3), "\nn = ", s$n, " strains"),
+             hjust = 1.1, vjust = -0.5, size = 2.8, fontface = "bold") +
+    scale_x_continuous(labels = scales::percent_format(accuracy = 0.1),
+                       expand = expansion(mult = 0.02)) +
+    scale_y_continuous(labels = scales::percent_format(accuracy = 0.1),
+                       expand = expansion(mult = 0.02)) +
+    coord_fixed() +
+    labs(title = "Strain fraction concordance",
+         x = paste0(cond, ".1  —  singlet fraction"),
+         y = paste0(cond, ".2  —  singlet fraction")) +
+    pub_theme
+}
+
+# Total cells recovered per run (bar)
+make_cell_count_panel <- function(cond) {
+  d <- dplyr::filter(qc_per_run, Condition == cond) %>%
+    dplyr::mutate(RunLabel = factor(RunLabel))
+
+  ggplot(d, aes(x = RunLabel, y = total_cells, fill = RunLabel)) +
+    geom_bar(stat = "identity", width = 0.5) +
+    geom_text(aes(label = scales::comma(total_cells)), vjust = -0.4, size = 3) +
+    scale_fill_manual(values = c("#4E79A7", "#76B7B2")) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.15)),
+                       labels = scales::comma) +
+    labs(title = "Total singlet cells recovered",
+         x = NULL, y = "Cell count") +
+    pub_theme +
+    theme(legend.position = "none")
+}
+
+# Median reads per cell per run (proxy for sequencing depth / gene detection)
+make_depth_panel <- function(cond) {
+  d <- dplyr::filter(qc_per_run, Condition == cond) %>%
+    dplyr::mutate(RunLabel = factor(RunLabel))
+
+  # pivot to long for side-by-side reads vs SNPs
+  d_long <- d %>%
+    tidyr::pivot_longer(cols = c(median_reads, median_snps),
+                        names_to  = "Metric",
+                        values_to = "Value") %>%
+    dplyr::mutate(Metric = dplyr::recode(Metric,
+      median_reads = "Median reads/cell",
+      median_snps  = "Median SNP-overlapping\nreads/cell"
+    ))
+
+  ggplot(d_long, aes(x = RunLabel, y = Value, fill = RunLabel)) +
+    geom_bar(stat = "identity", width = 0.5) +
+    geom_text(aes(label = scales::comma(round(Value))), vjust = -0.4, size = 2.8) +
+    scale_fill_manual(values = c("#4E79A7", "#76B7B2")) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.15)),
+                       labels = scales::comma) +
+    facet_wrap(~Metric, scales = "free_y") +
+    labs(title = "Sequencing depth per cell",
+         x = NULL, y = "Median count") +
+    pub_theme +
+    theme(legend.position = "none",
+          strip.text = element_text(size = 7, face = "bold"))
+}
+
+# Print one figure per condition
+for (cond in c("YPD", "Fluconazole")) {
+  p1 <- make_repro_scatter(cond)
+  p2 <- make_cell_count_panel(cond)
+  p3 <- make_depth_panel(cond)
+
+  fig <- (p1 | p2 | p3) +
+    plot_annotation(
+      title = paste0("Supplementary Figure 2 — ", cond,
+                     ": Reproducibility and run-level QC"),
+      caption = paste0(
+        "Left: per-strain singlet fraction across replicates (dashed = perfect concordance). ",
+        "Centre: total singlet cells recovered. ",
+        "Right: sequencing depth proxies (NUM.READS and SNP-overlapping reads per cell)."
+      ),
+      theme = theme(
+        plot.title   = element_text(size = 10, face = "bold", hjust = 0.5),
+        plot.caption = element_text(size = 7, color = "grey40", hjust = 0.5)
+      )
+    )
+
+  print(fig)
+
+  ggsave(
+    file.path(OUT_DIR, paste0("SuppFig2_", cond, "_reproducibility_QC.pdf")),
+    fig, width = 12, height = 4
+  )
+}
+
+write.csv(repro_stats,  file.path(OUT_DIR, "SuppFig2_reproducibility_stats.csv"), row.names = FALSE)
+write.csv(qc_per_run,   file.path(OUT_DIR, "SuppFig2_run_QC_summary.csv"),        row.names = FALSE)
+```
+
+```{r save_suppfig2}
+# ggsave(file.path(OUT_DIR, "SuppFig2_demuxlet_reproducibility.pdf"),  suppfig2, width = 7, height = 3.5)
+# ggsave(file.path(OUT_DIR, "SuppFig2_demuxlet_reproducibility.tiff"), suppfig2, width = 7, height = 3.5,
+#        dpi = 300, compression = "lzw")
+# 
+# write.csv(repro_stats, file.path(OUT_DIR, "SuppFig2_reproducibility_stats.csv"), row.names = FALSE)
+```
+
+---
+
+# Supplementary Figure 3 — Source of demuxlet strain mix-ups (genetic relatedness)
+
+*Ambiguous droplets have two plausible strain assignments (SNG.BEST.GUESS and
+SNG.NEXT.GUESS). If mix-ups arise from genetic relatedness, both candidates should
+tend to fall in the same phylogenetic clade. The heatmap shows the frequency of
+each clade–clade pair among ambiguous droplets; the diagonal represents
+within-clade ambiguity.*
+
+```{r suppfig3_compute}
+# ── Annotate AMB droplets with clade of best & next guess ────────────────────
+amb_all <- all_demux %>%
+  dplyr::filter(DROPLET.TYPE == "AMB") %>%
+  dplyr::mutate(
+    SNG.BEST.GUESS  = clean_strain(SNG.BEST.GUESS),
+    SNG.NEXT.GUESS  = clean_strain(SNG.NEXT.GUESS)
+  ) %>%
+  left_join(lookup %>% rename(Clade.best = Clades),
+            by = c("SNG.BEST.GUESS" = "Standardized.name")) %>%
+  left_join(lookup %>% select(Standardized.name, Clades) %>%
+              rename(Clade.next = Clades),
+            by = c("SNG.NEXT.GUESS" = "Standardized.name")) %>%
+  filter(!is.na(Clade.best), !is.na(Clade.next))
+
+# Clade–clade contingency: pool all conditions (one combined heatmap)
+# plus one per-condition version so readers can see consistency
+make_clade_heatmap <- function(df, title_str) {
+  ct <- df %>%
+    dplyr::count(Clade.best, Clade.next, name = "n") %>%
+    complete(Clade.best, Clade.next, fill = list(n = 0L))
+
+  # Highlight diagonal (within-clade) with a border
+  ct <- ct %>%
+    mutate(on_diag = Clade.best == Clade.next)
+
+  ggplot(ct, aes(x = Clade.best, y = Clade.next, fill = n)) +
+    geom_tile(color = "white", linewidth = 0.3) +
+    geom_tile(data = filter(ct, on_diag),
+              aes(x = Clade.best, y = Clade.next),
+              fill = NA, color = "black", linewidth = 0.6) +
+    geom_text(aes(label = ifelse(n > 0, n, "")),
+              size = 2.2, color = "white", fontface = "bold") +
+    scale_fill_gradient(low = "#E8F4F8", high = "#2166AC",
+                        name = "Ambiguous\ndroplets") +
+    coord_fixed() +
+    labs(
+      title = title_str,
+      x     = "Clade of top-ranked strain (SNG.BEST.GUESS)",
+      y     = "Clade of second-ranked strain (SNG.NEXT.GUESS)"
+    ) +
+    pub_theme +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 7),
+      axis.text.y = element_text(size = 7)
+    )
+}
+
+# Combined panel
+hm_all <- make_clade_heatmap(amb_all, "All conditions combined")
+
+# Per-condition panels
+hm_cond <- map(
+  levels(all_demux$Condition),
+  function(cond) {
+    make_clade_heatmap(
+      filter(amb_all, Condition == cond),
+      as.character(cond)
+    )
+  }
+)
+```
+
+```{r suppfig3, fig.width=14, fig.height=4}
+suppfig3_row1 <- wrap_plots(list(hm_all, hm_cond[[1]]), nrow = 1) +
+  plot_annotation(
+    theme = theme(plot.title = element_text(size = 10, face = "bold", hjust = 0.5))
+  )
+
+suppfig3_row2 <- wrap_plots(list(hm_cond[[2]], hm_cond[[3]]), nrow = 1) +
+  plot_annotation(
+    theme = theme(plot.title = element_text(size = 10, face = "bold", hjust = 0.5))
+  )
+
+print(suppfig3_row1)
+print(suppfig3_row2)
+
+ggsave(file.path(OUT_DIR, "SuppFig3_amb_clade_heatmap_row1.pdf"), suppfig3_row1, width = 10, height = 5)
+ggsave(file.path(OUT_DIR, "SuppFig3_amb_clade_heatmap_row2.pdf"), suppfig3_row2, width = 10, height = 5)
+```
+
+```{r save_suppfig3}
+# ggsave(file.path(OUT_DIR, "SuppFig3_amb_clade_heatmap.pdf"),  suppfig3, width = 14, height = 4)
+# ggsave(file.path(OUT_DIR, "SuppFig3_amb_clade_heatmap.tiff"), suppfig3, width = 14, height = 4,
+#        dpi = 300, compression = "lzw")
+
+# Summary table: fraction of within-clade AMB per condition
+within_clade_summary <- amb_all %>%
+  mutate(within_clade = Clade.best == Clade.next) %>%
+  group_by(Condition) %>%
+  summarise(
+    n_amb          = n(),
+    n_within_clade = sum(within_clade),
+    pct_within     = round(100 * n_within_clade / n_amb, 1),
+    .groups        = "drop"
+  )
+
+knitr::kable(within_clade_summary,
+             caption = "Fraction of ambiguous droplets with within-clade top-two assignments")
+
+write.csv(within_clade_summary,
+          file.path(OUT_DIR, "SuppFig3_within_clade_summary.csv"), row.names = FALSE)
+```
+
+#Verification if strains from same clades are confused by demuxlet in each condition
+```{r}
+# Check 1: does amb_all have all three conditions?
+table(amb_all$Condition)
+
+# Check 2: are the per-condition AMB counts different between YPD and Fluconazole?
+all_demux %>%
+  dplyr::filter(DROPLET.TYPE == "AMB") %>%
+  dplyr::count(Condition)
+
+# Check 3: spot-check that the top clade pairs differ between conditions
+amb_all %>%
+  dplyr::filter(!is.na(Clade.best), !is.na(Clade.next)) %>%
+  dplyr::group_by(Condition, Clade.best, Clade.next) %>%
+  dplyr::summarise(n = n(), .groups = "drop") %>%
+  dplyr::arrange(Condition, desc(n)) %>%
+  dplyr::group_by(Condition) %>%
+  dplyr::slice_head(n = 5)
+```
+

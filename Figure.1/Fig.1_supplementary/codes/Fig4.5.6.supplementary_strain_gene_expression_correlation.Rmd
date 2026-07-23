@@ -1,0 +1,317 @@
+---
+title: "Supplementary Figures 4-6 — strain and gene expression reproducibility"
+output: html_document
+---
+
+- **S4** Strain expression is reproducible between replicates
+- **S5** Reproducibility improves with cells assigned per strain (A: mean cells, B: min cells)
+- **S6** Per-gene expression correlation across strains
+
+YPD and fluconazole only — sc 2% glucose has no replicate experiment.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = TRUE, warning = FALSE, dpi = 300)
+```
+
+```{r libraries}
+library(tidyverse)
+library(DESeq2)
+library(patchwork)
+```
+
+# ── Configuration ──────────────────────────────────────────────
+# N_PERM / set.seed(42) removed — those only fed the permutation-null
+# test in the old S4 (same-strain vs different-strain), which is dropped.
+
+```{r config}
+BASE <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all"
+
+conditions <- list(
+  YPD = list(
+    label = "YPD",
+    pb1   = file.path(BASE, "YPD.1/fastlmm/data/pheno_data/pseudobulk_reliable_transcripts_YPD.txt"),
+    pb2   = file.path(BASE, "YPD.2/fastlmm/data/pheno_data/pseudobulk_reliable_transcripts_YPD.txt"),
+    rds1  = file.path(BASE, "YPD.1/gene_expression_analysis/output_from_pseudobulk_fastlmm/Na_va_data_subsetted.rds"),
+    rds2  = file.path(BASE, "YPD.2/gene_expression_analysis/Na_va_data_subsetted.rds")
+  ),
+  Fluconazole = list(
+    label = "Fluconazole",
+    pb1   = file.path(BASE, "Flu.1/fastlmm/data/pheno_data/pseudobulk_reliable_transcripts_Flu1.txt"),
+    pb2   = file.path(BASE, "Flu.2/fastlmm/data/pheno_data/pseudobulk_reliable_transcripts_Flu2.txt"),
+    rds1  = file.path(BASE, "Flu.1/gene_expression_analysis/output_from_pseudobulk_fastlmm/Na_va_data_subsetted.rds"),
+    rds2  = file.path(BASE, "Flu.2/gene_expression_analysis/output_from_pseudobulk_fastlmm/Na_va_data_subsetted.rds")
+  )
+)
+
+condition_colors <- c("YPD" = "#2c5f8a", "Fluconazole" = "#c1554d")
+lvl <- names(conditions)
+
+OUT_DIR <- "../results"
+dir.create(OUT_DIR, showWarnings = FALSE, recursive = TRUE)
+```
+
+```{r theme}
+pub_theme <- theme_classic(base_size = 9) +
+  theme(
+    axis.title       = element_text(size = 9, face = "bold", color = "black"),
+    axis.text        = element_text(size = 8, color = "black"),
+    axis.line        = element_line(linewidth = 0.4, color = "black"),
+    axis.ticks       = element_line(linewidth = 0.35, color = "black"),
+    strip.text       = element_text(size = 9, face = "bold"),
+    strip.background = element_blank(),
+    panel.grid       = element_blank(),
+    plot.background  = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA)
+  )
+```
+
+# Helpers
+
+```{r helpers}
+read_pseudobulk <- function(path) {
+  if (!file.exists(path)) stop("File not found: ", path)
+  as.matrix(read.csv(path, sep = "\t", row.names = 1, header = TRUE,
+                     check.names = FALSE))
+}
+
+deseq_normalize <- function(mat, label = "") {
+  m   <- round(as.matrix(mat))
+  dds <- DESeqDataSetFromMatrix(
+    countData = m,
+    colData   = data.frame(row.names = colnames(m), condition = factor(colnames(m))),
+    design    = ~ 1
+  )
+  dds <- tryCatch(estimateSizeFactors(dds),
+                  error = function(e) estimateSizeFactors(dds, type = "poscounts"))
+  counts(dds, normalized = TRUE)
+}
+
+# Per-strain QC from the Seurat object. Metadata only — the object is dropped
+# immediately so four of these don't sit in memory at once.
+strain_qc <- function(rds_path, replicate) {
+  obj <- readRDS(rds_path)
+  md  <- obj@meta.data
+  rm(obj); gc(verbose = FALSE)
+
+  md %>%
+    group_by(strain = SNG.BEST.GUESS) %>%
+    summarise(n_cells    = n(),
+              median_umi = median(nCount_RNA),
+              .groups    = "drop") %>%
+    rename_with(~ paste0(.x, "_", replicate), -strain)
+}
+```
+
+# ── Compute ────────────────────────────────────────────────────
+# Removed: cross_mat (full n x n strain pairwise Spearman), diff_r,
+# self_rank/n_best, permutation null (N_PERM draws) — that whole block
+# only existed to drive the old density-plot S4 (same-strain vs
+# different-strain), which duplicates Fig 1 Panel D. Per-strain
+# reproducibility (replicate_r) now comes from a single O(n) pass
+# instead of an O(n^2) matrix, and feeds both the new S4 scatter labels
+# and the existing S5 QC plot — no duplicate correlation computation.
+
+```{r compute}
+analyse_condition <- function(cfg) {
+
+  x <- read_pseudobulk(cfg$pb1)
+  y <- read_pseudobulk(cfg$pb2)
+
+  genes   <- intersect(rownames(x), rownames(y))
+  strains <- intersect(colnames(x), colnames(y))
+  cat("\n---", cfg$label, "---\n")
+  cat("Shared strains:", length(strains), "| shared genes:", length(genes), "\n")
+
+  x <- x[genes, strains, drop = FALSE]
+  y <- y[genes, strains, drop = FALSE]
+
+  # Per-strain replicate correlation (Spearman is rank-based, so raw
+  # counts and log1p(counts) give the identical r — computed once here).
+  replicate_r <- vapply(strains, function(s) {
+    cor(x[, s], y[, s], method = "spearman")
+  }, numeric(1))
+
+  # --- S4: per-strain, per-gene scatter (one facet per strain) --------------
+  scatter_df <- map_dfr(strains, function(s) {
+    tibble(condition = cfg$label, strain = s, gene = genes,
+           val1 = x[, s] + 1, val2 = y[, s] + 1, r = replicate_r[s])
+  }) %>%
+    mutate(facet_label = paste0(strain, "  (r = ", round(r, 3), ")"))
+
+  # --- S5: per-strain QC ------------------------------------------------------
+  qc <- full_join(strain_qc(cfg$rds1, "r1"), strain_qc(cfg$rds2, "r2"),
+                  by = "strain") %>%
+    mutate(mean_cells = (n_cells_r1 + n_cells_r2) / 2,
+           min_cells  = pmin(n_cells_r1, n_cells_r2))
+
+  strain_df <- tibble(condition = cfg$label, strain = strains, r = replicate_r) %>%
+    left_join(qc, by = "strain")
+
+  cat("Strains with QC data:", sum(!is.na(strain_df$mean_cells)),
+      "of", nrow(strain_df), "\n")
+
+  # --- S6: per-gene Spearman across strains (DESeq2-normalized) --------------
+  xn <- deseq_normalize(x)
+  yn <- deseq_normalize(y)
+
+  gene_r <- vapply(seq_len(nrow(xn)), function(i) {
+    suppressWarnings(cor(xn[i, ], yn[i, ], method = "spearman", use = "complete.obs"))
+  }, numeric(1))
+
+  gene_df <- tibble(condition = cfg$label, gene = rownames(xn), r = gene_r) %>%
+    mutate(cor_category = case_when(
+      r >= 0.7            ~ "high (\u22650.7)",
+      r >= 0.4 & r < 0.7  ~ "moderate (0.4\u20130.7)",
+      r <  0.4            ~ "low (<0.4)",
+      TRUE                ~ NA_character_))
+
+  list(
+    scatter_df = scatter_df,
+    strain_df  = strain_df,
+    gene_df    = gene_df,
+    stats      = tibble(condition          = cfg$label,
+                        n_strains          = length(strains),
+                        n_genes            = length(genes),
+                        median_replicate_r = median(replicate_r),
+                        median_gene_r      = median(gene_r, na.rm = TRUE),
+                        pct_gene_r_0.4     = 100 * mean(gene_r > 0.4, na.rm = TRUE))
+  )
+}
+
+res <- lapply(conditions, analyse_condition)
+
+fct <- function(d) mutate(d, condition = factor(condition, levels = lvl))
+scatter_df_all <- fct(bind_rows(lapply(res, `[[`, "scatter_df")))
+strain_df_all  <- fct(bind_rows(lapply(res, `[[`, "strain_df")))
+gene_df_all    <- fct(bind_rows(lapply(res, `[[`, "gene_df")))
+stats_all      <- fct(bind_rows(lapply(res, `[[`, "stats")))
+
+knitr::kable(stats_all, digits = 3)
+```
+
+# ── Supplementary Figure 4 ───────────────────────────────────────
+# Per-strain replicate scatter grid (raw counts, log-log, one facet per
+# strain, r annotated in each facet title) — generalized from the
+# original Flu.1-vs-Flu.2-only code to run on both conditions. Replaces
+# the old same-strain-vs-different-strain density plot, which duplicated
+# Fig 1 Panel D; this version instead gives a reviewer the strain-by-strain
+# detail behind Panel D's aggregate claim.
+
+```{r figS4, fig.width=7, fig.height=3.2}
+make_strain_scatter_fig <- function(df, cond_label) {
+  d <- df %>%
+    filter(condition == cond_label) %>%
+    mutate(facet_label = factor(facet_label, levels = unique(facet_label[order(-r)])))
+
+  ggplot(d, aes(x = val1, y = val2)) +
+    geom_point(alpha = 0.08, size = 0.15, color = condition_colors[[cond_label]]) +
+    geom_abline(slope = 1, intercept = 0,
+                linetype = "dashed", color = "grey40", linewidth = 0.3) +
+    scale_x_log10() +
+    scale_y_log10() +
+    facet_wrap(~ facet_label, ncol = 9) +
+    labs(
+      title = paste0("Per-strain replicate concordance: ", cond_label),
+      x     = paste0(cond_label, " replicate 1 counts (log10, +1)"),
+      y     = paste0(cond_label, " replicate 2 counts (log10, +1)")
+    ) +
+    theme_classic(base_size = 10) +
+    theme(
+      plot.title    = element_text(size = 18, face = "bold", hjust = 0.5),
+      axis.title    = element_text(size = 16, face = "bold"),
+      axis.text     = element_text(size = 16, color = "black"),
+      axis.text.x   = element_text(size = 16, color = "black",
+                                   angle = 90, hjust = 1, vjust = 0.5),
+      strip.text    = element_text(size = 10, face = "bold"),
+      panel.spacing = unit(0.6, "lines")
+    )
+}
+
+figS4_YPD <- make_strain_scatter_fig(scatter_df_all, "YPD")
+figS4_Flu <- make_strain_scatter_fig(scatter_df_all, "Fluconazole")
+
+ggsave(file.path(OUT_DIR, "FigS4_YPD_per_strain_scatter.pdf"), figS4_YPD,
+       width = 40, height = 35, limitsize = FALSE)
+ggsave(file.path(OUT_DIR, "FigS4_Flu_per_strain_scatter.pdf"), figS4_Flu,
+       width = 40, height = 35, limitsize = FALSE)
+```
+
+# Supplementary Figure 5
+
+```{r figS5, fig.width=7, fig.height=6}
+s5_long <- strain_df_all %>%
+  select(condition, strain, r, mean_cells, min_cells) %>%
+  pivot_longer(c(mean_cells, min_cells),
+               names_to = "metric", values_to = "cells") %>%
+  mutate(metric = recode(metric,
+                         mean_cells = "Mean cells per strain",
+                         min_cells  = "Min cells per strain")) %>%
+  filter(!is.na(cells))
+
+s5_labels <- s5_long %>%
+  group_by(condition, metric) %>%
+  summarise(rho = cor(cells, r, method = "spearman", use = "complete.obs"),
+            .groups = "drop") %>%
+  mutate(lab = sprintf("r = %.3f", rho))
+
+figS5 <- ggplot(s5_long, aes(x = cells, y = r, color = condition)) +
+  geom_point(size = 1.4, alpha = 0.75) +
+  geom_smooth(method = "lm", se = TRUE, linewidth = 0.6, color = "grey25") +
+  geom_text(data = s5_labels, aes(x = Inf, y = -Inf, label = lab),
+            inherit.aes = FALSE, hjust = 1.2, vjust = -0.8,
+            size = 2.6, fontface = "bold") +
+  scale_color_manual(values = condition_colors, guide = "none") +
+  facet_grid(condition ~ metric, scales = "free") +
+  labs(x = "Cells assigned per strain",
+       y = "Spearman correlation between replicates") +
+  pub_theme
+
+figS5
+
+ggsave(file.path(OUT_DIR, "FigS5_reproducibility_vs_cells.pdf"), figS5,
+       width = 7, height = 6, units = "in")
+```
+
+# Supplementary Figure 6
+
+```{r figS6, fig.width=7, fig.height=3.2}
+cat_colors <- c("high (\u22650.7)"        = "#2166ac",
+                "moderate (0.4\u20130.7)" = "#92c5de",
+                "low (<0.4)"              = "#d1e5f0")
+
+s6_labels <- stats_all %>%
+  mutate(lab = sprintf("median r = %.2f\n%.0f%% above 0.4",
+                       median_gene_r, pct_gene_r_0.4))
+
+figS6 <- ggplot(filter(gene_df_all, !is.na(cor_category)),
+                aes(x = r, fill = cor_category)) +
+  geom_histogram(bins = 50, color = "white", linewidth = 0.2) +
+  geom_vline(xintercept = c(0.4, 0.7), linetype = "dashed",
+             color = "grey30", linewidth = 0.4) +
+  geom_text(data = s6_labels, aes(x = -Inf, y = Inf, label = lab),
+            inherit.aes = FALSE, hjust = -0.1, vjust = 1.2, size = 2.5) +
+  scale_fill_manual(values = cat_colors, name = NULL) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  facet_wrap(~ condition, nrow = 1) +
+  labs(x = "Per-gene Spearman correlation across strains",
+       y = "Number of genes") +
+  pub_theme +
+  theme(legend.position = "bottom")
+
+figS6
+
+ggsave(file.path(OUT_DIR, "FigS6_per_gene_correlation.pdf"), figS6,
+       width = 7, height = 3.2, units = "in")
+```
+
+# Source data
+
+```{r source_data}
+write.csv(stats_all,     file.path(OUT_DIR, "FigS4-6_summary_stats.csv"),        row.names = FALSE)
+write.csv(strain_df_all, file.path(OUT_DIR, "FigS4-5_per_strain.csv"),           row.names = FALSE)
+write.csv(gene_df_all,   file.path(OUT_DIR, "FigS6_per_gene_correlations.csv"),  row.names = FALSE)
+```
+
+```{r session}
+sessionInfo()
+```
