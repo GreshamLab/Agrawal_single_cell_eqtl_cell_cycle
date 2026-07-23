@@ -1,0 +1,229 @@
+---
+title: "Figure 1B — demuxlet accuracy benchmarked against the DGY3 transcriptional barcode"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 3.6, fig.height = 4.2, dpi = 300)
+```
+
+```{r libraries}
+library(Seurat)
+library(Matrix)
+library(dplyr)
+library(tibble)
+library(ggplot2)
+
+select <- dplyr::select
+filter <- dplyr::filter
+```
+
+# 1. Configuration
+
+Everything you might want to change lives here.
+
+```{r config}
+DGY3_ID      <- "DGY3,DGY3,0.00"
+MIN_COUNTS   <- 3          # marker-positive if UMI count for that marker >= MIN_COUNTS (original code used "> 2")
+MIN_FEATURES <- 200        # cell-level QC, matches CreateSeuratObject(min.features = 200)
+
+MARKER <- "NATMX"          # ground-truth cell set: "NATMX", "KANMX", "BOTH", or "UNION"
+METRIC <- "recall"         # "recall"    = of demuxlet-called DGY3 cells, what fraction carry the marker
+                           #               (this is what the original code plotted)
+                           # "precision" = of marker-positive cells, what fraction demuxlet calls DGY3
+                           #               (this is the one that is literally "demuxlet accuracy",
+                           #                i.e. marker = ground truth, demuxlet = classifier)
+
+OUT_DIR  <- "../results"
+OUT_FILE <- file.path(OUT_DIR, sprintf("Fig1B_demuxlet_accuracy_%s_%s.tiff", MARKER, METRIC))
+
+samples <- tribble(
+  ~Condition,     ~Replicate, ~demuxlet_path, ~matrix_dir,
+
+  "YPD", 1,
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.1/demuxlet/merged_demuxlet_output_YPD.tsv",
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.1/alignment/output_of_alignment_YPD1_with_clean_gtf/run_count/outs/filtered_feature_bc_matrix/",
+
+  "YPD", 2,
+  "/scratch/aa9679/SingleCell_cerevisiae/Gene_exp_analysis/yeast/yeast.2/data/merged_demuxlet_output_YPD_2.tsv",
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.2/alignment/output_of_alignment_YPD2_with_clean_gtf/run_count/outs/filtered_feature_bc_matrix/",
+
+  "Fluconazole", 1,
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Flu.1/demuxlet/merged_demuxlet_output_flu_1.tsv",
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Flu.1/alignment/output_of_alignment_flu1_cust_ref/run_count/outs/filtered_feature_bc_matrix/",
+
+  "Fluconazole", 2,
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Flu.2/demuxlet/merged_demuxlet_output_flu_2.tsv",
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Flu.2/alignment/output_of_alignment_flu2_cust_ref/run_count/outs/filtered_feature_bc_matrix/"
+)
+```
+
+# 2. Functions
+
+```{r functions}
+load_demuxlet <- function(path) {
+  d <- read.delim(path, stringsAsFactors = FALSE)
+  num_cols <- c("BEST.LLK", "NUM.READS", "NUM.SNPS", "NEXT.LLK",
+                "DIFF.LLK.BEST.NEXT", "BEST.POSTERIOR", "SNG.POSTERIOR",
+                "SNG.BEST.LLK", "SNG.NEXT.LLK", "SNG.ONLY.POSTERIOR",
+                "DBL.BEST.LLK", "DIFF.LLK.SNG.DBL")
+  num_cols <- intersect(num_cols, colnames(d))
+  d[num_cols] <- lapply(d[num_cols], as.numeric)
+  na.omit(d)
+}
+
+# 10x barcodes carry a "-1" suffix; demuxlet output sometimes does not. Strip both.
+strip_suffix <- function(x) sub("-\\d+$", "", x)
+
+read_counts <- function(matrix_dir, min_features = MIN_FEATURES) {
+  mat <- Read10X(data.dir = matrix_dir)
+  if (is.list(mat)) mat <- mat[[1]]
+  colnames(mat) <- strip_suffix(colnames(mat))
+  mat[, Matrix::colSums(mat > 0) >= min_features, drop = FALSE]
+}
+
+# Marker-positive cells. grep can match >1 row (e.g. cassette split across features),
+# so sum over all matching rows rather than assuming a single row.
+marker_cells <- function(mat, pattern, min_counts = MIN_COUNTS) {
+  idx <- grep(pattern, rownames(mat), ignore.case = TRUE)
+  if (length(idx) == 0) stop("Marker '", pattern, "' not present in the reference.")
+  colnames(mat)[Matrix::colSums(mat[idx, , drop = FALSE]) >= min_counts]
+}
+
+summarise_sample <- function(Condition, Replicate, demuxlet_path, matrix_dir) {
+
+  dmx <- load_demuxlet(demuxlet_path)
+  dmx$BARCODE <- strip_suffix(dmx$BARCODE)
+  mat <- read_counts(matrix_dir)
+
+  # IMPORTANT: restrict demuxlet calls to the QC-passing cells that are actually in the
+  # count matrix. Otherwise the denominator includes droplets that were filtered out and
+  # therefore can never be marker-positive, which artificially depresses the accuracy.
+  shared <- intersect(dmx$BARCODE, colnames(mat))
+  if (length(shared) / ncol(mat) < 0.5) {
+    warning(Condition, " rep", Replicate,
+            ": only ", length(shared), " of ", ncol(mat),
+            " matrix barcodes found in demuxlet output — check barcode formatting.")
+  }
+  dmx <- dmx[dmx$BARCODE %in% shared, ]
+  mat <- mat[, shared, drop = FALSE]
+
+  dgy3 <- dmx$BARCODE[dmx$DROPLET.TYPE == "SNG" & dmx$BEST.GUESS == DGY3_ID]
+
+  kan <- marker_cells(mat, "KANMX")
+  nat <- marker_cells(mat, "NATMX")
+
+  sets <- list(KANMX = kan,
+               NATMX = nat,
+               BOTH  = intersect(kan, nat),
+               UNION = union(kan, nat))
+
+  out <- data.frame(Condition = Condition,
+                    Replicate = Replicate,
+                    N_cells_QC = ncol(mat),
+                    N_DGY3_demuxlet = length(dgy3),
+                    stringsAsFactors = FALSE)
+
+  for (s in names(sets)) {
+    hit <- length(intersect(sets[[s]], dgy3))
+    out[[paste0("N_", s)]]         <- length(sets[[s]])
+    out[[paste0("Recall_", s)]]    <- 100 * hit / max(length(dgy3), 1)
+    out[[paste0("Precision_", s)]] <- 100 * hit / max(length(sets[[s]]), 1)
+  }
+
+  # Dropout diagnostic: cells positive for one marker but not the other
+  out$N_KANMX_exclusive <- length(setdiff(kan, nat))
+  out$N_NATMX_exclusive <- length(setdiff(nat, kan))
+  out
+}
+```
+
+# 3. Compute
+
+```{r compute}
+results <- bind_rows(lapply(seq_len(nrow(samples)), function(i) {
+  do.call(summarise_sample, as.list(samples[i, ]))
+}))
+
+results$Condition <- factor(results$Condition, levels = c("YPD", "Fluconazole"))
+results <- arrange(results, Condition, Replicate)
+knitr::kable(results, digits = 1)
+```
+
+```{r diagnostic}
+# Does dropping KANMX cost anything? If N_KANMX_exclusive is a small fraction of
+# N_UNION, then NATMX alone is effectively the same cell set as the union.
+results %>%
+  transmute(Condition, Replicate,
+            N_UNION, N_NATMX, N_KANMX, N_BOTH,
+            Pct_union_missed_by_NATMX = round(100 * N_KANMX_exclusive / N_UNION, 2)) %>%
+  knitr::kable()
+```
+
+# 4. Figure 1B
+
+```{r figure}
+metric_col <- paste0(ifelse(METRIC == "recall", "Recall_", "Precision_"), MARKER)
+
+plot_df <- results %>%
+  mutate(Accuracy = .data[[metric_col]])
+
+summary_df <- plot_df %>%
+  group_by(Condition) %>%
+  summarise(Mean = mean(Accuracy),
+            SD   = sd(Accuracy),
+            n    = n(), .groups = "drop") %>%
+  mutate(x_label = factor(paste0(Condition, "\n(n = ", n, ")"),
+                          levels = paste0(levels(Condition), "\n(n = ", n, ")")))
+
+plot_df <- plot_df %>%
+  left_join(select(summary_df, Condition, x_label), by = "Condition")
+
+condition_colors <- c("YPD" = "#4E79A7", "Fluconazole" = "#E15759")
+
+pub_theme <- theme_classic(base_size = 11) +
+  theme(
+    axis.text        = element_text(color = "black", size = 10),
+    axis.title       = element_text(color = "black", size = 11, face = "bold"),
+    axis.line        = element_line(color = "black", linewidth = 0.5),
+    axis.ticks       = element_line(color = "black", linewidth = 0.4),
+    plot.title       = element_text(hjust = 0.5, size = 11, face = "bold"),
+    legend.position  = "none",
+    panel.grid       = element_blank(),
+    plot.background  = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA)
+  )
+
+fig1b <- ggplot(summary_df, aes(x = x_label, y = Mean, fill = Condition)) +
+  geom_col(width = 0.55, color = "black", linewidth = 0.4) +
+  geom_errorbar(aes(ymin = pmax(Mean - SD, 0), ymax = Mean + SD),
+                width = 0.12, linewidth = 0.5, color = "black") +
+  geom_point(data = plot_df, aes(x = x_label, y = Accuracy),
+             shape = 21, size = 2, stroke = 0.5,
+             fill = "white", color = "black",
+             position = position_jitter(width = 0.07, height = 0, seed = 1)) +
+  geom_text(aes(label = sprintf("%.1f%%", Mean), y = Mean + SD),
+            vjust = -0.8, size = 3, fontface = "bold") +
+  scale_fill_manual(values = condition_colors) +
+  scale_y_continuous(limits = c(0, 110), expand = c(0, 0),
+                     breaks = seq(0, 100, 25)) +
+  labs(x = NULL,
+       y = "Demuxlet accuracy (%)",
+       title = "DGY3 recovery (NATMX barcode)") +
+  pub_theme
+
+fig1b
+```
+
+```{r save}
+dir.create(OUT_DIR, showWarnings = FALSE, recursive = TRUE)
+ggsave(OUT_FILE, fig1b, width = 3.4, height = 4.0, units = "in",
+       dpi = 300, device = "tiff", compression = "lzw")
+
+write.csv(results, file.path(OUT_DIR, "Fig1B_source_data.csv"), row.names = FALSE)
+```
+
+```{r session}
+sessionInfo()
+```

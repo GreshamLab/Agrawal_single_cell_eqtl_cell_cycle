@@ -1,0 +1,674 @@
+---
+title: "Fig.1-Panel-B-Step1-Running-demuxlet - Multiplex droplet scRNAseq with natural polymorphism "
+output: html_document
+author: "Akriti Agrawal"
+date: 'Compiled: `r format(Sys.Date(), "%B %d, %Y")`'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  tidy = TRUE,
+  tidy.opts = list(width.cutoff = 120),
+  message = FALSE,
+  warning = FALSE
+)
+```
+
+In this vignette, we demonstrate the use of the computational tools *Cell Ranger*, *Demuxlet*, and *Seurat*. It has linux, python and r code 
+
+*Cell Ranger* is a software package developed by 10x Genomics for processing and analyzing single-cell RNA sequencing (scRNA-seq) data. It performs demultiplexing, alignment and generation of gene expression matrices from the raw sequencing data. 
+
+*Demuxlet* leverages natural genetic variation to infer genotypes. This approach enables the simultaneous sequencing of thousands of strains without the need for individual barcoding, thus reducing experimental complexity and cost reduction.
+
+*Seurat* is a R package used gene expression analysis and visualization of scRNAseq data. 
+
+In this example, we will analyze raw Illumina sequencing data from an experiment involving 96 natural genetic variants of *S.cerevisiae* (non-barcoded) and 9 FY4/5 (transcriptionally-barcoded for identification; control). These strains were cultured and pooled in YPD, a rich growth medium, to investigate differential gene expression among the natural variants in response to nutrient-rich conditions. 
+
+We have divided this vignette in four parts
+
+# Part 1 - Cell Ranger
+
+We'll use Cell Ranger for the pre-processing of raw sequencing reads generated in our experiment. The pre-processing includes the following steps:
+
+## Step 1. Create a reference file specific to S.cerevisiae
+
+We created a custom reference file specific to *S.cerevisiae*. This step involved providing a genome FASTA file and gene annotations in GTF format.
+```{}
+#!/bin/bash
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=20
+#SBATCH --time=8:00:00
+#SBATCH --mem=30GB
+#SBATCH --output=slurm.%j.out
+#SBATCH --error=slurm.%j.err
+#SBATCH --job-name=ADE_count
+#SBATCH --mail-type=END
+#SBATCH --mail-user=aa9679@nyu.edu
+
+  
+module purge
+module load cellranger/7.1.0
+
+cellranger mkref \
+--genome=S.cerevisiae_ref_with_clean_gtf \
+--fasta=Saccharomyces_cerevisiae.R64-1-1.Marker.dna.toplevel.fa \
+--genes=Saccharomyces_cerevisiae.R64-1-1.CLEAN.gtf
+```
+
+## Step 2. Create fastq files 
+
+Raw BCL (binary base call) files from the Illumina sequencer were converted into FASTQ files using the Cell Ranger *mkfastq* module.
+```{}
+#!/bin/sh
+#
+#SBATCH --verbose
+#SBATCH --job-name=mkfastq
+#SBATCH --output=mkfastq.o%j
+#SBATCH --error=mkfastq.e%j
+#SBATCH --time=1:00:00
+#SBATCH --nodes=1
+#SBATCH --tasks-per-node=1
+#SBATCH --cpus-per-task=20
+#SBATCH --mem=30gb
+#SBATCH --mail-type=END
+#SBATCH --mail-user=aa9679@nyu.edu
+
+module purge
+module load cellranger/7.1.0
+
+cellranger mkfastq \
+--id=HH7YWDRX5_fastq \
+--run=/scratch/gencore/out/Gresham/240829_A01097_0313_BHH7YWDRX5 \
+--csv=./samplesheet.csv 
+```
+
+A sample samplesheet.csv looks like 
+```
+Lane,Sample,Index
+1-2,wildyeast_10X,SI-TT-C10
+1-2,wildyeast_dialout,SI-TT-C9
+
+```
+
+Or use the provide merged fastq files, just rename it - showing example of YPD file
+```{}
+#file 1 - Read 1
+/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.1/alignment/merged_files_YPD.1/H23N5DRX5_wildyeast_10X_S1_R1_001.fastq.gz
+#file 2 - Read 2
+/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.1/alignment/merged_files_YPD.1/H23N5DRX5_wildyeast_10X_S1_R2_001.fastq.gz
+```
+
+
+
+## Step 3. Alignment of reads to create bam files
+
+Using the Cell Ranger *count* pipeline, the sequencing reads from the FASTQ files were aligned to the custom *S. cerevisiae* reference genome.This step employed a STAR-based aligner, optimized by 10x Genomics for high performance. The aligned reads were then used to generate a gene-cell expression matrix, where counts of unique molecular identifiers (UMIs) were mapped to specific genes and cells.
+```{}
+#!/bin/bash
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=20
+#SBATCH --time=10:00:00
+#SBATCH --mem=15GB
+#SBATCH --output=slurm.%j.out
+#SBATCH --error=slurm.%j.err
+#SBATCH --job-name=flu_align
+#SBATCH --mail-type=END
+#SBATCH --mail-user=aa9679@nyu.edu
+
+  
+module purge
+module load cellranger/7.1.0
+#make a new directory
+
+#make a new directory
+mkdir -p output_of_alignment_YPD1_with_clean_gtf
+#move into that directory
+cd output_of_alignment_YPD1_with_clean_gtf
+
+#cellranger out to get the reference
+cellranger count --id=run_count \
+--transcriptome=/projects/rps/cgsb/gresham/Akriti/wildyeast1/creating_different_Ref_genomes_for_S288C/customized_ref_genome_with_kan_and_nat_annotations/S.cerevisiae_ref_with_clean_gtf \
+--fastqs=/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.1/alignment/merged_files_YPD.1 \
+--sample=H23N5DRX5_wildyeast_10X \
+--localcores=10 \
+--localmem=210
+
+echo Run is finished
+```
+
+# Part 2 - Demuxlet
+
+After completing the alignment step, we proceeded with strain/genotype identification using *Demuxlet*. 
+
+Demuxlet takes as input single-cell RNA-seq data and a *VCF*(Variant Call Format) file containing the genotype and variant information for a predefined set of genotypes. In our case, we provided a VCF file with the genotype and variant details for all 97 strains. These genotypes are typically derived from bulk DNA sequencing or inferred from known strain sequences.
+
+Demuxlet works by comparing the observed alleles (reads at variant sites) in each cell to the reference genotypes. 
+
+For each cell, it calculates the likelihood of the observed genetic variation matching either a single strain (singlet) or a combination of two strains (doublet). Based on this analysis, Demuxlet classifies cells into the following categories:
+
+1. Singlet: The observed alleles in a cell match only one genotype with high confidence.
+2. Doublet: The alleles suggest contributions from two distinct genotypes, likely caused by two strains sharing the same droplet during sequencing.
+3. Ambiguous: The data provides insufficient or conflicting evidence to confidently assign the cell to a single genotype or a pair of genotypes.
+
+This classification enables accurate strain identification while accounting for potential technical artifacts like doublets and limitations such as ambiguous assignments.
+
+To run demuxlet, we used the *Popscle* repository, a suite of tools designed for population-scale analysis. Running *demuxlet* can be both time- and computationally intensive; however, Popscle provides additional tools, such as *dsc-pileup*, which can significantly reduce the runtime of demuxlet by optimizing data preprocessing. [Visit the Popscle repository](https://github.com/statgen/popscle)
+
+We would recommend creating a singularity container for Popscle so that you get all the dependencies loaded with the repository. 
+
+## Step 1. Pull the docker image for Popscle with singularity
+```{}
+singularity pull docker://vibsinglecellnf/popscle:2021-05-05-da70fc7
+```
+Learn more about singularity: [Singularity - How to Run on HPC](https://crc-docs.abudhabi.nyu.edu/hpc/software/singularity_commands.html)
+
+You will also need to download the github repository for *popscle helper tools*. These are a collection of tools built to filter vcf and bam files such that they only keep relevant information. 
+
+## Step 2. Clone the popscle helper tool git repository
+```{}
+git clone https://github.com/aertslab/popscle_helper_tools.git
+```
+
+## Step 3. Filter the vcf file
+
+### 3a. Import functions
+```{}
+source popscle_helper_tools/filter_vcf_file_for_popscle.sh
+```
+
+### 3b. Merge wild strain vcf with S288C vcf (because we added transcribed barcoded S288C in out pool)
+
+```{}
+#Get the 1011 Matrix - the gvcf file for all natural isolates - annotate it - at the vcf location
+module purge
+module load samtools/intel/1.20
+bgzip -c 1011Matrix_chr.gvcf > 1011Matrix_chr.gvcf.gz
+#then annotate it using 
+tabix -p vcf 1011Matrix_chr.gvcf.gz
+
+
+#vcf file for S288C - we called it DGY3 - at the file location
+bgzip -c DGY3_filtered_snps.ann.vcf > DGY3_filtered_snps.ann.vcf.gz
+tabix -p vcf DGY3_filtered_snps.ann.vcf.gz
+
+```
+
+
+### Merge two vcf files together
+
+```
+bcftools merge -m snps -0 /scratch/cgsb/gresham/Akriti/wildyeast1/data.2/variant_calling_s288c/getting_gvcf/out/snpeff/DGY3_filtered_snps.ann.vcf.gz \
+/scratch/cgsb/gresham/Akriti/wildyeast1/data/the_gvcf_files/1011Matrix_chr.gvcf.gz \
+-o /scratch/cgsb/gresham/Akriti/wildyeast1/data/the_gvcf_files/1011_merged_DGY3_via_script_bcftools.vcf.gz \
+--output-type z
+```
+
+#### 3b.3 subset samples/genotypes from vcf 
+
+This step is necessary only if your VCF file contains variant information for more strains than required for your analysis. For example, our VCF file included strain information for 1000 yeast variants, so we needed to subset it to include only the 96 variants used in our experiment. Additionally, we manually added the VCF data for FY4/5 to this consolidated VCF file. I will explain that process in detail shortly.
+
+The format goes like
+
+subset_samples_from_vcf {names of the strains you want to subset} input_vcf_file > output_vcf_file
+
+```{}
+subset_samples_from_vcf BNV,BQM,ALS,CAE,CGS,AQA,CDT,BRK,BHM,AMP,BHK,BTT,CNK,CNH,BVG,BBQ,BFP,BTG,CLB,BFH,BGD,BGF,BGE,BDN,CBN,CFF,SACE_YAG,SACE_YCF,BDB,BHG,SACE_MAA,AFE,ATS,ATR,AAP,BDL,CPI,CPK,CPN,BDQ,BNC,BMV,BDP,BCK,CBL,AKI,SACE_YCE,CDE,SACE_YBJ,ANN,CQD,CQF,APQ,AKH,BAF,BAM,BAQ,BAG,BAL,CEG,CCQ,CCR,CCS,SACE_YCR,BAK,BAI,CCN,CDL,BMA,AKM,BMB,BMC,SACE_YCY,BAN,BAP,CCD,CCG,CDF,CDH,CDI,AVI,ANH,ANG,SACE_YCU,CCV,SACE_YCM,SACE_YDE,CLI,CLN,CMI,CLP,CGL,CGN,BHQ,BEF,SACE_YCK,DGY3 1011_merged_DGY3_via_script_bcftools.vcf > lines_used_bcftools_merged_DGY3_via_script.vcf
+```
+
+```
+./ refers to current working directory
+\ refers to next line
+
+```
+
+
+
+### 3c. More filtering
+
+Additional filtering includes:
+1. only_keep_snps : filter out INDELs and other mutations 
+2. calculate_AF_AC_AN_values_based_on_genotype_info : Calculate allele frequency (AF), allele count (AC) and total number of alleles (AN) from genotype info of each sample.
+3. filter_out_mutations_missing_genotype_for_one_or_more_samples: Missing genotype (./.) samples have no information availabe so we filter them out
+4. filter_out_mutations_homozygous_reference_in_all_samples: If the mutation position contains the reference for both alleles in all samples, the mutation is not informative
+```{}
+only_keep_snps lines_used_bcftools_merged_DGY3_via_script.vcf \
+| calculate_AF_AC_AN_values_based_on_genotype_info \
+| filter_out_mutations_missing_genotype_for_one_or_more_samples \
+| filter_out_mutations_homozygous_reference_in_all_samples \
+| filter_out_mutations_homozygous_in_all_samples > filteredtill_mutations_homo_in_all.vcf
+
+```
+
+### 3d. Same chromosome format in vcf and bam files
+
+This step is only necessary if chromosome format in vcf file is not consistent with the bam file. If not, update the chromosome names in one of the files. Following code is a python script
+```{}
+chr_dict = [
+   ('chromosome1','I'),
+   ('chromosome2','II'),
+   ('chromosome3','III'),
+   ('chromosome4','IV'),
+   ('chromosome5','V'),
+   ('chromosome6','VI'),
+   ('chromosome7','VII'),
+   ('chromosome8','VIII'),
+   ('chromosome9','IX'),
+   ('chromosome10','X'),
+   ('chromosome11','XI'),
+   ('chromosome12','XII'),
+   ('chromosome13','XIII'),
+   ('chromosome14','XIV'),
+   ('chromosome15','XV'),
+   ('chromosome16','XVI')
+        ]
+
+# Sort the dictionary by the length of the chromosome names (keys) in descending order
+chr_dict_sorted = sorted(chr_dict, key=lambda x: len(x[0]), reverse=True)
+
+with open('./output.vcf', 'r') as f:
+    for line in f:
+        line = line.strip('\n')
+        for k,v in chr_dict_sorted:
+            line = line.replace(k, v)
+
+        print(line)
+```
+
+
+## Step 4. Filter the bam file
+
+By filtering the bam file we only keep SNPs that overlap with the SNPs in the vcf file and only keep reads which have cell barcode from the cell barcode list. 
+
+You need to load the *filter_bam_file_for_popscle_dsc_pileup.sh* from *popscle helper tool* and also load *Samtools*, *bcftools* and *bedtools* modules.
+
+The input files for filtering requires: 
+
+```
+./path_to_filter_bam_file \
+./bam_file \
+./cell_barcodes_list \
+./filtered_vcf \
+./output_bam_file
+
+```
+
+```{}
+./popscle_helper_tools/filter_bam_file_for_popscle_dsc_pileup.sh \
+./output_of_alignment/run_count/outs/possorted_genome_bam.bam \ 
+./output_of_alignment/run_count/outs/filtered_feature_bc_matrix/barcodes.tsv \ 
+./output.vcf \
+filtered_for_demuxlet.bam
+
+```
+
+## Step 5. Running dsc-pileup
+
+We ran dsc-pileup before running demuxlet. dsc-pileup is a software tool to pileup reads and corresponding base quality for each overlapping SNPs and each barcode. By using pileup files, it would allow us to run demuxlet pretty fast multiple times without going over the BAM file again.
+
+This script requires popscle singularity image bam file, vcf file, cell barcode files and a output file
+```{}
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=3
+#SBATCH --cpus-per-task=10
+#SBATCH --time=96:00:00
+#SBATCH --mem=100GB
+#SBATCH --output=slurm.%j.out
+#SBATCH --error=slurm.%j.err
+#SBATCH --job-name=dsc-pileup
+#SBATCH --mail-type=END
+#SBATCH --mail-user=aa9679@nyu.edu
+
+
+  
+module purge
+module load samtools/intel/1.14 
+module load bedtools/intel/2.29.2 
+
+singularity exec /scratch/cgsb/gresham/Akriti/wildyeast1/code/popscle_2021-05-05-da70fc7.sif popscle dsc-pileup \
+--sam /scratch/aa9679/SingleCell_cerevisiae/filtered_for_demuxlet.bam \
+--vcf ./output.vcf \
+--group-list ./outs/filtered_feature_bc_matrix/barcodes.tsv \
+--out samples_to_demuxlet.pileup 
+```
+
+The output files will be in a directory corresponding to each cell barcode and will consist of:
+
+```
+1. The [prefix].cel  (for e.g., samples_to_demuxlet.cel) file contains the relation between numerated barcode ID and barcode. Also, it contains the number of SNP and number of UMI for each barcoded droplet.
+2. The [prefix].plp file contains the overlapping SNP and the corresponding read and base quality for each barcode ID.
+3. The [prefix].var file contains the position, reference allele and allele frequency for each SNP.
+4. The [prefix].umi file contains the position covered by each umi.
+```
+## Step 6. Running demuxlet
+```{}
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=3
+#SBATCH --cpus-per-task=10
+#SBATCH --time=96:00:00
+#SBATCH --mem=100GB
+#SBATCH --output=slurm.%j.out
+#SBATCH --error=slurm.%j.err
+#SBATCH --job-name=dsc-pileup
+#SBATCH --mail-type=END
+#SBATCH --mail-user=aa9679@nyu.edu
+
+
+  
+module purge
+module load samtools/intel/1.14 
+module load bedtools/intel/2.29.2
+
+singularity exec /scratch/cgsb/gresham/Akriti/wildyeast1/code/popscle_2021-05-05-da70fc7.sif popscle demuxlet \
+--plp ./samples_to_demuxlet.pileup \
+--field GT \
+--vcf 97vsADE.SNPs_chr_re_filtered.vcf \
+--group-list ./outs/filtered_feature_bc_matrix/barcodes.tsv \
+--out output_demuxlet
+```
+
+This will give you an *output_demuxlet.best* with best guess of the sample identity and detailed statistics to reach the best guess. The column of content for the demuxlet output contains:
+```
+BARCODE - Cell barcode for the cell that is being assigned in this row.
+NUM.SNPS - The total number of variants overlapping with any read in the droplet.
+NUM.READS - The total number of reads overlapping with variant sites for each droplet.
+DROPLET.TYPE - Inferred droplet type: {SNG:singlet, DBL:doublet, AMB: ambiguous}.
+BEST.GUESS - The best assignment for sample ID. e.g. , for DBL.
+BEST.LLK - The log(likelihood that the ID from BEST.GUESS is the correct assignment).
+NEXT.GUESS - The next best assignment for sample ID.
+NEXT.LLK - The log(likelihood that the ID from NEXT.GUESS is the correct assignment).
+DIFF.LLK.BEST.NEXT - The log-likelihood difference between NEXT.LLK and BEST.LLK.
+BEST.POSTERIOR - The posterior probability of the best assignment.
+SNG.POSTERIOR - The posterior probability of being singlet.
+SNG.BEST.GUESS - The best singlet assignment for sample ID.
+SNG.BEST.LLK - The log(likelihood that the ID from SNG.BEST.GUESS is the correct singlet assignment).
+SNG.NEXT.GUESS - The next best singlet assignment for sample ID.
+SNG.NEXT.LLK - The log(likelihood that the ID from SNG.NEXT.GUESS is the correct singlet assignment).
+SNG.ONLY.POSTERIOR - The posterior probabiltiy of the singlet assignment given it is singlet.
+DBL.BEST.GUESS - The best doublet assignment for sample ID.
+DBL.BEST.LLK - The log(likelihood that the ID from DBL.BEST.GUESS is the correct assignment).
+DIFF.LLK.SNG.DBL - The log-likelihood difference between SNG.BEST.LLK and DBL.BEST.LLK.
+```
+
+## Aproach 2. Parallel processing at dsc pileup and demuxlet step
+
+In my analysis, the dsc-pileup step was taking an exceptionally long time to run. I encountered issues with both time and memory, likely due to the large size of my BAM file, which was 27GB and contained data for approximately 28,000 cells. After multiple trials, we decided to switch to an alternative approach: 
+
+Splitting the BAM file by cell barcodes, creating one BAM file per cell. This allowed us to take advantage of parallel processing, significantly improving efficiency and reducing the runtime. I don't need to filter the bam file in this case
+
+Note: 
+```
+Cell barcodes in a BAM file for single-cell data are unique sequences added during library preparation to identify and associate sequencing reads with individual cells originating from a single droplet.
+```
+
+## Step 1. Splitting the bam file for parallel processing
+
+### Step 1a. Split cell barcodes
+
+This code will generate 48 text files each with 590 barcodes (the last one can be different). We do this so that we can parallelize the extraction of reads per barcode across 49 jobs.Each job will take one of the 49 barcode files and generate the bam files for those 590 barcodes.
+
+Python script:
+```{}
+def split_file(filename, lines_per_file, output_prefix):
+    with open(filename, 'r') as file:
+        lines = file.readlines()
+    
+    total_files = len(lines) // lines_per_file
+    if len(lines) % lines_per_file != 0:
+        total_files += 1
+    for i in range(total_files):
+        with open(f"{output_prefix}_{i}.txt", 'w') as file:
+            file.writelines(lines[i*lines_per_file:(i+1)*lines_per_file])
+
+# Call the function to split 'cell_barcodes.txt' into files with prefix 'cell_barcodes'
+split_file('../alignment/output_of_alignment_sc.2_with_cus_ref/run_count/outs/filtered_feature_bc_matrix/barcodes.tsv', 536, 'barcodes/cell_barcodes')
+```
+
+### Step 2b. Split the bam files
+
+Python script split_bam.py. This script will split the bam files into bam files per cell barcode. You can call this script by execute main.sh (Next chunk). 
+
+Please note: This path */scratch/cgsb/gencore/mk5636/yeast_strain_analysis/subset-bam_linux* also has dependcies for subset-bam_linux so if you try to copy it, it will throw you an error 
+```{}
+import subprocess
+import os
+import sys
+
+index = int(sys.argv[1])
+
+# Path to the 'cell_barcodes' file
+cell_barcodes_path = f"barcodes/cell_barcodes_{index}.txt"
+
+#output directory for bam file
+output_directory = "bams_all"
+os.makedirs(output_directory, exist_ok=True)
+
+# Iterate through each line in the file
+with open(cell_barcodes_path, 'r') as file:
+    for line in file:
+        barcode = line.strip()
+        
+        # Create a temporary file for the current barcode
+        temp_filename = f"temp_barcode_{index}_{barcode}.txt"
+        with open(temp_filename, 'w') as temp_file:
+            temp_file.write(barcode)
+        
+        # Construct the output BAM file name
+        output_bam = os.path.join(output_directory, f"{barcode}.bam")
+        
+        # Run the subset-bam command
+        command = f"/scratch/cgsb/gencore/mk5636/yeast_strain_analysis/subset-bam_linux --bam ../alignment/output_of_alignment_sc.2_with_cus_ref/run_count/outs/possorted_genome_bam.bam --cell-barcodes {temp_filename} --out-bam {output_bam} --cores 20"
+        subprocess.run(command, shell=True)
+        
+        # Remove the temporary file
+        os.remove(temp_filename)
+
+```
+#### Bash script main.sh.
+When you run main.sh, it will call split_bam.py. This is an array job which will spawn 49 different jobs, one for each barcode file. These steps will allow you to generate the ~26k bam files in 3-4 hours vs 2-3 days.
+```{}
+#!/bin/sh
+#
+#SBATCH --verbose
+#SBATCH --job-name=YPDsplit_bam
+#SBATCH --output=split_bam.o%j
+#SBATCH --error=split_bam.e%j
+#SBATCH --time=24:00:00
+#SBATCH --nodes=1
+#SBATCH --tasks-per-node=2
+#SBATCH --cpus-per-task=6
+#SBATCH --mem=5gb
+#SBATCH --array=0-48
+
+module purge
+python3 split_bam.py $SLURM_ARRAY_TASK_ID
+```
+
+### Step 3. Parallel extraction of pileup reads
+Again, dsc-pileup is a software tool to pileup reads and corresponding base quality for each overlapping SNPs and each barcode. This python code will output multiple files that consist information for pileup reads and corresponding base quality for each bam files. You can call this code using parrallel_pileup.sh (next chunk)
+
+This script requires popscle singularity image bam file, vcf file, cell barcode files and a output file
+```{}
+import subprocess
+import os
+import sys
+
+# Get the index from command line argument
+index = int(sys.argv[1])
+
+# Directory where barcodes are stored
+# Path to the 'cell_barcodes' file, which will also be used as the group-list
+cell_barcodes_path = f"../split_bam/barcodes/cell_barcodes_{index}.txt"
+
+# Constants for the popscle command
+popscle_sif = "/scratch/cgsb/gresham/Akriti/wildyeast1/code/popscle_2021-05-05-da70fc7.sif"
+vcf_file = "/scratch/aa9679/SingleCell_cerevisiae/data.2/less_stringent_demuxlet/filteredtill_mutations_homo_in_all.vcf"
+
+# Directory where BAM files are stored
+bam_dir = "../split_bam/bams_all"
+
+# Output directory for pileup files
+output_base_dir = "./pileup_scgal2"
+os.makedirs(output_base_dir, exist_ok=True)
+
+# Open and process each barcode in the file
+try:
+    with open(cell_barcodes_path, 'r') as barcode_file:
+        for line in barcode_file:
+            barcode = line.strip()
+
+            # Path to the associated BAM file for the barcode
+            bam_filename = f"{bam_dir}/{barcode}.bam"
+
+            # Create a subdirectory for each barcode inside the output directory
+            barcode_output_dir = f"{output_base_dir}/{barcode}"
+            os.makedirs(barcode_output_dir, exist_ok=True)
+
+            # Construct the output pileup file path
+            output_pileup = f"{barcode_output_dir}/samples_to_demuxlet.pileup"
+
+            # Singularity popscle dsc-pileup command
+            command = f"singularity exec {popscle_sif} popscle dsc-pileup --sam {bam_filename} --vcf {vcf_file} --group-list {cell_barcodes_path} --out {output_pileup}"
+
+            # Run the command
+            subprocess.run(command, shell=True)
+
+except FileNotFoundError:
+    print(f"Barcode file {cell_barcodes_path} not found.")
+```
+#### This script parallel_pileup.sh calls the above script
+```{}
+#!/bin/sh
+#
+#SBATCH --verbose
+#SBATCH --job-name=YPD_pileup
+#SBATCH --output=split_bam_pileup.o%j
+#SBATCH --error=split_bam_pileup.e%j
+#SBATCH --time=24:00:00
+#SBATCH --nodes=1
+#SBATCH --tasks-per-node=1
+#SBATCH --cpus-per-task=20
+#SBATCH --mem=5gb
+#SBATCH --array=0-48
+#SBATCH --mail-type=END
+#SBATCH --mail-user=aa9679@nyu.edu
+
+module purge
+python3 parallel_pileup.py $SLURM_ARRAY_TASK_ID
+```
+
+By parallel processing we significantly reduce the run time for dsc-pileup from 96 hrs to approx 10hrs and only 5gb per job also helping with the long wait time when running in hpc. 
+
+### Step 4. Parallel processing to run demuxlet
+
+Similarly, this python code will output multiple *.best* files that consist best guess of the sample/cellbarcode identity and detailed statistics to reach the best guess for each bam files. You can call this code using parrallel_demuxlet.sh (next chunk)
+```{}
+import subprocess
+import os
+import sys
+
+# Get the index from the command line argument
+index = int(sys.argv[1])
+
+# Directory where barcodes are stored
+cell_barcodes_path = f"../split_bam/barcodes/cell_barcodes_{index}.txt"
+
+# Full barcode list path
+full_barcode_list = "../alignment/output_of_alignment_sc.2_with_cus_ref/run_count/outs/filtered_feature_bc_matrix/barcodes.tsv"
+
+# Constants for the popscle demuxlet command
+popscle_sif = "../../../code/popscle_2021-05-05-da70fc7.sif"
+vcf_file = "/scratch/aa9679/SingleCell_cerevisiae/data.2/less_stringent_demuxlet/filteredtill_mutations_homo_in_all.vcf"
+
+# Directory where pileup files are stored
+pileup_base_dir = "../pileup/pileup_scglu2/"
+
+# New directory for demuxlet output
+output_base_dir = "./demuxlet_scglu2"
+os.makedirs(output_base_dir, exist_ok=True)
+
+# Ensure the VCF file exists
+if not os.path.exists(vcf_file):
+    sys.exit(f"VCF file not found: {vcf_file}")
+
+# Ensure the full barcode list file exists
+if not os.path.exists(full_barcode_list):
+    sys.exit(f"Full barcode list file not found: {full_barcode_list}")
+
+# Open and process each barcode in the file
+try:
+    with open(cell_barcodes_path, 'r') as barcode_file:
+        for line in barcode_file:
+            barcode = line.strip()
+
+            # Construct the path to the required pileup file
+            plp_file = f"{pileup_base_dir}/{barcode}/samples_to_demuxlet.pileup"
+
+            # Print the path for debugging
+            print(f"Checking for pileup file: {plp_file}")
+
+            # Verify that the required pileup file exists
+            if not os.path.exists(plp_file + '.plp.gz'):
+                print(f"Missing pileup file for barcode: {barcode}")
+                continue
+
+
+            # Create a directory to store demuxlet output for this barcode in the new output directory
+            barcode_output_dir = f"{output_base_dir}/{barcode}"
+            os.makedirs(barcode_output_dir, exist_ok=True)
+
+            # Construct the output demuxlet TSV file path in the new output directory
+            output_demuxlet = f"{barcode_output_dir}/demuxlet_output.tsv"
+
+            # Singularity popscle demuxlet command with the plp file only
+            demuxlet_command = (
+                f"singularity exec {popscle_sif} popscle demuxlet "
+                f"--plp {plp_file} --field GT --vcf {vcf_file} "
+                f"--group-list {full_barcode_list} --out {output_demuxlet} "
+            )
+
+            # Print the command for debugging
+            print(f"Running demuxlet command: {demuxlet_command}")
+
+            # Run the demuxlet command
+            result = subprocess.run(demuxlet_command, shell=True, capture_output=True, text=True)
+
+            # Check if the command was successful
+            if result.returncode != 0:
+                print(f"Error running demuxlet for barcode {barcode}:\n{result.stderr}")
+            else:
+                print(f"Demuxlet completed successfully for barcode {barcode}")
+
+except FileNotFoundError as e:
+    print(f"Error: {e}")
+```
+#### This script parallel_demuxlet.sh calls the above script
+```{}
+#!/bin/sh
+#
+#SBATCH --verbose
+#SBATCH --job-name=YPDdemuxlet
+#SBATCH --output=YPDdemuxlet.o%j
+#SBATCH --error=YPDdemuxlet.e%j
+#SBATCH --time=24:00:00
+#SBATCH --nodes=1
+#SBATCH --tasks-per-node=1
+#SBATCH --cpus-per-task=20
+#SBATCH --mem=10gb
+#SBATCH --array=0-48
+#SBATCH --mail-type=END
+#SBATCH --mail-user=aa9679@nyu.edu
+
+module purge
+python3 demuxlet.py $SLURM_ARRAY_TASK_ID
+
+```
+
+This step allows you to get demuxlet output in around 9-10hrs for 9gb memory per job
+
+### Step 5. Merge the demuxlet output
+Lastly, merge the best.guess output per bamfile into one file to analyse data. 
+```{}
+find demuxlet_scglu2 -name "demuxlet_output.tsv.best" -exec awk 'NR == 1 {print} $1 != "INT_ID" {print}' {} + > merged_demuxlet_output_scglu2.tsv
+```
