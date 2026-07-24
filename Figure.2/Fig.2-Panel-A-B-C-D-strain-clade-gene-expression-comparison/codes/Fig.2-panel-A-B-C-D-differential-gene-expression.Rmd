@@ -1,0 +1,661 @@
+---
+title: "Fig.2-panel-A-B-C-D-gene-expression-comparison"
+output: html_document
+---
+
+#I am only showing YPD.1 data in the main paper.
+
+#Panel A: Heatmap of average gene expression within strains - does it cluster by clade?
+#Panel B:Dimension reduction plot of gene expression within strains - does it cluster by clade?
+#Panel C:Focused examples of differential gene expression - GAL genes?, NCR genes?
+#Panel D:Is within strain gene expression correlation/anticorrelation conserved among strains?
+
+
+```{r}
+# ============================================================
+# Figure 2 — Multiplexed scRNA-seq provides an efficient means
+# of differential gene expression analysis (YPD.1 only)
+#
+# Panel A: strain-level DEG heatmap — does it cluster by clade?
+# Panel B: dimension reduction on DEGs — does it cluster by clade?
+# Panel C: focused DGE examples (GAL / NCR), GO-ORA-selected
+# Panel D: gene-gene correlation/anticorrelation, conserved across strains?
+# ============================================================
+
+library(DESeq2)
+library(tidyverse)
+library(pheatmap)
+library(circlize)
+library(RColorBrewer)
+library(clusterProfiler)
+library(org.Sc.sgd.db)
+library(AnnotationDbi)
+library(Rtsne)
+library(vegan)
+library(cowplot)
+library(patchwork)
+
+
+select <- dplyr::select
+filter <- dplyr::filter
+first  <- dplyr::first
+
+BASE    <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all"
+OUT_DIR <- "../results"
+dir.create(OUT_DIR, showWarnings = FALSE, recursive = TRUE)
+set.seed(42)
+
+pub_theme <- theme_classic(base_size = 9) +
+  theme(
+    axis.title = element_text(size = 9,  face = "bold", color = "black"),
+    axis.text  = element_text(size = 8,  color = "black"),
+    axis.line  = element_line(linewidth = 0.4, color = "black"),
+    axis.ticks = element_line(linewidth = 0.35, color = "black"),
+    plot.title = element_text(size = 9,  face = "bold", hjust = 0.5),
+    panel.grid       = element_blank(),
+    plot.background  = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA)
+  )
+```
+
+```{r}
+# ── Load, ORF-convert, filter to nuclear standard chromosomes ─────────
+raw_counts <- read.table(
+  file.path(BASE, "YPD.1/fastlmm/data/pheno_data/pseudobulk_reliable_transcripts_YPD.txt"),
+  header = TRUE, sep = "\t", row.names = 1, check.names = FALSE, quote = ""
+)
+cat("Loaded:", nrow(raw_counts), "genes x", ncol(raw_counts), "strains\n")
+
+all_custom_gene_annotations <- read.csv(
+  "/scratch/aa9679/SingleCell_cerevisiae/Gene_exp_analysis/yeast_custom_annotations.csv"
+)
+
+common_to_orf <- all_custom_gene_annotations %>%
+  filter(!is.na(gene_name), !is.na(gene_id)) %>%
+  distinct(gene_name, gene_id) %>%
+  deframe()
+
+expr_gene_ids <- rownames(raw_counts)
+is_orf <- grepl("^Y[A-Z]{2}\\d{3}[WC](-[A-Z])?$", expr_gene_ids)
+expr_orf_ids <- ifelse(
+  is_orf, expr_gene_ids,
+  ifelse(expr_gene_ids %in% names(common_to_orf), common_to_orf[expr_gene_ids], expr_gene_ids)
+)
+not_converted <- expr_gene_ids[!is_orf & !expr_gene_ids %in% names(common_to_orf)]
+rownames(raw_counts) <- expr_orf_ids
+raw_counts <- raw_counts[!rownames(raw_counts) %in% not_converted, ]
+
+gene_location <- all_custom_gene_annotations %>%
+  filter(type == "CDS", !is.na(gene_id)) %>%
+  group_by(gene_id) %>%
+  summarise(gene_name = first(gene_name), chr = first(seqnames), .groups = "drop")
+
+standard_orfs <- gene_location %>% filter(!chr %in% c("Mito", "Marker")) %>% pull(gene_id)
+raw_counts    <- raw_counts[rownames(raw_counts) %in% standard_orfs, ]
+raw_counts_mat <- round(as.matrix(raw_counts))
+cat("After ORF conversion + chromosome filter:", nrow(raw_counts_mat), "genes\n")
+
+# ORF -> common name lookup (custom annotation, SGD fallback)
+orf_to_name_custom <- all_custom_gene_annotations %>%
+  filter(!is.na(gene_id), !is.na(gene_name)) %>%
+  distinct(gene_id, gene_name) %>%
+  deframe()
+
+orfs_missing_name <- rownames(raw_counts_mat)[!rownames(raw_counts_mat) %in% names(orf_to_name_custom)]
+sgd_lookup <- tryCatch(
+  AnnotationDbi::select(org.Sc.sgd.db, keys = orfs_missing_name,
+                        columns = "GENENAME", keytype = "ORF"),
+  error = function(e) data.frame(ORF = character(), GENENAME = character())
+)
+orf_to_name_sgd <- sgd_lookup %>% filter(!is.na(GENENAME)) %>% distinct(ORF, GENENAME) %>% deframe()
+orf_to_name <- c(orf_to_name_custom,
+                 orf_to_name_sgd[!names(orf_to_name_sgd) %in% names(orf_to_name_custom)])
+
+# ── Clade metadata ──────────────────────────────────────────────────
+strains_sc <- read.csv(file.path(BASE, "StrainsforSC-RNAseq.csv"), header = TRUE)
+
+sample_meta <- strains_sc %>%
+  select(strain = Standardized.name, clade = Clades) %>%
+  mutate(clade = str_trim(clade)) %>%
+  filter(strain %in% colnames(raw_counts_mat)) %>%
+  distinct(strain, clade) %>%
+  arrange(match(strain, colnames(raw_counts_mat))) %>%
+  column_to_rownames("strain")
+
+stopifnot(all(rownames(sample_meta) == colnames(raw_counts_mat)))
+cat("Strains with clade annotation:", nrow(sample_meta), "| clades:",
+    length(unique(sample_meta$clade)), "\n")
+
+all_clade_levels <- sort(unique(sample_meta$clade))
+all_clade_levels <- all_clade_levels[!is.na(all_clade_levels)]
+clade_colors <- setNames(
+  colorRampPalette(brewer.pal(12, "Paired"))(length(all_clade_levels)),
+  all_clade_levels
+)
+```
+
+```{r}
+# ── VST on the full matrix (used by Panels A, B, D) ────────────────
+dds_full <- DESeqDataSetFromMatrix(countData = raw_counts_mat, colData = sample_meta, design = ~ 1)
+vst_mat  <- SummarizedExperiment::assay(DESeq2::vst(dds_full, blind = TRUE))
+cat("VST matrix:", nrow(vst_mat), "genes x", ncol(vst_mat), "strains\n")
+```
+```{r}
+# ── Reusable ggplot heatmap (replaces pheatmap for Panels A & D) ────────
+# Full control over axis titles / label angle / font size, and prints
+# inline like any other ggplot object.
+
+plot_heatmap_gg <- function(mat, xlab = NULL, ylab = NULL,
+                            show_colnames = TRUE, show_rownames = FALSE,
+                            low = "#2166AC", mid = "white", high = "#B2182B",
+                            limits = NULL, x_font_size = 6, y_font_size = 6) {
+
+  row_ord <- hclust(dist(mat),   method = "ward.D2")$order
+  col_ord <- hclust(dist(t(mat)), method = "ward.D2")$order
+  mat_ord <- mat[row_ord, col_ord, drop = FALSE]
+
+  df <- as.data.frame(mat_ord) %>%
+    rownames_to_column("row_id") %>%
+    pivot_longer(-row_id, names_to = "col_id", values_to = "value") %>%
+    mutate(row_id = factor(row_id, levels = rownames(mat_ord)),
+          col_id = factor(col_id, levels = colnames(mat_ord)))
+
+  if (is.null(limits)) {
+    m <- max(abs(mat), na.rm = TRUE)
+    limits <- c(-m, m)
+  }
+
+  p <- ggplot(df, aes(x = col_id, y = row_id, fill = value)) +
+    geom_tile() +
+    scale_fill_gradient2(low = low, mid = mid, high = high, midpoint = 0,
+                        limits = limits, oob = scales::squish, name = "z-score") +
+    labs(x = xlab, y = ylab) +
+    theme_minimal(base_size = 10) +
+    theme(
+      axis.text.x  = if (show_colnames) element_text(angle = 90, hjust = 1, vjust = 0.5, size = x_font_size) else element_blank(),
+      axis.text.y  = if (show_rownames) element_text(size = y_font_size) else element_blank(),
+      axis.title   = element_text(face = "bold", size = 10),
+      axis.ticks   = element_blank(),
+      panel.grid   = element_blank()
+    )
+
+  list(plot = p, col_order = colnames(mat_ord), row_order = rownames(mat_ord))
+}
+
+# Thin clade-colored strip, x-axis aligned to a heatmap's column order
+make_clade_strip <- function(col_order, sample_meta, clade_colors) {
+  ann_df <- sample_meta %>%
+    rownames_to_column("strain") %>%
+    filter(strain %in% col_order) %>%
+    mutate(strain = factor(strain, levels = col_order))
+
+  ggplot(ann_df, aes(x = strain, y = 1, fill = clade)) +
+    geom_tile() +
+    scale_fill_manual(values = clade_colors, na.value = "grey90", name = "Clade") +
+    theme_void() +
+    theme(legend.position = "right")
+}
+```
+
+
+
+
+```{r}
+# ── Per-clade DGE (design ~ group), clades with >=2 strains only ──────
+run_clade_dge <- function(clade_of_interest, counts_mat, meta,
+                          padj_thresh = 0.05, lfc_thresh = 0.3) {
+  n_focal <- sum(meta$clade == clade_of_interest, na.rm = TRUE)
+  if (n_focal < 2) return(NULL)
+
+  meta_de <- meta %>%
+    mutate(group = factor(ifelse(clade == clade_of_interest, "focal", "rest"),
+                          levels = c("rest", "focal")))
+  dds <- DESeqDataSetFromMatrix(countData = counts_mat, colData = meta_de, design = ~ group)
+  dds <- DESeq(dds, quiet = TRUE)
+  res <- results(dds, contrast = c("group", "focal", "rest"), alpha = padj_thresh)
+
+  as.data.frame(res) %>%
+    rownames_to_column("gene") %>%
+    filter(!is.na(padj)) %>%
+    mutate(
+      gene_name = ifelse(gene %in% names(orf_to_name), orf_to_name[gene], gene),
+      direction = case_when(
+        padj < padj_thresh & log2FoldChange >  lfc_thresh ~ "Upregulated",
+        padj < padj_thresh & log2FoldChange < -lfc_thresh ~ "Downregulated",
+        TRUE ~ "NS"),
+      clade = clade_of_interest, n_focal = n_focal)
+}
+
+all_clades  <- sort(unique(sample_meta$clade)); all_clades <- all_clades[!is.na(all_clades)]
+dge_results <- lapply(all_clades, run_clade_dge, counts_mat = raw_counts_mat, meta = sample_meta)
+names(dge_results) <- all_clades
+dge_results <- Filter(Negate(is.null), dge_results)
+dge_combined <- bind_rows(dge_results)
+
+sig_degs <- dge_combined %>% filter(direction != "NS") %>% pull(gene) %>% unique()
+degs_in_matrix <- intersect(sig_degs, rownames(vst_mat))
+cat("Clades tested:", length(dge_results), "| unique DEGs across clades:", length(degs_in_matrix), "\n")
+
+
+```
+
+```{r}
+# ── GO ORA per clade — used to select Panel C's gene set ──────────────
+run_ora <- function(genes, universe, keytype = "ORF") {
+  if (length(genes) < 5) return(NULL)
+  enrichGO(gene = genes, universe = universe, OrgDb = org.Sc.sgd.db,
+           keyType = keytype, ont = "BP", pAdjustMethod = "BH",
+           pvalueCutoff = 0.05, qvalueCutoff = 0.2, readable = FALSE)
+}
+
+universe_genes <- unique(dge_combined$gene)
+ora_results <- lapply(names(dge_results), function(cl) {
+  list(up   = run_ora(dge_results[[cl]]$gene[dge_results[[cl]]$direction == "Upregulated"],   universe_genes),
+       down = run_ora(dge_results[[cl]]$gene[dge_results[[cl]]$direction == "Downregulated"], universe_genes))
+})
+names(ora_results) <- names(dge_results)
+
+ora_combined <- lapply(names(ora_results), function(cl) {
+  bind_rows(
+    if (!is.null(ora_results[[cl]]$up))   as.data.frame(ora_results[[cl]]$up)   %>% mutate(direction = "Upregulated",   clade = cl),
+    if (!is.null(ora_results[[cl]]$down)) as.data.frame(ora_results[[cl]]$down) %>% mutate(direction = "Downregulated", clade = cl)
+  )
+}) %>% bind_rows()
+
+write_csv(ora_combined, file.path(OUT_DIR, "Fig2_clade_GO_ORA_all.csv"))
+
+# Search enriched BP terms for galactose- / nitrogen-catabolite-repression-related
+# descriptions. Only the regulon(s) that actually show enrichment get plotted.
+gal_hits <- ora_combined %>% filter(str_detect(tolower(Description), "galactose"))
+ncr_hits <- ora_combined %>% filter(str_detect(tolower(Description),
+                          "nitrogen catabolite|allantoin|urea catabolic|nitrogen compound catabolic"))
+
+cat("GO terms matching GAL regulon:", nrow(gal_hits), "\n")
+cat("GO terms matching NCR regulon:", nrow(ncr_hits), "\n")
+
+# Canonical regulon members, as fallback if ORA finds nothing for a regulon
+# (e.g. too few DEGs survive FDR in any clade) — intersected with detected genes.
+gal_canonical_names <- c("GAL1","GAL2","GAL3","GAL4","GAL7","GAL10","GAL80")
+ncr_canonical_names <- c("MEP1","MEP2","GAP1","DAL5","DUR1,2","DUR3","PUT1","PUT4","GLN1","GLN3","GAT1")
+
+name_to_orf <- setNames(names(orf_to_name), orf_to_name)  # invert lookup
+
+resolve_focus_genes <- function(go_hits, canonical_names) {
+  from_go <- if (nrow(go_hits) > 0) unique(unlist(str_split(go_hits$geneID, "/"))) else character(0)
+  from_canonical <- intersect(name_to_orf[canonical_names], rownames(vst_mat))
+  genes <- union(intersect(from_go, rownames(vst_mat)), from_canonical)
+  genes
+}
+
+gal_focus_genes <- resolve_focus_genes(gal_hits, gal_canonical_names)
+ncr_focus_genes <- resolve_focus_genes(ncr_hits, ncr_canonical_names)
+cat("GAL focus genes resolved:", length(gal_focus_genes), "\n")
+cat("NCR focus genes resolved:", length(ncr_focus_genes), "\n")
+```
+```{r}
+# ── Panel A: strain-level DEG heatmap, clade strip, legend fixed ───────
+vst_degs_strain <- vst_mat[degs_in_matrix, , drop = FALSE]
+scaled_A <- t(scale(t(vst_degs_strain)))
+scaled_A[scaled_A >  3] <-  3
+scaled_A[scaled_A < -3] <- -3
+
+hm_A   <- plot_heatmap_gg(scaled_A, xlab = "Strain", ylab = "Gene",
+                          show_colnames = TRUE, show_rownames = FALSE,
+                          limits = c(-3, 3), x_font_size = 6)
+strip_A <- make_clade_strip(hm_A$col_order, sample_meta, clade_colors)
+
+# guides = "collect" pulls both plots' legends (clade fill + z-score fill)
+# into one column on the right, instead of each plot fighting for its own
+# legend space — this is what was pushing the clade legend off-panel before.
+fig2A <- (strip_A / hm_A$plot) +
+  plot_layout(heights = c(0.05, 1), guides = "collect") &
+  theme(legend.position = "right")
+
+print(fig2A)
+ggsave(file.path(OUT_DIR, "Fig2A_strain_DEG_heatmap.pdf"), fig2A, width = 10, height = 7, units = "in")
+```
+
+
+
+
+
+```{r}
+# ── Panel B: t-SNE, no title label, no gene-count annotation ───────────
+tsne_input <- t(vst_mat[degs_in_matrix, , drop = FALSE])
+set.seed(42)
+tsne_res <- Rtsne(tsne_input, dims = 2,
+                  perplexity = min(15, floor((nrow(tsne_input) - 1) / 3)),
+                  max_iter = 1000, check_duplicates = FALSE, verbose = FALSE)
+
+tsne_df <- data.frame(tSNE1 = tsne_res$Y[, 1], tSNE2 = tsne_res$Y[, 2],
+                      strain = rownames(tsne_input)) %>%
+  left_join(sample_meta %>% rownames_to_column("strain"), by = "strain")
+
+centroids_B <- tsne_df %>% filter(!is.na(clade)) %>%
+  group_by(clade) %>% summarise(tSNE1 = mean(tSNE1), tSNE2 = mean(tSNE2), n = n(), .groups = "drop") %>%
+  filter(n >= 2)
+
+fig2B <- ggplot() +
+  geom_point(data = filter(tsne_df, is.na(clade)), aes(tSNE1, tSNE2),
+            shape = 1, size = 2, color = "grey50") +
+  geom_point(data = filter(tsne_df, !is.na(clade)), aes(tSNE1, tSNE2, color = clade),
+            size = 2.3, alpha = 0.85) +
+  ggrepel::geom_text_repel(data = centroids_B, aes(tSNE1, tSNE2, label = clade),
+                           size = 2.4, fontface = "bold", color = "black",
+                           max.overlaps = 20, segment.size = 0.3) +
+  scale_color_manual(values = clade_colors, na.value = "white", guide = "none") +
+  labs(x = "t-SNE 1", y = "t-SNE 2") +
+  pub_theme
+
+print(fig2B)
+ggsave(file.path(OUT_DIR, "Fig2B_tsne_clade.pdf"), fig2B, width = 4.2, height = 4, units = "in")
+```
+
+```{r}
+# ── Panel C1: GAL and NCR as two SEPARATE figures, 3 facets/line, ──────
+# shared y-axis within each figure (fixed scale, not free_y).
+
+plot_focus_regulon <- function(genes, regulon_label) {
+  if (length(genes) == 0) return(NULL)
+
+  df <- as.data.frame(t(vst_mat[genes, , drop = FALSE])) %>%
+    rownames_to_column("strain") %>%
+    pivot_longer(-strain, names_to = "gene", values_to = "expr") %>%
+    mutate(gene_name = ifelse(gene %in% names(orf_to_name), orf_to_name[gene], gene)) %>%
+    left_join(sample_meta %>% rownames_to_column("strain"), by = "strain") %>%
+    filter(!is.na(clade))
+
+  ggplot(df, aes(x = clade, y = expr, fill = clade)) +
+    geom_boxplot(outlier.size = 0.5, linewidth = 0.3) +
+    facet_wrap(~ gene_name, ncol = 3) +               # fixed shared y-axis, 3 per row
+    scale_fill_manual(values = clade_colors, guide = "none") +
+    labs(title = paste0(regulon_label, " (YPD.1)"), x = NULL, y = "VST expression") +
+    pub_theme +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 7))
+}
+
+fig2C_GAL <- plot_focus_regulon(gal_focus_genes, "GAL regulon")
+fig2C_NCR <- plot_focus_regulon(ncr_focus_genes, "NCR regulon (nitrogen catabolite repression)")
+
+print(fig2C_GAL)
+print(fig2C_NCR)
+
+n_row_GAL <- ceiling(length(gal_focus_genes) / 3)
+n_row_NCR <- ceiling(length(ncr_focus_genes) / 3)
+
+ggsave(file.path(OUT_DIR, "Fig2C1_GAL_regulon.pdf"), fig2C_GAL, width = 7.5, height = 2.6 * n_row_GAL, units = "in")
+ggsave(file.path(OUT_DIR, "Fig2C1_NCR_regulon.pdf"), fig2C_NCR, width = 7.5, height = 2.6 * n_row_NCR, units = "in")
+```
+#function created
+```{r}
+# ── Panel C2: per-clade volcano + GO-term dot plot, no panel title ─────
+plot_volcano <- function(res_df, clade_label, padj_thresh = 0.05,
+                         lfc_thresh = 0.3, top_n_labels = 15) {
+  sig <- res_df %>% filter(direction != "NS")
+  top_genes <- sig %>% arrange(padj) %>% slice_head(n = top_n_labels)
+  n_up   <- sum(sig$direction == "Upregulated")
+  n_down <- sum(sig$direction == "Downregulated")
+
+  ggplot(res_df, aes(log2FoldChange, -log10(padj), color = direction, size = -log10(padj))) +
+    geom_point(alpha = 0.6) +
+    geom_hline(yintercept = -log10(padj_thresh), linetype = "dashed", color = "grey50", linewidth = 0.4) +
+    geom_vline(xintercept = c(-lfc_thresh, lfc_thresh), linetype = "dashed", color = "grey50", linewidth = 0.4) +
+    ggrepel::geom_text_repel(data = top_genes, aes(label = gene_name), size = 2.5, color = "black",
+                             fontface = "italic", max.overlaps = 20, segment.color = "grey60") +
+    scale_color_manual(values = c(Upregulated = "#E6851E", Downregulated = "#4A90D9", NS = "grey75"),
+                       labels = c(Upregulated = paste0("Up (", n_up, ")"),
+                                 Downregulated = paste0("Down (", n_down, ")"), NS = "NS")) +
+    scale_size_continuous(range = c(0.3, 3.5), guide = "none") +
+    labs(title = clade_label, subtitle = paste0("n = ", unique(res_df$n_focal), " strains vs. rest"),
+        x = expression(log[2](FC)~"(focal vs. rest)"), y = expression(-log[10](P[adj])), color = NULL) +
+    theme_classic(base_size = 10) +
+    theme(legend.position = "bottom", plot.title = element_text(face = "bold", size = 11))
+}
+
+plot_go_dotplot <- function(ora_up, ora_down, clade_label, top_n = 8) {
+  df_up   <- if (!is.null(ora_up)   && nrow(as.data.frame(ora_up))   > 0) as.data.frame(ora_up)   %>% arrange(p.adjust) %>% slice_head(n = top_n) %>% mutate(direction = "Upregulated")   else NULL
+  df_down <- if (!is.null(ora_down) && nrow(as.data.frame(ora_down)) > 0) as.data.frame(ora_down) %>% arrange(p.adjust) %>% slice_head(n = top_n) %>% mutate(direction = "Downregulated") else NULL
+  df <- bind_rows(df_up, df_down)
+  if (is.null(df) || nrow(df) == 0) return(NULL)
+
+  df <- df %>% mutate(
+    GeneRatio_num = sapply(GeneRatio, function(x) { p <- strsplit(x, "/")[[1]]; as.numeric(p[1]) / as.numeric(p[2]) }),
+    Description   = str_wrap(Description, width = 35),
+    direction     = factor(direction, levels = c("Upregulated", "Downregulated")),
+    Description   = reorder(Description, GeneRatio_num)
+  )
+
+  p <- ggplot(df, aes(GeneRatio_num, Description, color = p.adjust, size = Count)) +
+    geom_point() +
+    facet_grid(direction ~ ., scales = "free_y", space = "free_y") +
+    scale_color_gradient(low = "#D73027", high = "#74ADD1", name = "FDR", limits = c(0, 0.05), oob = scales::squish) +
+    scale_size_continuous(name = "Gene count", range = c(2, 7)) +
+    labs(title = clade_label, subtitle = "GO Biological Process", x = "Gene ratio", y = NULL) +
+    theme_bw(base_size = 10) +
+    theme(strip.text.y = element_text(face = "bold", size = 9, color = "white"),
+          axis.text.y = element_text(size = 7), legend.position = "right")
+
+  g <- ggplotGrob(p)
+  strip_idx   <- which(grepl("strip-r", g$layout$name))
+  strip_fill  <- c("Upregulated" = "#E6851E", "Downregulated" = "#4A90D9")
+  present_dirs <- levels(droplevels(df$direction))
+  for (i in seq_along(strip_idx)) {
+    fill_col <- strip_fill[present_dirs[i]]
+    rect_grob_idx <- which(sapply(g$grobs[[strip_idx[i]]]$grobs[[1]]$children, function(ch) inherits(ch, "rect")))
+    g$grobs[[strip_idx[i]]]$grobs[[1]]$children[[rect_grob_idx]]$gp$fill <- fill_col
+  }
+
+  g   # return the grob — do NOT draw it here; caller decides when/how
+}
+```
+
+```{r}
+# ── Run: separate volcano and GO-dotplot figures, no patchwork ─────────
+clade_deg_counts <- dge_combined %>%
+  filter(direction != "NS") %>%
+  dplyr::count(clade, name = "n_deg") %>%
+  arrange(desc(n_deg))
+
+clades_with_degs <- clade_deg_counts %>% filter(n_deg >= 5) %>% pull(clade)
+
+# All clades -> two multi-page PDFs (volcanoes, then GO dot plots)
+pdf(file.path(OUT_DIR, "Fig2C2_volcano_ALL.pdf"), width = 6, height = 5)
+for (cl in clades_with_degs) print(plot_volcano(dge_results[[cl]], clade_label = cl))
+dev.off()
+
+pdf(file.path(OUT_DIR, "Fig2C2_GO_dotplot_ALL.pdf"), width = 6, height = 5)
+for (cl in clades_with_degs) {
+  g <- plot_go_dotplot(ora_results[[cl]]$up, ora_results[[cl]]$down, clade_label = cl)
+  if (!is.null(g)) grid::grid.draw(g)
+}
+dev.off()
+
+# Top clades by DEG count -> printed inline + saved individually
+top_clades <- head(clade_deg_counts$clade, 3)
+
+for (cl in top_clades) {
+  v <- plot_volcano(dge_results[[cl]], clade_label = cl)
+  print(v)
+  ggsave(file.path(OUT_DIR, paste0("Fig2C2_volcano_", cl, ".pdf")), v, width = 6, height = 5, units = "in")
+
+  g <- plot_go_dotplot(ora_results[[cl]]$up, ora_results[[cl]]$down, clade_label = cl)
+  if (!is.null(g)) {
+    grid::grid.newpage()
+    grid::grid.draw(g)
+    ggsave(file.path(OUT_DIR, paste0("Fig2C2_GO_", cl, ".pdf")), g, width = 6, height = 5, units = "in")
+  }
+}
+```
+
+```{r}
+# ── Load YPD.1 per-cell data ────────────────────────────────────────────
+library(Seurat)
+
+ypd1_obj <- readRDS(file.path(BASE, "YPD.1/gene_expression_analysis/output_from_pseudobulk_fastlmm/Na_va_data_subsetted.rds"))
+
+STRAIN_COL <- "SNG.BEST.GUESS"
+MIN_CELLS_PER_STRAIN <- 50
+
+stopifnot(STRAIN_COL %in% colnames(ypd1_obj@meta.data))
+
+# Restrict to confident singlets before doing anything strain-specific —
+# BEST.GUESS/DBL.BEST.GUESS confirm this object still contains doublet/
+# ambiguous droplets that would contaminate a per-strain profile.
+cat("DROPLET.TYPE counts:\n")
+print(table(ypd1_obj@meta.data$DROPLET.TYPE))
+
+print(head(sort(table(ypd1_obj@meta.data[[STRAIN_COL]][ypd1_obj@meta.data$DROPLET.TYPE == "SNG"]), decreasing = TRUE), 10))
+print(summary(as.numeric(table(ypd1_obj@meta.data[[STRAIN_COL]][ypd1_obj@meta.data$DROPLET.TYPE == "SNG"]))))
+
+#normalize:
+DefaultAssay(ypd1_obj) <- "RNA"
+
+ypd1_obj <- NormalizeData(ypd1_obj, assay = "RNA", normalization.method = "LogNormalize", scale.factor = 10000)
+
+norm_mat <- GetAssayData(ypd1_obj, assay = "RNA", layer = "data")
+cat("norm_mat dims:", paste(dim(norm_mat), collapse = " x "), "\n")
+
+# ── Define genes_D: top-variance DEGs, capped at 150 for a readable matrix ──
+# This must run BEFORE the single-cell YPD.1 block — it depends on
+# degs_in_matrix and vst_mat, both built in the Panel A/DGE chunks above.
+N_GENES_D <- min(150, length(degs_in_matrix))
+gene_var  <- apply(vst_mat[degs_in_matrix, , drop = FALSE], 1, var)
+genes_D   <- names(sort(gene_var, decreasing = TRUE))[seq_len(N_GENES_D)]
+
+cat("genes_D:", length(genes_D), "genes selected (top-variance DEGs)\n")
+genes_D_sc <- intersect(genes_D, rownames(norm_mat))
+cat("Using", length(genes_D_sc), "of", length(genes_D), "genes\n")
+```
+
+```{r}
+# ── Per-strain gene-gene correlation, then meta-correlation across strains ──
+DefaultAssay(ypd1_obj) <- "RNA"
+norm_mat <- GetAssayData(ypd1_obj, slot = "data")  # log-normalized, genes x cells
+
+genes_D_sc <- intersect(genes_D, rownames(norm_mat))
+cat("Using", length(genes_D_sc), "of", length(genes_D), "genes (rest not present in single-cell object)\n")
+
+cell_meta <- ypd1_obj@meta.data %>%
+  rownames_to_column("cell_id") %>%
+  filter(DROPLET.TYPE == "SNG") %>%                      # singlets only
+  select(cell_id, strain = all_of(STRAIN_COL))
+
+strain_counts <- cell_meta %>% dplyr::count(strain, name = "n_cells") %>%
+  filter(!is.na(strain), n_cells >= MIN_CELLS_PER_STRAIN)
+strains_ok <- strain_counts$strain
+cat(length(strains_ok), "strains pass the", MIN_CELLS_PER_STRAIN, "-cell minimum (singlets only)\n")
+
+upper_idx_sc <- upper.tri(matrix(0, length(genes_D_sc), length(genes_D_sc)))
+
+compute_strain_cor_vec <- function(strain_id) {
+  cells_i <- cell_meta$cell_id[cell_meta$strain == strain_id]
+  sub_mat <- t(as.matrix(norm_mat[genes_D_sc, cells_i, drop = FALSE]))
+  cmat <- cor(sub_mat, method = "spearman")
+  cmat[upper_idx_sc]
+}
+
+strain_cor_vecs <- sapply(strains_ok, compute_strain_cor_vec)
+colnames(strain_cor_vecs) <- strains_ok
+
+meta_cor <- cor(strain_cor_vecs, method = "spearman")
+cat("Meta-correlation matrix:", nrow(meta_cor), "x", ncol(meta_cor), "strains\n")
+
+# ── Fix 1: per-strain correlation — surface how many genes are zero-variance ──
+compute_strain_cor_vec <- function(strain_id) {
+  cells_i <- cell_meta$cell_id[cell_meta$strain == strain_id]
+  sub_mat <- t(as.matrix(norm_mat[genes_D_sc, cells_i, drop = FALSE]))  # cells x genes
+  gene_sd <- apply(sub_mat, 2, sd)
+  if (any(gene_sd == 0)) {
+    # drop zero-variance genes for THIS strain only, rather than propagating NA
+    sub_mat <- sub_mat[, gene_sd > 0, drop = FALSE]
+  }
+  cmat_full <- matrix(NA_real_, length(genes_D_sc), length(genes_D_sc),
+                      dimnames = list(genes_D_sc, genes_D_sc))
+  if (ncol(sub_mat) >= 2) {
+    cmat_sub <- cor(sub_mat, method = "spearman")
+    cmat_full[rownames(cmat_sub), colnames(cmat_sub)] <- cmat_sub
+  }
+  cmat_full[upper_idx_sc]
+}
+
+strain_cor_vecs <- sapply(strains_ok, compute_strain_cor_vec)
+colnames(strain_cor_vecs) <- strains_ok
+
+# Report how much missingness this leaves, gene-pair-wise, per strain
+na_frac_per_strain <- colMeans(is.na(strain_cor_vecs))
+cat("NA fraction per strain — summary:\n")
+print(summary(na_frac_per_strain))
+cat("Worst 5 strains by NA fraction:\n")
+print(sort(na_frac_per_strain, decreasing = TRUE)[1:5])
+
+# ── Fix 2: meta-correlation — use pairwise-complete observations ──────
+# Default cor() propagates a single NA into a whole pairwise result;
+# pairwise.complete.obs instead uses whichever gene-pairs both strains
+# have non-missing, which is the right behavior here.
+meta_cor <- cor(strain_cor_vecs, method = "spearman", use = "pairwise.complete.obs")
+
+# Confirm no NA/Inf remain before clustering
+cat("Any NA in meta_cor:", any(is.na(meta_cor)), "\n")
+cat("Any Inf in meta_cor:", any(is.infinite(meta_cor)), "\n")
+
+# If a strain has too little pairwise overlap with most others, its
+# pairwise-complete correlation can still come back NA (or be based on
+# very few gene-pairs, making the estimate unstable). Check and drop:
+still_na <- rowSums(is.na(meta_cor)) 
+if (any(still_na > 0)) {
+  bad_strains <- names(still_na[still_na > 0])
+  cat("Dropping", length(bad_strains), "strain(s) with unresolvable NA overlap:", paste(bad_strains, collapse = ", "), "\n")
+  keep <- setdiff(colnames(meta_cor), bad_strains)
+  meta_cor <- meta_cor[keep, keep]
+}
+cat("Final meta-correlation matrix:", nrow(meta_cor), "x", ncol(meta_cor), "strains\n")
+```
+
+```{r}
+# ── Panel D: strain x strain meta-correlation heatmap, clade strip ─────
+hm_D <- plot_heatmap_gg(meta_cor, xlab = "Strain", ylab = "Strain",
+                        show_colnames = TRUE, show_rownames = FALSE,
+                        low = "#2166AC", mid = "white", high = "#B2182B",
+                        limits = c(-1, 1), x_font_size = 6)
+
+hm_D$plot <- hm_D$plot +
+  scale_fill_gradient2(low = "#2166AC", mid = "white", high = "#B2182B", midpoint = 0,
+                      limits = c(-1, 1), oob = scales::squish, name = "Meta-r")
+
+strip_D <- make_clade_strip(hm_D$col_order, sample_meta, clade_colors)
+
+fig2D <- (strip_D / hm_D$plot) +
+  plot_layout(heights = c(0.05, 1), guides = "collect") &
+  theme(legend.position = "right")
+
+print(fig2D)
+ggsave(file.path(OUT_DIR, "Fig2D_within_strain_coexpression_conservation.pdf"), fig2D, width = 8, height = 7, units = "in")
+```
+```{r}
+# ── Quantify: is conservation clade-structured, or uniform across strains? ──
+clade_lookup <- sample_meta %>% rownames_to_column("strain") %>% select(strain, clade)
+
+meta_cor_long <- as.data.frame(meta_cor) %>%
+  rownames_to_column("strain_i") %>%
+  pivot_longer(-strain_i, names_to = "strain_j", values_to = "meta_r") %>%
+  filter(strain_i != strain_j) %>%
+  left_join(clade_lookup, by = c("strain_i" = "strain")) %>% rename(clade_i = clade) %>%
+  left_join(clade_lookup, by = c("strain_j" = "strain")) %>% rename(clade_j = clade) %>%
+  filter(!is.na(clade_i), !is.na(clade_j)) %>%
+  mutate(pair_type = ifelse(clade_i == clade_j, "Same clade", "Different clade"))
+
+wilcox_res <- wilcox.test(meta_r ~ pair_type, data = meta_cor_long, alternative = "greater")
+cat("Same-clade vs different-clade meta-correlation, Wilcoxon p =", signif(wilcox_res$p.value, 3), "\n")
+
+fig2D_summary <- ggplot(meta_cor_long, aes(x = pair_type, y = meta_r, fill = pair_type)) +
+  geom_boxplot(outlier.size = 0.5, linewidth = 0.3) +
+  scale_fill_manual(values = c("Same clade" = "#B2182B", "Different clade" = "#2166AC"), guide = "none") +
+  labs(x = NULL, y = "Meta-correlation (co-expression similarity)") +
+  pub_theme
+
+print(fig2D_summary)
+ggsave(file.path(OUT_DIR, "Fig2D_summary_same_vs_diff_clade.pdf"), fig2D_summary, width = 4, height = 4, units = "in")
+
+write_csv(meta_cor_long, file.path(OUT_DIR, "Fig2D_meta_correlation_pairs.csv"))
+```
+
