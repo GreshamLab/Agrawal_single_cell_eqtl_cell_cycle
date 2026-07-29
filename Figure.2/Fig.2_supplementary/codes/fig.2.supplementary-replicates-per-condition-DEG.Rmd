@@ -458,7 +458,7 @@ analyze_condition <- function(condition_label, path, sep) {
       plot_layout(heights = c(0.18, 0.05, 1), guides = "collect") &
       theme(legend.position = "right")
 
-    safe_ggsave(file.path(OUT_DIR, paste0("FigS_Fig2A_heatmap_", condition_label, ".pdf")), fig2A, width = 10, height = 7.5, units = "in")
+    safe_ggsave(file.path(OUT_DIR, paste0("FigS_Fig2A_heatmap_", condition_label, ".tiff")), fig2A, width = 10, height = 7.5, units = "in", dpi = 600, device = "tiff", compression = "lzw")
   } else {
     cat("Skipping Panel A for", condition_label, "- fewer than 2 DEGs\n")
   }
@@ -489,12 +489,18 @@ analyze_condition <- function(condition_label, path, sep) {
       geom_text_repel(data = centroids_B, aes(tSNE1, tSNE2, label = clade),
                       size = 2.4, fontface = "bold", color = "black",
                       max.overlaps = 20, segment.size = 0.3) +
-      scale_color_manual(values = clade_colors, na.value = "white", name = "Clade") +
+            scale_color_manual(values = clade_colors, na.value = "white", name = "Clade") +
+      guides(color = guide_legend(nrow = 1, byrow = TRUE,
+                                  override.aes = list(size = 3, alpha = 1))) +
       labs(x = "t-SNE 1", y = "t-SNE 2") +
       pub_theme +
-      theme(legend.position = "right")
+      theme(legend.position = "bottom",
+            legend.box = "horizontal",
+            legend.key.size = unit(0.3, "cm"),
+            legend.text  = element_text(size = 7),
+            legend.title = element_text(size = 8, face = "bold"))
 
-    safe_ggsave(file.path(OUT_DIR, paste0("FigS_Fig2B_tsne_", condition_label, ".pdf")), fig2B, width = 5.5, height = 4, units = "in")
+        safe_ggsave(file.path(OUT_DIR, paste0("FigS_Fig2B_tsne_", condition_label, ".tiff")), fig2B, width = 8, height = 4.5, units = "in", dpi = 600, device = "tiff", compression = "lzw")
   } else {
     cat("Skipping Panel B for", condition_label, "- too few DEGs or strains\n")
   }
@@ -515,19 +521,9 @@ analyze_condition <- function(condition_label, path, sep) {
   fig2C_NCR    <- plot_focus_regulon(ncr_sel$genes,    "NCR regulon",  vst_mat, sample_meta, clade_colors, condition_label)
   fig2C_Stress <- plot_focus_regulon(stress_sel$genes, "Stress (ESR) regulon", vst_mat, sample_meta, clade_colors, condition_label)
 
-  if (!is.null(fig2C_GAL))    safe_ggsave(file.path(OUT_DIR, paste0("FigS_Fig2C_GAL_",    condition_label, ".pdf")), fig2C_GAL,    width = 7.5, height = 2.6 * ceiling(length(gal_sel$genes)/3), units = "in")
-  if (!is.null(fig2C_NCR))    safe_ggsave(file.path(OUT_DIR, paste0("FigS_Fig2C_NCR_",    condition_label, ".pdf")), fig2C_NCR,    width = 7.5, height = 2.6 * ceiling(length(ncr_sel$genes)/3), units = "in")
-  if (!is.null(fig2C_Stress)) safe_ggsave(file.path(OUT_DIR, paste0("FigS_Fig2C_Stress_", condition_label, ".pdf")), fig2C_Stress, width = 7.5, height = 2.6 * ceiling(length(stress_sel$genes)/3), units = "in")
-
-  list(
-    condition = condition_label,
-    n_strains = ncol(raw_counts_mat),
-    n_genes_detected = nrow(raw_counts_mat),
-    n_clades_tested = length(dge_results),
-    n_degs = length(degs_in_matrix),
-    dge_combined = dge_combined,
-    selection_log = selection_log
-  )
+  if (!is.null(fig2C_GAL))    safe_ggsave(file.path(OUT_DIR, paste0("FigS_Fig2C_GAL_",    condition_label, ".tiff")), fig2C_GAL,    width = 7.5, height = 2.6 * ceiling(length(gal_sel$genes)/3), units = "in", dpi = 600, device = "tiff", compression = "lzw")
+  if (!is.null(fig2C_NCR))    safe_ggsave(file.path(OUT_DIR, paste0("FigS_Fig2C_NCR_",    condition_label, ".tiff")), fig2C_NCR,    width = 7.5, height = 2.6 * ceiling(length(ncr_sel$genes)/3), units = "in", dpi = 600, device = "tiff", compression = "lzw")
+  if (!is.null(fig2C_Stress)) safe_ggsave(file.path(OUT_DIR, paste0("FigS_Fig2C_Stress_", condition_label, ".tiff")), fig2C_Stress, width = 7.5, height = 2.6 * ceiling(length(stress_sel$genes)/3), units = "in", dpi = 600, device = "tiff", compression = "lzw")
 
 
   # ---- Panel C2: per-clade volcano + GO dotplot, ALL conditions ────────
@@ -538,33 +534,45 @@ analyze_condition <- function(condition_label, path, sep) {
   clades_with_degs <- clade_deg_counts %>% filter(n_deg >= 5) %>% pull(clade)
 
   if (length(clades_with_degs) > 0) {
-    pdf(file.path(OUT_DIR, paste0("FigS_Fig2C2_volcano_ALL_", condition_label, ".pdf")), width = 6, height = 5)
+    # tiff() cannot hold multiple pages, so %02d writes one numbered TIFF per clade
+    tiff(file.path(OUT_DIR, paste0("FigS_Fig2C2_volcano_ALL_", condition_label, "_%02d.tiff")), width = 6, height = 5, units = "in", res = 600, compression = "lzw")
     for (cl in clades_with_degs) print(plot_volcano(dge_results[[cl]], clade_label = cl))
     dev.off()
 
-    pdf(file.path(OUT_DIR, paste0("FigS_Fig2C2_GO_dotplot_ALL_", condition_label, ".pdf")), width = 6, height = 5)
+    tiff(file.path(OUT_DIR, paste0("FigS_Fig2C2_GO_dotplot_ALL_", condition_label, "_%02d.tiff")), width = 6, height = 5, units = "in", res = 600, compression = "lzw")
     for (cl in clades_with_degs) {
       g <- plot_go_dotplot(ora_results[[cl]]$up, ora_results[[cl]]$down, clade_label = cl)
       if (!is.null(g)) grid::grid.draw(g)
     }
     dev.off()
 
-    top_clades <- head(clade_deg_counts$clade, 3)
+        top_clades <- head(clade_deg_counts$clade, 3)
     for (cl in top_clades) {
       v <- plot_volcano(dge_results[[cl]], clade_label = cl)
       print(v)
-      safe_ggsave(file.path(OUT_DIR, paste0("FigS_Fig2C2_volcano_", cl, "_", condition_label, ".pdf")), v, width = 6, height = 5, units = "in")
+      safe_ggsave(file.path(OUT_DIR, paste0("FigS_Fig2C2_volcano_", cl, "_", condition_label, ".tiff")), v, width = 6, height = 5, units = "in", dpi = 600, device = "tiff", compression = "lzw")
 
       g <- plot_go_dotplot(ora_results[[cl]]$up, ora_results[[cl]]$down, clade_label = cl)
       if (!is.null(g)) {
         grid::grid.newpage()
         grid::grid.draw(g)
-        safe_ggsave(file.path(OUT_DIR, paste0("FigS_Fig2C2_GO_", cl, "_", condition_label, ".pdf")), g, width = 6, height = 5, units = "in")
+        safe_ggsave(file.path(OUT_DIR, paste0("FigS_Fig2C2_GO_", cl, "_", condition_label, ".tiff")), g, width = 6, height = 5, units = "in", dpi = 600, device = "tiff", compression = "lzw")
       }
     }
   } else {
     cat("Skipping Panel C2 for", condition_label, "- no clade has >=5 DEGs\n")
   }
+
+  # ---- return value MUST be the last expression in the function ────────
+  list(
+    condition = condition_label,
+    n_strains = ncol(raw_counts_mat),
+    n_genes_detected = nrow(raw_counts_mat),
+    n_clades_tested = length(dge_results),
+    n_degs = length(degs_in_matrix),
+    dge_combined = dge_combined,
+    selection_log = selection_log
+  )
 }
 ```
 
@@ -610,6 +618,6 @@ fig2_summary_dot <- ggplot(clade_condition_degs, aes(x = condition, y = clade, s
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
 print(fig2_summary_dot)
-ggsave(file.path(OUT_DIR, "FigS_Fig2_strains_genes_conditions_dotplot.pdf"), fig2_summary_dot, width = 7, height = 6, units = "in")
+ggsave(file.path(OUT_DIR, "FigS_Fig2_strains_genes_conditions_dotplot.tiff"), fig2_summary_dot, width = 7, height = 6, units = "in", dpi = 600, device = "tiff", compression = "lzw")
 ```
 

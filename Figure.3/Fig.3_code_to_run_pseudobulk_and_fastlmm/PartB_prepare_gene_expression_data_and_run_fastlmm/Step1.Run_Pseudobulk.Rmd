@@ -1,0 +1,1042 @@
+---
+title: "1.1 Pseusdobulk_fastlmm.Rmd"
+author: "Akriti Agrawal"
+date: "2025-10-03"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Preprocessing
+
+Load packages
+
+```{r, include=FALSE}
+library(tidyverse)
+library(dplyr)
+library(readr)
+library(Rtsne)
+library(Seurat)
+library(tidyr)
+library(org.Sc.sgd.db)
+
+# Be explicit if needed
+select <- dplyr::select
+filter <- dplyr::filter
+
+```
+
+#Load the demuxlet output
+```{r}
+data <- read.delim("/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Flu.1/demuxlet/merged_demuxlet_output_flu_1.tsv")
+head(data)
+str(data)
+
+data$BEST.LLK <- as.numeric(data$BEST.LLK)
+data$NUM.READS <- as.numeric(data$NUM.READS)
+data$NUM.SNPS <- as.numeric(data$NUM.SNPS)
+data$NEXT.LLK <- as.numeric(data$NEXT.LLK)
+data$DIFF.LLK.BEST.NEXT <- as.numeric(data$DIFF.LLK.BEST.NEXT)
+data$BEST.POSTERIOR <- as.numeric(data$BEST.POSTERIOR)
+data$SNG.POSTERIOR <- as.numeric(data$SNG.POSTERIOR)
+data$SNG.BEST.LLK <- as.numeric(data$SNG.BEST.LLK)
+data$SNG.NEXT.LLK <- as.numeric(data$SNG.NEXT.LLK)
+data$SNG.ONLY.POSTERIOR <- as.numeric(data$SNG.ONLY.POSTERIOR)
+data$DBL.BEST.LLK <- as.numeric(data$DBL.BEST.LLK)
+data$DIFF.LLK.SNG.DBL <- as.numeric(data$DIFF.LLK.SNG.DBL)
+data <- na.omit(data)
+```
+
+```{r}
+expression_data <- Read10X(data.dir = "../alignment/output_of_alignment_YPD1_with_clean_gtf/run_count/outs/filtered_feature_bc_matrix/")
+Na_va_data <- CreateSeuratObject(counts = expression_data, project = "natural variants", min.cells = 3, min.features = 200)
+head(Na_va_data@meta.data)
+print(dim(Na_va_data))
+
+GetAssayData(Na_va_data, slot = "counts")
+```
+# Add the cell identities
+Add the cell identities assigned by demuxlet to the metadata of the seurat object Na_va_data.
+```{r}
+# Add all the columns of the data dataframe to the metadata of the Seurat object
+#Match the rows of demuxlet assignment "data" with the seurat metadata colum "BARCODE". because both have common barcodes
+metadata_to_add <- data[match(colnames(Na_va_data), data$BARCODE), ]
+#Add the matching demuxlet identities to the metadata
+Na_va_data <- AddMetaData(Na_va_data, metadata = metadata_to_add)
+```
+
+## Perfrom qc from seurat pipeline. 
+### Step.1 : Filter the cells with low or suspiciously high ncount_RNA
+```{r}
+# Filter cells based on nCount_RNA and nFeature_RNA
+#Na_va_data_subsetted <- subset(Na_va_data, subset = nFeature_RNA > 200) Don't need it
+```
+
+
+###  Step.2 : Exclude the entries forKANMX and NATMX. 
+
+We do this because DGY3 was part of a separate pool and it formed a different cluster from all the other strains. We removed KANMX and NATMX because these barcoded antibiotic markers were added in the DGY3 to identify them. 
+```{r}
+
+# Check the dimensions of the filtered Seurat object
+print(dim(Na_va_data))
+
+# Optionally, check the first few rows of the metadata to confirm the filtering
+head(Na_va_data@meta.data)
+
+# Remove DGY3
+Na_va_data_subsetted <- subset(Na_va_data, subset = SNG.BEST.GUESS != "DGY3")
+
+# Check the dimensions of the filtered Seurat object
+print(dim(Na_va_data_subsetted))
+
+```
+
+### Step 3. Remove entries containing AMB and DBL droplet.type. 
+
+We'll be using the demuxlet identities for cluster identification and we want to be sure to keep only the unique identities
+```{r}
+# Subset Na_va_data to include only entries where DROPLET.TYPE is "AMB" or "DBL"
+Na_va_data_subsetted <- subset(Na_va_data_subsetted, !(subset = DROPLET.TYPE %in% c("AMB", "DBL")))
+
+#Remove cells only in YPD.1 and not in YPD.2 which are BAQ 
+Na_va_data_subsetted <- subset(Na_va_data_subsetted, subset = SNG.BEST.GUESS != "BAQ")
+# Check the dimensions of the filtered Seurat object
+print(dim(Na_va_data_subsetted))
+
+# Optionally, check the first few rows of the metadata to confirm the filtering
+head(Na_va_data_subsetted@meta.data)
+
+saveRDS(Na_va_data_subsetted, file = "./output_from_pseudobulk_fastlmm/Na_va_data_subsetted.rds")
+```
+
+###Actual pseudobulking
+## 1. Get the count_matrix and metadata. 
+```{r}
+#create a metadata dataframe
+metadata_df <- Na_va_data_subsetted@meta.data
+
+#count matrix
+counts_matrix <- Na_va_data_subsetted[["RNA"]]$counts
+```
+## 2. Extract genotype information from metadata
+```{r}
+# Set seed for reproducibility
+set.seed(42)
+
+genotypes <- unique(metadata_df$SNG.BEST.GUESS)
+cat("Found", length(genotypes), "unique genotypes:", paste(genotypes, collapse=", "), "\n")
+
+# Create a list to store cell counts per genotype
+cell_counts_per_genotype <- list()
+
+#save this genotype list in a .txt file, where each strain is one line only. So this file must have 71 lines
+# write.table(genotypes, 
+#             file = "../fastlmm/codes/genotype_file/strain_list_YPD.1.txt",
+#             row.names = FALSE,
+#             col.names = FALSE,
+#             quote = FALSE)
+
+```
+## 3. Create lists to store pseudobulk results
+```{r}
+pseudobulk_sum_counts <- list()  # For sum aggregation
+```
+## 4. Perform pseudobulk aggregation for each genotype using both methods
+This for loop will go over metadata data and extract rownames which are cells based on genotype, it will check if there are cells per genotype. subset the count matrix using cell barcode per genotype and then do rowsums and rowmeans then store the count
+```{r}
+
+for (genotype in genotypes) {
+  # Get cell barcodes for this genotype
+  cells_in_genotype <- rownames(metadata_df[metadata_df$SNG.BEST.GUESS == genotype, ])
+  
+  # Skip if no cells found for this genotype
+  if (length(cells_in_genotype) == 0) {
+    cat("No cells found for genotype:", genotype, "\n")
+    next
+  }
+  
+  cat("Processing genotype:", genotype, "with", length(cells_in_genotype), "cells\n")
+  
+  # Subset the counts matrix to include only cells of this genotype
+  genotype_counts <- counts_matrix[, cells_in_genotype, drop = FALSE]
+  
+  # Sum aggregation (standard pseudobulk approach)
+  pseudobulk_sum_counts[[genotype]] <- rowSums(genotype_counts)
+  
+  
+  # Store the cell count for this genotype (useful for downstream analysis)
+  cell_counts_per_genotype[[genotype]] <- length(cells_in_genotype)
+}
+```
+## 5. Convert the lists to data frames
+The first two dataframes includes sum count for each gene in each genotype 
+and the third dataframe "cell_counts_df" includes total number of cells per genotype
+```{r}
+pseudobulk_sum_df <- as.data.frame(do.call(cbind, pseudobulk_sum_counts))
+colnames(pseudobulk_sum_df) <- names(pseudobulk_sum_counts)
+
+pseudobulk_sum_df
+```
+#Selection of expressed transcripts (atleast 5 counts across 8 strains)
+```{r}
+#keep only the commonly expressed transcripts
+# Step 1: Calculate the 60% threshold - genes are expressed in 40% of the strain
+n_samples <- ncol(pseudobulk_sum_df)  # Total number of strains
+threshold <- n_samples * 0.6          # 60% threshold
+
+# Step 2: Count how many samples each gene is expressed in (> 0)
+present_counts <- rowSums(pseudobulk_sum_df > 0)
+
+# Step 3: Filter to keep only genes expressed in >= 40% of samples
+reliable_transcripts <- pseudobulk_sum_df[present_counts >= threshold, ]
+
+pseudobulk_sum_df <- reliable_transcripts
+
+# Save raw filtered pseudobulk matrix (before DESeq2)
+write.table(reliable_transcripts,
+            file      = "../fastlmm/data/pheno_data/pseudobulk_reliable_transcripts_YPD.txt",  # change per condition
+            sep       = "\t",
+            quote     = FALSE,
+            col.names = NA)
+
+library(DESeq2)
+# Sum aggregation - direct normalization with DESeq2
+# Create metadata for sum data
+condition_sum <- factor(colnames(pseudobulk_sum_df))
+coldata_sum <- data.frame(row.names = colnames(pseudobulk_sum_df), condition = condition_sum)
+
+# Create DESeq dataset and normalize
+dds_sum <- DESeqDataSetFromMatrix(
+  countData = round(as.matrix(pseudobulk_sum_df)), # DESeq2 expects integers
+  colData = coldata_sum,
+  design = ~ 1
+)
+dds_sum <- estimateSizeFactors(dds_sum)
+sum_normalized_df <- counts(dds_sum, normalized = TRUE)
+
+write.csv(sum_normalized_df, file = "../fastlmm/data/pheno_data/pseudobulked_data.csv")
+pseudobulk_sum_df <- read.csv("../fastlmm/data/pheno_data/pseudobulked_data.csv")
+# # Convert back to matrix with row names
+# colnames(pseudobulk_sum_df)[1] <- "Gene_ID"
+# gene_ids <- pseudobulk_sum_df$Gene_ID
+# pseudobulk_sum_df <- as.matrix(pseudobulk_sum_df[, -1])  # Remove Gene_ID column
+# rownames(pseudobulk_sum_df) <- gene_ids
+
+#number of columns in this matrix
+ncol(sum_normalized_df)
+```
+
+#Part II - for the sake consistency I am going to change all column names to ORF names such that it matches the annotation file. and to create a gene_location file that I will later use to identify cis and trans
+```{r}
+gene_matrix <- as.matrix(sum_normalized_df)
+```
+#Annotation file provides gene_location information
+```{r create-gene-location}
+all_custom_gene_annotations <- read.csv("/scratch/aa9679/SingleCell_cerevisiae/Gene_exp_analysis/yeast_custom_annotations.csv")
+
+gene_location <- all_custom_gene_annotations %>%
+  filter(type == "CDS", !is.na(gene_id)) %>%
+  group_by(gene_id) %>%
+  summarise(
+    gene_name = first(gene_name),
+    chr = first(seqnames),
+    left = min(start),
+    right = max(end)
+  )
+
+print(head(gene_location))
+print(paste("Number of genes:", nrow(gene_location)))
+```
+#After gene location file, convert common name to ORF
+```{r}
+# Build a simple common name -> ORF lookup from the annotation file
+common_to_orf <- all_custom_gene_annotations %>%
+  filter(!is.na(gene_name), !is.na(gene_id)) %>%
+  distinct(gene_name, gene_id) %>%
+  deframe()  # creates named vector: names = gene_name, values = gene_id
+
+# Get gene IDs from rownames of gene_matrix
+expr_gene_ids <- rownames(gene_matrix)
+
+# Identify which are already ORFs
+is_orf <- grepl("^Y[A-Z]{2}\\d{3}[WC](-[A-Z])?$", expr_gene_ids)
+cat("Already ORF format:", sum(is_orf), "\n")
+cat("Common names to convert:", sum(!is_orf), "\n")
+
+# Map common names to ORF using annotation file
+expr_orf_ids <- ifelse(
+  is_orf,
+  expr_gene_ids,
+  ifelse(expr_gene_ids %in% names(common_to_orf), common_to_orf[expr_gene_ids], expr_gene_ids)
+)
+
+# Report
+cat("Converted:", sum(!is_orf & expr_gene_ids %in% names(common_to_orf)), "\n")
+cat("Could not convert:", sum(!is_orf & !expr_gene_ids %in% names(common_to_orf)), "\n")
+
+# Show names that could not be converted
+not_converted <- expr_gene_ids[!is_orf & !expr_gene_ids %in% names(common_to_orf)]
+cat("Genes that could not be converted:\n")
+print(not_converted)
+
+
+# Replace rownames BEFORE removing any rows
+rownames(gene_matrix) <- expr_orf_ids
+```
+
+#The genes that are not converted are most commonly ncRNA or rNA or snRNA genes.. remove the ncRNA genes that are not converted
+```{r}
+# Check via gene_id for ones that are already ORFs (like Q0285)
+ncrna_check <- all_custom_gene_annotations %>%
+  filter(gene_id %in% not_converted) %>%
+  distinct(gene_name, gene_id, gene_biotype)
+
+#All RNAs are removed
+cat("\nGenes to remove:", length(not_converted), "\n")
+gene_matrix <- gene_matrix[!rownames(gene_matrix) %in% not_converted, ]
+
+cat("\nGene matrix dimensions after removal:\n")
+print(dim(gene_matrix))
+```
+
+
+```{r}
+# # Filter gene_location to only include genes present in gene_matrix
+# expressed_genes <- rownames(gene_matrix)
+# gene_location_filtered <- gene_location[gene_location$geneid %in% expressed_genes, ]
+# 
+# cat("Original gene_location rows:", nrow(gene_location), "\n")
+# cat("Gene_matrix rows:", nrow(gene_matrix), "\n") 
+# cat("Filtered gene_location rows:", nrow(gene_location_filtered), "\n")
+# 
+# # Replace with filtered version
+# gene_location <- gene_location_filtered
+```
+
+```{r}
+# Step 1: Filter gene_location to keep only standard chromosomes
+standard_chromosomes <- gene_location[!is.na(gene_location$chr) &
+                                     !gene_location$chr %in% c("Mito", "Marker"), ]
+
+cat("Gene_location before chromosome filtering:", nrow(gene_location), "\n")
+cat("Gene_location after chromosome filtering:", nrow(standard_chromosomes), "\n")
+
+# Step 2: Filter gene_matrix to only include genes that are in the filtered gene_location
+genes_to_keep <- standard_chromosomes$gene_id
+gene_matrix_filtered <- gene_matrix[rownames(gene_matrix) %in% genes_to_keep, ]
+
+cat("Gene_matrix before filtering:", nrow(gene_matrix), "\n")
+cat("Gene_matrix after filtering:", nrow(gene_matrix_filtered), "\n")
+
+# Step 3: Replace both objects with filtered versions
+gene_location <- standard_chromosomes
+gene_matrix <- gene_matrix_filtered
+
+#remove gene id's where the column Gene_ID is == NA
+gene_matrix <- gene_matrix[!is.na(rownames(gene_matrix)) & !grepl("^NA\\.", rownames(gene_matrix)), ]
+
+# Step 4: Final verification
+cat("\nFinal check:\n")
+cat("Genes in expression matrix:", nrow(gene_matrix), "\n")
+cat("Genes in location file:", nrow(gene_location), "\n")
+cat("Perfect match:", nrow(gene_matrix) == nrow(gene_location), "\n")
+
+# Verify all genes match
+all_match <- all(rownames(gene_matrix) %in% gene_location$gene_id)
+cat("All genes match:", all_match, "\n")
+
+
+#SInce I am removing ncRNA and mito genes from gene location file, the number of genes in expression matrix is more than gene_location matrix. If I am removing from gene_location I must also remove it from gene_expression matrix
+```
+```{r}
+gene_matrix_to_write <- as.data.frame(gene_matrix)
+gene_matrix_to_write$Gene_ID <- rownames(gene_matrix)
+# Reorder columns to put Gene_ID first
+gene_matrix_to_write <- gene_matrix_to_write[, c("Gene_ID", setdiff(colnames(gene_matrix_to_write), "Gene_ID"))]
+write.table(gene_matrix_to_write, 
+            file = "../fastlmm/data/pheno_data/gene_matrix.txt", 
+            sep = "\t", 
+            row.names = FALSE, 
+            col.names = TRUE, 
+            quote = FALSE)
+
+# 5. Write gene location to disk
+write.table(gene_location, 
+            file = "../fastlmm/data/pheno_data/gene_location.txt", 
+            sep = "\t", 
+            row.names = FALSE, 
+            col.names = TRUE, 
+            quote = FALSE)
+
+length(unique(gene_location$chr))
+```
+Load gene matrix and gene location file
+```{r load-gene-matrix}
+# Read gene matrix file
+gene_matrix_df <- read.table("../fastlmm/data/pheno_data/gene_matrix.txt", 
+                            header = TRUE, 
+                            sep = "\t", 
+                            stringsAsFactors = FALSE)
+
+# Convert back to matrix with row names
+gene_ids <- gene_matrix_df$Gene_ID
+gene_matrix <- as.matrix(gene_matrix_df[, -1])  # Remove Gene_ID column
+rownames(gene_matrix) <- gene_ids
+
+# Check dimensions
+cat("Gene matrix dimensions:", nrow(gene_matrix), "genes by", ncol(gene_matrix), "samples\n")
+
+```
+#Now transpose rows to columns
+```{r}
+# Transpose the matrix (rows become columns, columns become rows)
+gene_matrix_transposed <- t(gene_matrix)
+
+# Check dimensions
+cat("Original matrix:", nrow(gene_matrix), "genes by", ncol(gene_matrix), "strains\n")
+cat("Transposed matrix:", nrow(gene_matrix_transposed), "strains by", ncol(gene_matrix_transposed), "genes\n")
+
+# Show first few rows and columns to verify
+print("First 3 strains × first 5 genes:")
+print(gene_matrix_transposed[1:3, 1:5])
+
+# Check row and column names
+cat("\nFirst 5 row names (strains):", rownames(gene_matrix_transposed)[1:5], "\n")
+cat("First 5 column names (genes):", colnames(gene_matrix_transposed)[1:5], "\n")
+```
+```{r}
+# Save the file
+write.table(gene_matrix_transposed, 
+           file = "../fastlmm/data/pheno_data/pheno_data_fastlmm.txt", 
+           sep = "\t",
+           quote = FALSE)
+
+# all_pheno_file <- read.table("../fastlmm/data/pheno_data/pheno_data_fastlmm.txt",
+#            header = TRUE, 
+#             sep = "\t", 
+#           stringsAsFactors = FALSE)
+
+```
+Add rownames as first column, remove rownames. There are 5093 rows because 5093 genes are expressed. I want to make and 5093 files where each file is saved as gene_name.txt and format for each file is
+
+strain    gene
+strain A   12
+strain B   23
+
+i.e., the strain column is repeated in each phenotype 
+```{r}
+# R Script to split gene expression data into individual gene files
+# Each file will have strain information repeated for each gene
+
+# Load required library
+library(data.table)
+
+# Read the phenotype file (adjust the file path as needed)
+# Assuming the file has strain names as rownames and genes as columns
+pheno_file <- "../fastlmm/data/pheno_data/pheno_data_fastlmm.txt"  # Replace with your actual file path
+output_dir <- "../fastlmm/data/splitted_pheno_file_per_gene"  # Output directory for individual gene files
+
+# Read the data
+# Assuming tab-separated file with rownames as strain names
+df <- read.csv(pheno_file, sep="\t", row.names=1, header=TRUE)
+
+# Create output directory if it doesn't exist
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir, recursive = TRUE)
+}
+
+# Get strain names (from rownames)
+strain_names <- rownames(df)
+
+# Get gene names (from column names)
+gene_names <- colnames(df)
+
+print(paste("Processing", length(gene_names), "genes for", length(strain_names), "strains"))
+
+# Process each gene
+for (i in 1:length(gene_names)) {
+  gene_name <- gene_names[i]
+  
+  # Create a data frame for this gene (without gene column)
+  gene_data <- data.frame(
+    strain = strain_names,
+    value = df[, i],
+    stringsAsFactors = FALSE
+  )
+  
+  # Set column names - strain and gene name
+  colnames(gene_data) <- c("strain", gene_name)
+  
+  # Create output filename
+  output_file <- file.path(output_dir, paste0(gene_name, ".txt"))
+  
+  # Write the file (tab-separated, no row names, with header)
+  write.table(gene_data, 
+              file = output_file, 
+              sep = "\t", 
+              row.names = FALSE, 
+              col.names = TRUE, 
+              quote = FALSE)
+  
+  # Progress indicator
+  if (i %% 500 == 0) {
+    print(paste("Processed", i, "genes..."))
+  }
+}
+
+print(paste("Completed! Created", length(gene_names), "gene files in", output_dir, "directory"))
+
+# Example: Show the first few lines of the first gene file
+if (length(gene_names) > 0) {
+  first_gene_file <- file.path(output_dir, paste0(gene_names[1], ".txt"))
+  if (file.exists(first_gene_file)) {
+    print(paste("Example content of", paste0(gene_names[1], ".txt"), ":"))
+    example_content <- read.table(first_gene_file, header = TRUE, sep = "\t", nrows = 5)
+    print(example_content)
+  }
+}
+```
+
+
+# This chunk will perform rank based Inverse normal transformation
+#!/usr/bin/env Rscript
+## ---------------------------
+##
+## Script name: rank_based_Inverse_Normal_Transformation.r
+##
+## Purpose of script: Perform the rank-based INT from a phenotype file
+##
+## Author: Akriti
+##
+## Date Created: 2025-10-11
+##
+## ---------------------------
+##
+## Notes: Takes a phenotypes in .tsv format (but .txt extension), 
+##        that is a tsv file with for each row:
+##        Strain      Condition
+##        XXX         1563
+##        XXX         4563
+##        ....
+##
+##        The pheno file can contain NAs, which will be kept in the output file. 
+##        The output file is a tsv file containing 2 columns:
+##        Strain  Normalized value
+##
+## ---------------------------
+
+
+Verify on a single file
+```{r}
+library(stringr)
+## ---------------------------
+rank.based.INT <- function(x, c=3/8, method="average")
+{
+  # This function performs the rank-based inverse normal transformation (INT)
+  # If method is "average" ties will share the same average value. 
+  # If method is "random", ties are given rank randomly
+  # Formula found in Beasley 2009 with an offset of c=3/8 as recommended in Blom 1958
+  
+  r <- rank(x, ties.method = method)
+  r[is.na(x)] <- NA # reput NA values in the vector because rank() gives a rank to NAs
+  N <- length(x[!is.na(x)])
+  qnorm((r-c)/(N-2*c+1))
+}
+
+# HARDCODED INPUT FILE PATH - Change this to your input file
+phenotypesPath <- "../fastlmm/data/splitted_pheno_file_per_gene/YDL248W.txt"
+
+# HARDCODED OUTPUT DIRECTORY - Change this to your desired output path
+output_directory <- "../fastlmm/data/normalized_pheno_file"
+# Create output directory if it doesn't exist
+dir.create(output_directory, recursive = TRUE, showWarnings = FALSE)
+
+# Read the input file to get original column names
+input_df <- read.csv(file = phenotypesPath, header = T, sep = "\t")
+original_colnames <- colnames(input_df)
+
+# Get file name (for output file naming)
+fileName <- basename(phenotypesPath)
+fileName <- str_remove(fileName, ".txt")
+
+# Convert the phenotypes to a single vector
+phenotypes <- input_df[,2]
+# Get the strains list in a vector
+strainList <- input_df[,1]
+
+# Normalization with the rank-based INT function
+normalized.phenotypes <- rank.based.INT(x = phenotypes)
+
+# Converting to dataframe with original column names
+normalized.phenotypes.df <- data.frame(strainList, normalized.phenotypes)
+colnames(normalized.phenotypes.df) <- original_colnames
+
+# removing NA values for the final file
+normalized.phenotypes.df.noNA <- na.omit(normalized.phenotypes.df)
+
+# Exporting to tsv file in the hardcoded output directory
+newPath <- file.path(output_directory, paste0(fileName, ".norm.txt"))
+print(paste("Output file:", newPath))
+write.table(normalized.phenotypes.df.noNA, file = newPath, row.names = F, col.names = T, sep = "\t", quote = F)
+```
+Run it on all the files in the folder
+```{r}
+library(stringr)
+## ---------------------------
+rank.based.INT <- function(x, c=3/8, method="average")
+{
+  # This function performs the rank-based inverse normal transformation (INT)
+  # If method is "average" ties will share the same average value. 
+  # If method is "random", ties are given rank randomly
+  # Formula found in Beasley 2009 with an offset of c=3/8 as recommended in Blom 1958
+  
+  r <- rank(x, ties.method = method)
+  r[is.na(x)] <- NA # reput NA values in the vector because rank() gives a rank to NAs
+  N <- length(x[!is.na(x)])
+  qnorm((r-c)/(N-2*c+1))
+}
+
+# HARDCODED INPUT DIRECTORY - Change this to your input directory
+input_directory <- "../fastlmm/data/splitted_pheno_file_per_gene/"
+
+# HARDCODED OUTPUT DIRECTORY - Change this to your desired output path
+output_directory <- "../fastlmm/data/normalized_pheno_file"
+
+# Create output directory if it doesn't exist
+dir.create(output_directory, recursive = TRUE, showWarnings = FALSE)
+
+# Get list of all .txt files in input directory
+phenotype_files <- list.files(path = input_directory, pattern = "\\.txt$", full.names = TRUE)
+
+print(paste("Found", length(phenotype_files), "phenotype files to process"))
+
+# Process each file
+for (phenotypesPath in phenotype_files) {
+  
+  print(paste("Processing:", basename(phenotypesPath)))
+  
+  # Read the input file to get original column names
+  input_df <- read.csv(file = phenotypesPath, header = T, sep = "\t")
+  original_colnames <- colnames(input_df)
+  
+  # Get file name (for output file naming)
+  fileName <- basename(phenotypesPath)
+  fileName <- str_remove(fileName, ".txt")
+  
+  # Convert the phenotypes to a single vector
+  phenotypes <- input_df[,2]
+  # Get the strains list in a vector
+  strainList <- input_df[,1]
+  
+  # Normalization with the rank-based INT function
+  normalized.phenotypes <- rank.based.INT(x = phenotypes)
+  
+  # Converting to dataframe with original column names
+  normalized.phenotypes.df <- data.frame(strainList, normalized.phenotypes)
+  colnames(normalized.phenotypes.df) <- original_colnames
+  
+  # removing NA values for the final file
+  normalized.phenotypes.df.noNA <- na.omit(normalized.phenotypes.df)
+  
+  # Exporting to tsv file in the hardcoded output directory
+  newPath <- file.path(output_directory, paste0(fileName, ".norm.txt"))
+  write.table(normalized.phenotypes.df.noNA, file = newPath, row.names = F, col.names = T, sep = "\t", quote = F)
+}
+
+print(paste("Completed! Processed", length(phenotype_files), "files"))
+print(paste("Output directory:", output_directory))
+```
+
+```{r}
+library(stringr)
+
+# Paths
+normalized_dir <- "../fastlmm/data/normalized_pheno_file"
+fam_file <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/pan_transcriptome_paper/SNPs/SNPs_change_names_in_fam_968/SNPs_85/full969Matrix.SNPs.Biallelic.Var.DP10.99percNonMissing.MAF15.NoSubTelo20kb.plink_YPD.1_85strains.fam"
+
+# Load .fam file
+fam <- read.table(fam_file, header=FALSE, stringsAsFactors=FALSE)
+colnames(fam) <- c("FamilyID", "IndividualID", "PaternalID", "MaternalID", "Sex", "Phenotype")
+fam_strains <- fam$IndividualID
+
+
+cat("PLINK .fam FILE INFO:\n")
+cat("Total strains in .fam file:", length(fam_strains), "\n")
+cat("First 10 strains:\n")
+print(head(fam_strains, 10))
+cat("\n\n")
+
+# Get list of normalized phenotype files
+pheno_files <- list.files(path = normalized_dir, pattern = "\\.norm\\.txt$", full.names = TRUE)
+cat("Found", length(pheno_files), "normalized phenotype files\n\n")
+
+# Check first 5 files in detail
+files_to_check <- head(pheno_files, 5)
+
+for (pheno_path in files_to_check) {
+  
+  cat("FILE:", basename(pheno_path), "\n")
+  
+  
+  # Read phenotype file
+  pheno_df <- read.table(pheno_path, header=TRUE, sep="\t", stringsAsFactors=FALSE)
+  
+  # Get column names
+  cat("Column names:", colnames(pheno_df), "\n")
+  cat("Number of rows:", nrow(pheno_df), "\n")
+  cat("Number of columns:", ncol(pheno_df), "\n\n")
+  
+  # Get strain names from phenotype file
+  pheno_strains <- pheno_df[, 1]
+  
+  cat("First 10 strains in phenotype file:\n")
+  print(head(pheno_strains, 10))
+  cat("\n")
+  
+  # Check for header
+  cat("Header row present: YES\n")
+  cat("Header names:", paste(colnames(pheno_df), collapse=" | "), "\n\n")
+  
+  # Check strain name matching
+  matching_strains <- intersect(pheno_strains, fam_strains)
+  missing_in_fam <- setdiff(pheno_strains, fam_strains)
+  missing_in_pheno <- setdiff(fam_strains, pheno_strains)
+  
+  cat("Strain matching:\n")
+  cat("  - Strains matching between phenotype and .fam:", length(matching_strains), "\n")
+  cat("  - Strains in phenotype but NOT in .fam:", length(missing_in_fam), "\n")
+  if (length(missing_in_fam) > 0) {
+    cat("    Examples:", paste(head(missing_in_fam, 5), collapse=", "), "\n")
+  }
+  cat("  - Strains in .fam but NOT in phenotype:", length(missing_in_fam), "\n")
+  if (length(missing_in_pheno) > 0) {
+    cat("    Examples:", paste(head(missing_in_pheno, 5), collapse=", "), "\n")
+  }
+  cat("\n")
+  
+  # Check phenotype values
+  pheno_values <- pheno_df[, 2]
+  cat("Phenotype values summary:\n")
+  cat("  - Min:", min(pheno_values, na.rm=TRUE), "\n")
+  cat("  - Max:", max(pheno_values, na.rm=TRUE), "\n")
+  cat("  - Mean:", mean(pheno_values, na.rm=TRUE), "\n")
+  cat("  - SD:", sd(pheno_values, na.rm=TRUE), "\n")
+  cat("  - Number of NAs:", sum(is.na(pheno_values)), "\n\n")
+  
+  # Check for duplicate strains
+  duplicates <- pheno_strains[duplicated(pheno_strains)]
+  if (length(duplicates) > 0) {
+    cat("WARNING: Duplicate strain names found:", length(duplicates), "\n")
+    cat("  Examples:", paste(head(unique(duplicates), 5), collapse=", "), "\n\n")
+  } else {
+    cat("✓ No duplicate strain names\n\n")
+  }
+}
+
+
+cat("SUMMARY CHECKS:\n")
+
+cat("✓ Headers are present in all files\n")
+cat("✓ Phenotype files are tab-separated\n")
+cat("✓ Values are INT-normalized (centered around 0 with SD ≈ 1)\n")
+cat("\nIf strain names match perfectly between phenotype and .fam files,\n")
+cat("you're ready to run FastLMM!\n")
+```
+```{r}
+library(stringr)
+
+# Check raw input files
+input_directory <- "../../data/splitted_pheno_file_per_gene"
+
+# Load one raw file
+raw_files <- list.files(path = input_directory, pattern = "\\.txt$", full.names = TRUE)
+cat("Total raw input files:", length(raw_files), "\n\n")
+
+# Check first 5 raw files
+for (i in 1:min(5, length(raw_files))) {
+  raw_file <- raw_files[i]
+  
+  cat("RAW FILE:", basename(raw_file), "\n")
+  
+  
+  raw_df <- read.table(raw_file, header=TRUE, sep="\t", stringsAsFactors=FALSE)
+  
+  cat("Column names:", colnames(raw_df), "\n")
+  cat("Number of rows:", nrow(raw_df), "\n")
+  cat("Number of columns:", ncol(raw_df), "\n\n")
+  
+  cat("First 10 rows:\n")
+  print(head(raw_df, 10))
+  cat("\n")
+  
+  # Check values in each column (if multiple columns)
+  for (col in 2:ncol(raw_df)) {
+    col_name <- colnames(raw_df)[col]
+    col_values <- raw_df[, col]
+    
+    cat("Column:", col_name, "\n")
+    cat("  - Type:", class(col_values), "\n")
+    cat("  - Min:", min(col_values, na.rm=TRUE), "\n")
+    cat("  - Max:", max(col_values, na.rm=TRUE), "\n")
+    cat("  - Mean:", mean(col_values, na.rm=TRUE), "\n")
+    cat("  - SD:", sd(col_values, na.rm=TRUE), "\n")
+    cat("  - # NAs:", sum(is.na(col_values)), "\n\n")
+  }
+}
+
+# Now test INT on one column from first file
+
+cat("TESTING INT FUNCTION ON FIRST FILE\n")
+
+rank.based.INT <- function(x, c=3/8, method="average")
+{
+  r <- rank(x, ties.method = method)
+  r[is.na(x)] <- NA
+  N <- length(x[!is.na(x)])
+  qnorm((r-c)/(N-2*c+1))
+}
+
+raw_df <- read.table(raw_files[1], header=TRUE, sep="\t", stringsAsFactors=FALSE)
+raw_values <- raw_df[, 2]
+
+cat("Raw values (column 2):\n")
+cat("  - Min:", min(raw_values, na.rm=TRUE), "\n")
+cat("  - Max:", max(raw_values, na.rm=TRUE), "\n")
+cat("  - Mean:", mean(raw_values, na.rm=TRUE), "\n")
+cat("  - SD:", sd(raw_values, na.rm=TRUE), "\n")
+cat("  - # values:", length(raw_values), "\n")
+cat("  - # NAs:", sum(is.na(raw_values)), "\n\n")
+
+int_values <- rank.based.INT(raw_values)
+
+cat("After INT:\n")
+cat("  - Min:", min(int_values, na.rm=TRUE), "\n")
+cat("  - Max:", max(int_values, na.rm=TRUE), "\n")
+cat("  - Mean:", mean(int_values, na.rm=TRUE), "\n")
+cat("  - SD:", sd(int_values, na.rm=TRUE), "\n")
+cat("  - # values:", length(int_values), "\n")
+cat("  - # NAs:", sum(is.na(int_values)), "\n\n")
+
+if (abs(sd(int_values, na.rm=TRUE) - 1.0) < 0.01) {
+  cat("✓ INT is working correctly! SD is approximately 1.0\n")
+} else {
+  cat("✗ WARNING: INT is NOT producing SD ≈ 1.0\n")
+}
+```
+```{r}
+# Test different INT implementations
+
+raw_values <- c(0, 0.5, 1, 2, 5, 10, 22.3, 0.1, 0.2)  # Simple test case
+
+# Current implementation
+rank.based.INT.v1 <- function(x, c=3/8, method="average")
+{
+  r <- rank(x, ties.method = method)
+  r[is.na(x)] <- NA
+  N <- length(x[!is.na(x)])
+  qnorm((r-c)/(N-2*c+1))
+}
+
+# Alternative implementation (using ppoints which is the standard)
+rank.based.INT.v2 <- function(x, c=3/8, method="average")
+{
+  r <- rank(x, ties.method = method)
+  r[is.na(x)] <- NA
+  N <- length(x[!is.na(x)])
+  # ppoints is the standard way to compute quantile positions
+  quantiles <- ppoints(N, a=c)
+  qnorm(quantiles[r])
+}
+
+# Test on actual data
+raw_df <- read.table("../../data/splitted_pheno_file_per_gene/X1032.augustus_masked.BCH_5.11150.txt", 
+                     header=TRUE, sep="\t", stringsAsFactors=FALSE)
+raw_values <- raw_df[, 2]
+
+cat("Testing INT implementations on real data:\n")
+cat("Raw data: Min=", min(raw_values), ", Max=", max(raw_values), ", SD=", sd(raw_values), "\n\n")
+
+# Version 1 (current)
+int_v1 <- rank.based.INT.v1(raw_values)
+cat("Version 1 (current formula):\n")
+cat("  SD:", sd(int_v1, na.rm=TRUE), "\n")
+cat("  Mean:", mean(int_v1, na.rm=TRUE), "\n")
+cat("  Min:", min(int_v1, na.rm=TRUE), "\n")
+cat("  Max:", max(int_v1, na.rm=TRUE), "\n\n")
+
+# Version 2 (using ppoints)
+int_v2 <- rank.based.INT.v2(raw_values)
+cat("Version 2 (using ppoints):\n")
+cat("  SD:", sd(int_v2, na.rm=TRUE), "\n")
+cat("  Mean:", mean(int_v2, na.rm=TRUE), "\n")
+cat("  Min:", min(int_v2, na.rm=TRUE), "\n")
+cat("  Max:", max(int_v2, na.rm=TRUE), "\n\n")
+
+# Let's debug step by step with a smaller dataset
+
+cat("DEBUG: Step-by-step with small dataset\n")
+
+test_data <- c(0.5, 1.0, 2.0, 5.0, 10.0)
+N <- length(test_data)
+c_val <- 3/8
+
+cat("Test data:", paste(test_data, collapse=", "), "\n")
+cat("N =", N, "\n")
+cat("c =", c_val, "\n\n")
+
+r <- rank(test_data)
+cat("Ranks:", paste(r, collapse=", "), "\n\n")
+
+# Version 1 formula
+quantiles_v1 <- (r - c_val) / (N - 2*c_val + 1)
+cat("Version 1 quantiles [(r-c)/(N-2c+1)]:\n")
+cat("  Values:", paste(round(quantiles_v1, 4), collapse=", "), "\n")
+int_v1_test <- qnorm(quantiles_v1)
+cat("  After qnorm:", paste(round(int_v1_test, 4), collapse=", "), "\n")
+cat("  SD:", sd(int_v1_test), "\n\n")
+
+# Version 2 using ppoints
+quantiles_v2 <- ppoints(N, a=c_val)
+cat("Version 2 quantiles [ppoints(N, a=c)]:\n")
+cat("  Values:", paste(round(quantiles_v2, 4), collapse=", "), "\n")
+int_v2_test <- qnorm(quantiles_v2[r])
+cat("  After qnorm and reorder:", paste(round(int_v2_test, 4), collapse=", "), "\n")
+cat("  SD:", sd(int_v2_test), "\n")
+```
+```{r}
+library(stringr)
+
+# Paths
+normalized_dir <- "../../data/normalized_pheno_file"
+
+# Get list of all normalized phenotype files
+pheno_files <- list.files(path = normalized_dir, pattern = "\\.norm\\.txt$", full.names = TRUE)
+cat("Total normalized phenotype files:", length(pheno_files), "\n\n")
+
+# Calculate SD for each gene
+sds <- numeric(length(pheno_files))
+gene_names <- character(length(pheno_files))
+means <- numeric(length(pheno_files))
+mins <- numeric(length(pheno_files))
+maxs <- numeric(length(pheno_files))
+
+cat("Processing all files to calculate SD...\n")
+for (i in seq_along(pheno_files)) {
+  if (i %% 1000 == 0) {
+    cat("  Processed:", i, "/", length(pheno_files), "\n")
+  }
+  
+  pheno_df <- read.table(pheno_files[i], header=TRUE, sep="\t", stringsAsFactors=FALSE)
+  pheno_values <- pheno_df[, 2]
+  
+  sds[i] <- sd(pheno_values, na.rm=TRUE)
+  means[i] <- mean(pheno_values, na.rm=TRUE)
+  mins[i] <- min(pheno_values, na.rm=TRUE)
+  maxs[i] <- max(pheno_values, na.rm=TRUE)
+  
+  # Extract gene name from filename
+  gene_names[i] <- gsub("\\.norm\\.txt$", "", basename(pheno_files[i]))
+}
+
+cat("Processing complete!\n\n")
+
+# Create summary dataframe
+sd_summary <- data.frame(
+  Gene = gene_names,
+  SD = sds,
+  Mean = means,
+  Min = mins,
+  Max = maxs,
+  SD_within_range = sds >= 0.95 & sds <= 1.05
+)
+
+# Overall statistics
+
+cat("SD DISTRIBUTION ACROSS ALL 6,119 GENES:\n")
+
+
+cat("SD Summary Statistics:\n")
+cat("  - Mean SD:", round(mean(sds), 4), "\n")
+cat("  - Median SD:", round(median(sds), 4), "\n")
+cat("  - Min SD:", round(min(sds), 4), "\n")
+cat("  - Max SD:", round(max(sds), 4), "\n")
+cat("  - SD of SDs:", round(sd(sds), 4), "\n\n")
+
+# Categorize genes by SD
+sd_0_90 <- sum(sds < 0.90)
+sd_0_90_0_95 <- sum(sds >= 0.90 & sds < 0.95)
+sd_0_95_1_00 <- sum(sds >= 0.95 & sds < 1.00)
+sd_1_00_1_05 <- sum(sds >= 1.00 & sds <= 1.05)
+sd_1_05_1_10 <- sum(sds > 1.05 & sds <= 1.10)
+sd_1_10_plus <- sum(sds > 1.10)
+
+cat("Gene counts by SD range:\n")
+cat("  SD < 0.90:", sd_0_90, "(", round(100*sd_0_90/length(sds), 2), "%)\n")
+cat("  SD [0.90, 0.95):", sd_0_90_0_95, "(", round(100*sd_0_90_0_95/length(sds), 2), "%)\n")
+cat("  SD [0.95, 1.00):", sd_0_95_1_00, "(", round(100*sd_0_95_1_00/length(sds), 2), "%)\n")
+cat("  SD [1.00, 1.05]:", sd_1_00_1_05, "(", round(100*sd_1_00_1_05/length(sds), 2), "%)\n")
+cat("  SD (1.05, 1.10]:", sd_1_05_1_10, "(", round(100*sd_1_05_1_10/length(sds), 2), "%)\n")
+cat("  SD > 1.10:", sd_1_10_plus, "(", round(100*sd_1_10_plus/length(sds), 2), "%)\n\n")
+
+# Genes within acceptable range (0.95-1.05)
+genes_in_range <- sum(sds >= 0.95 & sds <= 1.05)
+cat("Genes with SD in range [0.95, 1.05]:", genes_in_range, 
+    "(", round(100*genes_in_range/length(sds), 2), "%)\n\n")
+
+# Show examples
+
+cat("EXAMPLES OF GENES AT DIFFERENT SD RANGES:\n")
+
+# Lowest SD genes
+cat("Top 5 genes with LOWEST SD:\n")
+lowest_sd_idx <- head(order(sds), 5)
+print(sd_summary[lowest_sd_idx, ])
+cat("\n")
+
+# Highest SD genes
+cat("Top 5 genes with HIGHEST SD:\n")
+highest_sd_idx <- head(order(sds, decreasing=TRUE), 5)
+print(sd_summary[highest_sd_idx, ])
+cat("\n")
+
+# Closest to 1.0
+cat("Top 5 genes with SD CLOSEST to 1.0:\n")
+dist_to_1 <- abs(sds - 1.0)
+closest_idx <- head(order(dist_to_1), 5)
+print(sd_summary[closest_idx, ])
+cat("\n")
+
+# Save full SD summary to file
+write.table(sd_summary, "sd_summary_all_genes.txt", 
+            sep="\t", quote=FALSE, col.names=TRUE, row.names=FALSE)
+cat("Full summary saved to: sd_summary_all_genes.txt\n\n")
+
+# Visualization helper
+
+cat("SD DISTRIBUTION VISUALIZATION (text-based histogram):\n")
+
+
+# Create histogram bins
+bins <- seq(0.7, 1.3, by=0.05)
+hist_counts <- numeric(length(bins)-1)
+for (i in 1:(length(bins)-1)) {
+  hist_counts[i] <- sum(sds >= bins[i] & sds < bins[i+1])
+}
+
+for (i in 1:(length(bins)-1)) {
+  bin_label <- paste(round(bins[i], 2), "-", round(bins[i+1], 2), sep="")
+  bar_length <- round(hist_counts[i] / max(hist_counts) * 50)
+  bar <- paste(rep("█", bar_length), collapse="")
+  cat(sprintf("%8s | %s (%4d genes)\n", bin_label, bar, hist_counts[i]))
+}
+
+cat("\nNote: Genes with SD < 0.95 or > 1.05 may indicate:\n")
+cat("  - Biological signal (e.g., genes with very consistent expression)\n")
+cat("  - Potential data quality issues\n")
+cat("  - But still acceptable for eQTL analysis!\n")
+```
+
+

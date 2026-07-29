@@ -1,0 +1,267 @@
+---
+title: "Prepare_genotype_or_vcf"
+output: html_document
+---
+
+# Note for the fastlmm code:
+1. Use --double-id \ because strains in the PLINK matrix share the same FID and IID (e.g., SACE_GAL   SACE_GAL) for all other than SNPs
+2. Don't use --double-id \ because the strain name is split at the underscore in the plink matrix (e.g., SACE    GAL) for SNPs - don't
+
+
+# 1. SNPs - 
+The file I finally used was sent to me by Gauthier, this was the snp file used in the Pan transcriptome paper
+I don't need to filter for any strain names, code will automatically consider only the strains present in the paper
+
+``` file used
+
+'SNPs': {
+            'genotype': '/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/pan_transcriptome_paper/SNPs/SNPs_no_change_name_and_no_strain_filtering_only_MAF15_filtered/full969Matrix.SNPs.Biallelic.Var.DP10.99percNonMissing.MAF15.NoSubTelo20kb.plink'
+
+}
+```
+
+## Only MAF filtering without any strain filtering - no change of name and no strain filtering
+
+```{}
+plink --bfile full969Matrix.SNPs.Biallelic.Var.DP10.99percNonMissing.MAF5.NoSubTelo20kb.plink \
+      --maf 0.15 \
+      --make-bed \
+      --out /projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/pan_transcriptome_paper/SNPs/SNPs_no_change_name_and_no_strain_filtering_only_MAF15_filtered/full969Matrix.SNPs.Biallelic.Var.DP10.99percNonMissing.MAF15.NoSubTelo20kb.plink
+
+
+```
+
+
+# 2. CNVs - again this CNV file was used in the Pan transcriptome paper
+
+``` file used 
+
+        'CNVs': {
+            'genotype': '/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/pan_transcriptome_paper/CNVs/CNVs_no_change_name_and_no_strain_filtering_only_MAF15_filtered/CNV_969strains_gain_maf15_N400_20221121.plink',
+
+```
+
+## Only MAF filtering without any strain filtering - no change of name and no strain filtering
+
+```{}
+plink --bfile CNV_969strains_gain_maf5_N400_20221121.plink \
+      --maf 0.15 \
+      --make-bed \
+      --out /projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/pan_transcriptome_paper/CNVs/CNVs_no_change_name_and_no_strain_filtering_only_MAF15_filtered/CNV_969strains_gain_maf15_N400_20221121.plink
+```
+
+
+
+
+# 3. Indels - The vcf file was sent by Anne, it contained only 96 strains of our interest
+
+
+## step 1. make a plink file with everything, bad idea to filter anything here because the way I named strains could be different than the way vcf file has named and you don't want it to filter additional things.. -- geno 0.01 -- filtering missing genotype rate greater than 1%.. keeps only the variant where at least 99% samples have a called genotype. 
+
+```
+plink --vcf 96strains.vcf \
+       --make-bed \
+       --allow-extra-chr \
+       --maf 0.15 \
+       --geno 0.01 \
+       --out ./SNPs_indels/96strains.snps.indels.plink
+```
+```{r}
+#first load in the .fam SNPs and Indels file and convert the .fam file where if the family_ID matches Individual_ID you don't change anything but if they don't match then you rename both the rows such that you join family and Individual IDs i.e., if family_ID is SACE and individual_ID is YCY you make the rows to be SACE_YCY in both family and individual IDs. 
+
+fam_file <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/vcf_files_sent_by_Anne/SNPs_indels/96strains.snps.indels.plink.fam"
+library(data.table)
+
+# Load .fam file (6 columns: FID, IID, PID, MID, SEX, PHENO)
+fam <- fread(fam_file, header = FALSE, col.names = c("FID", "IID", "PID", "MID", "SEX", "PHENO"))
+
+# Rename FID and IID where they don't match
+fam[FID != IID, `:=`(FID = paste(FID, IID, sep = "_"),
+                      IID = paste(FID, IID, sep = "_"))]
+
+#convert AVI_1a to AVI
+if ("AVI_1a" %in% fam$FID) {
+  fam[FID == "AVI_1a", `:=`(FID = "AVI", IID = "AVI")]
+  cat("AVI_1a converted to AVI\n")
+} else {
+  cat("AVI_1a not found, no changes made\n")
+}
+
+#first check if 96 strains exists in this file
+genotypes_96 <- read.table(file = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/sample_used_two_column.txt")
+colnames(genotypes_96) <- c("familyID", "IndividualID")
+
+# Check which 96 strains are in the fam file
+in_fam <- genotypes_96$IndividualID %in% fam$IID
+
+cat("Strains found in fam file:", sum(in_fam), "\n")
+cat("Strains NOT found in fam file:", sum(!in_fam), "\n")
+
+# See which ones are missing
+missing_strains <- genotypes_96$IndividualID[!in_fam]
+print(missing_strains)
+
+##copy bim and bed file into this folder 
+# Write out the modified .fam file
+fwrite(fam, file = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/vcf_files_sent_by_Anne/SNPs_indels/modified_snp_indel_plink_for_96strains/96strains.snps.indels.plink.fam", sep = " ", col.names = FALSE)
+
+
+#step 2 update the .bim file, first check if the chromsome is in the integer format if not convert to integer.
+# Load the .bim file
+bim_file <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/vcf_files_sent_by_Anne/SNPs_indels/modified_snp_indel_plink_for_96strains/96strains.snps.indels.plink.bim"
+bim <- read.table(bim_file, header=FALSE, stringsAsFactors=FALSE)
+colnames(bim) <- c("CHR", "SNP", "cM", "BP", "A1", "A2")
+head(bim)
+
+# Create SNP ID as chr_pos_ref_alt (ref=allele2, alt=allele1)
+bim$SNP <- paste(bim$CHR, bim$BP, bim$A2, bim$A1, sep = "_")
+
+# Check chromosome format
+cat("Current CHR values (unique):\n")
+print(unique(bim$CHR))
+cat("CHR class:", class(bim$CHR), "\n")
+
+# Remove "Chromosome" prefix and convert to integer
+bim$CHR <- as.integer(gsub("chromosome", "", bim$CHR))
+
+# Verify
+cat("Unique CHR values after conversion:\n")
+print(unique(bim$CHR))
+cat("Any NAs introduced:", sum(is.na(bim$CHR)), "\n")
+
+head(bim)
+
+# Write out the modified .fam file
+fwrite(bim, file = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/vcf_files_sent_by_Anne/SNPs_indels/modified_snp_indel_plink_for_96strains/96strains.snps.indels.plink.bim", sep = " ", col.names = FALSE)
+```
+
+
+``` file used
+
+'Indels': {
+            'genotype': '/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/vcf_files_sent_by_Anne/SNPs_indels/modified_snp_indel_plink_for_96strains/Indels_only_96/indels.96samples',
+       
+```
+
+##Step 2
+### Make it snp only. Can't do everything in the first step because write-snplist can only be used on a plink file and not on the vcf file as an input
+```{}
+plink --bfile 96strains.snps.indels.plink \
+       --make-bed \
+       --snps-only \
+       --write-snplist \
+       --out ./SNPs_only_96/snps.96samples
+
+```
+
+### Make it indels only
+``` {}
+plink --bfile 96strains.snps.indels.plink \
+      --exclude ./SNPs_only/snps.85samples.snplist \
+      --make-bed \
+      --allow-extra-chr \
+      --out ./Indels_only_96/indels.96samples
+```
+
+
+#4. SVs 
+
+
+``` file used
+
+'SVs': {
+            'genotype': '/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/vcf_files_sent_by_Anne/SVs_from_SV.1087/SV.1087samples_updated_fam_files/SV.1087samples.SVs',
+   
+```
+
+### Step 1. 
+```
+##SVs are filtered in the same way, previously the SVs were used as provided in this file: /projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/vcf_files_sent_by_Anne/SV.1087Samples.vcf
+
+###Step 1. create plink file from SV vcf file -- REMEMBER I have to filter for 0.15 MAF
+
+plink --vcf SV.1087Samples.vcf \
+       --make-bed \
+       --allow-extra-chr \
+       --maf 0.15 \
+       --out ./SVs_from_SV.1087/SV.1087samples.SVs
+
+```
+```{r}
+library(data.table)
+
+# =============================================================================
+# STEP 1: Update .fam file
+# =============================================================================
+
+fam_file <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/vcf_files_sent_by_Anne/SVs_from_SV.1087/SV.1087samples.SVs.fam"
+
+fam <- fread(fam_file, header = FALSE, col.names = c("FID", "IID", "PID", "MID", "SEX", "PHENO"))
+
+# Rename FID and IID where they don't match by joining them
+fam[FID != IID, `:=`(FID = paste(FID, IID, sep = "_"),
+                      IID = paste(FID, IID, sep = "_"))]
+
+# Convert AVI_1a to AVI
+if ("AVI_1a" %in% fam$FID) {
+  fam[FID == "AVI_1a", `:=`(FID = "AVI", IID = "AVI")]
+  cat("AVI_1a converted to AVI\n")
+} else {
+  cat("AVI_1a not found, no changes made\n")
+}
+
+# Check if 96 strains exist in this file
+genotypes_96 <- read.table(file = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/sample_used_two_column.txt")
+colnames(genotypes_96) <- c("familyID", "IndividualID")
+
+in_fam <- genotypes_96$IndividualID %in% fam$IID
+cat("Strains found in fam file:", sum(in_fam), "\n")
+cat("Strains NOT found in fam file:", sum(!in_fam), "\n")
+missing_strains <- genotypes_96$IndividualID[!in_fam]
+print(missing_strains)
+
+fwrite(fam, 
+       file = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/vcf_files_sent_by_Anne/SVs_from_SV.1087/SV.1087samples_updated_fam_files/SV.1087samples.SVs.fam", 
+       sep = "\t", col.names = FALSE)
+```
+
+```{r}
+# =============================================================================
+# STEP 2: Update .bim file
+# =============================================================================
+
+bim_file <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/vcf_files_sent_by_Anne/SVs_from_SV.1087/SV.1087samples.SVs.bim"
+
+bim <- read.table(bim_file, header = FALSE, stringsAsFactors = FALSE)
+colnames(bim) <- c("CHR", "SNP", "cM", "BP", "A1", "A2")
+
+# Check chromosome format
+cat("Current CHR values (unique):\n")
+print(unique(bim$CHR))
+cat("CHR class:", class(bim$CHR), "\n")
+
+# Remove "chromosome" prefix and convert to integer
+bim$CHR <- as.integer(gsub("chromosome", "", bim$CHR))
+cat("Unique CHR values after conversion:\n")
+print(unique(bim$CHR))
+cat("Any NAs introduced:", sum(is.na(bim$CHR)), "\n")
+
+# Replace allele sequences with generic ref/alt indicators
+# 1 = reference allele, 2 = alternate allele
+# The original sequences are too long for bed_reader to parse,
+# and FaST-LMM does not use allele identity for the association test
+bim$A1 <- 1  # reference
+bim$A2 <- 2  # alternate
+
+cat("A1/A2 columns replaced with 1 (ref) and 2 (alt)\n")
+head(bim)
+
+# Save updated BIM with new filename to distinguish from original
+fwrite(bim, 
+       file = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/vcf_files_sent_by_Anne/SVs_from_SV.1087/SV.1087samples_updated_fam_files/SV.1087samples.SVs.bim", 
+       sep = "\t", col.names = FALSE)
+
+cat("Done. BIM written with A1=1 (ref), A2=2 (alt)\n")
+```
+
+I don't need to filter and can use the same file

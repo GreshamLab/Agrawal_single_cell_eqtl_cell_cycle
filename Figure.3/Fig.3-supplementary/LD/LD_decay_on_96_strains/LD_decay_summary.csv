@@ -1,0 +1,5 @@
+type,n_pairs,bin_bp,plateau_c,decay_b_bp,half_decay_bp,window95_bp,emp_window_bp
+SNPs,4165939,100,0.212,2616,1813,7837,20050
+CNVs,665,2000,,,,,17000
+Indels,21033,1000,0.167,766,531,2293,19500
+SVs,157,2000,,,,,1000

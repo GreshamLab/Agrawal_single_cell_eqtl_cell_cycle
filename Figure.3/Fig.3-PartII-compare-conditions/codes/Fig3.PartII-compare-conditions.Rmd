@@ -1,0 +1,684 @@
+---
+title: "Cross-condition eQTL comparison: YPD, SC-2% glucose, Fluconazole"
+author: "Akriti Agrawal"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    theme: flatly
+    highlight: tango
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 9, fig.height = 6)
+```
+
+```{r libs}
+library(dplyr)
+library(tidyr)
+library(readr)
+library(ggplot2)
+library(ggrepel)
+library(scales)
+library(ggvenn)
+library(clusterProfiler)
+library(org.Sc.sgd.db)
+
+# resolve dplyr masking
+bind_rows <- dplyr::bind_rows
+count     <- dplyr::count
+select    <- dplyr::select
+filter    <- dplyr::filter
+
+OUT <- "../results"
+dir.create(OUT, showWarnings = FALSE, recursive = TRUE)
+
+cond_colors <- c(YPD = "#4CAF50", SC2Glu = "#FF9800", Fluconazole = "#9C27B0")
+cond_levels <- c("YPD", "SC2Glu", "Fluconazole")
+variant_levels <- c("SNPs", "InDels", "SVs", "CNVs")
+```
+
+# 1. Load inputs
+
+Gene matrices (for phenotype/strain counts) and the annotated clumped eQTL tables
+for each condition.
+
+```{r load}
+gm_path <- function(cond_dir)
+  file.path("/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all",
+            cond_dir, "fastlmm/data/pheno_data/gene_matrix.txt")
+
+gene_matrix_YPD.1        <- read.table(gm_path("YPD.1"), header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+gene_matrix_sc2glu       <- read.table(gm_path("sc2glu.2"), header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+gene_matrix_fluconazole  <- read.table("/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/merged_fluconazole/new_fastlmm_march_26_2026/data/pheno_data/gene_matrix.txt",
+                                        header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+
+all_clumped_YPD.1       <- read.table("/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.1/fastlmm/results/all_clumped_eqtl_annotated_YPD.1.txt",
+                                       sep = "\t", header = TRUE)
+all_clumped_sc2glu      <- read_tsv("/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2/fastlmm/results/all_clumped_eqtl_annotated_sc2glu.txt",
+                                     show_col_types = FALSE) %>% as.data.frame()
+all_clumped_fluconazole <- read.table("/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/merged_fluconazole/new_fastlmm_march_26_2026/results/all_clumped_eqtl_annotated_fluc.txt",
+                                       sep = "\t", header = TRUE)
+```
+
+# 2. Between-strain expression variance (power QC)
+
+**Why this comes first.** eQTL detection depends on a gene's expression varying
+across strains — a gene with near-constant expression carries no signal for any
+variant to explain, so it can never yield an eQTL regardless of genetics. Before
+comparing eQTL yields across conditions, we check whether the three conditions
+offer *equal variance to map on*. If one condition has systematically lower
+between-strain variance, its lower eQTL count is partly a data/power property,
+not necessarily "less genetic regulation."
+
+For genes and strains shared between conditions we compute per-gene variance
+across strains and compare the distributions (paired Wilcoxon; density, boxplot,
+per-gene scatter). Conclusion carried downstream: between-strain variance is
+highest in YPD, intermediate in SC-2% glucose, lowest in fluconazole — so
+absolute eQTL counts are not directly comparable, and the comparison leans on
+proportions and effect-size concordance rather than raw counts.
+
+```{r var-matrices}
+library(tibble)
+
+# first column = gene ID (matches Section 4's ncol-1 strain count), whatever it is named
+to_mat <- function(gm) {
+  m <- as.matrix(gm[, -1, drop = FALSE]); rownames(m) <- gm[[1]]; m
+}
+ypd_mat         <- to_mat(gene_matrix_YPD.1)
+sc2glu_mat      <- to_mat(gene_matrix_sc2glu)
+fluconazole_mat <- to_mat(gene_matrix_fluconazole)
+
+cat("YPD matrix:",         nrow(ypd_mat),         "genes x", ncol(ypd_mat),         "strains\n")
+cat("SC 2% glucose:",      nrow(sc2glu_mat),      "genes x", ncol(sc2glu_mat),      "strains\n")
+cat("Fluconazole matrix:", nrow(fluconazole_mat), "genes x", ncol(fluconazole_mat), "strains\n")
+
+# per-gene variance across strains, on any gene x strain subset
+var_across <- function(mat, genes, strains) apply(mat[genes, strains, drop = FALSE], 1, var, na.rm = TRUE)
+```
+
+```{r var-3way}
+# --- genes/strains shared by all three conditions ---
+g3 <- Reduce(intersect, list(rownames(ypd_mat), rownames(sc2glu_mat), rownames(fluconazole_mat)))
+s3 <- Reduce(intersect, list(colnames(ypd_mat), colnames(sc2glu_mat), colnames(fluconazole_mat)))
+cat("All-3 shared:", length(g3), "genes x", length(s3), "strains\n")
+
+var3 <- data.frame(
+  gene        = g3,
+  YPD         = var_across(ypd_mat,         g3, s3),
+  SC2Glu      = var_across(sc2glu_mat,      g3, s3),
+  Fluconazole = var_across(fluconazole_mat, g3, s3))
+
+var3_long <- var3 %>%
+  pivot_longer(c(YPD, SC2Glu, Fluconazole), names_to = "condition", values_to = "variance") %>%
+  mutate(condition = factor(condition, levels = cond_levels)) %>%
+  filter(!is.na(variance))
+
+med3 <- var3_long %>% group_by(condition) %>%
+  summarise(median_val = median(variance, na.rm = TRUE), .groups = "drop") %>%
+  mutate(median_log = log2(median_val + 1))
+cat("Median variance (all-3 shared):\n"); print(med3[, c("condition","median_val")])
+
+# paired Wilcoxon among the 3-way shared set
+cat("\nPaired Wilcoxon (two-sided), all-3 shared:\n")
+cat("  YPD vs SC2Glu:      p =", format(wilcox.test(var3$YPD, var3$SC2Glu, paired = TRUE)$p.value, digits = 3), "\n")
+cat("  YPD vs Fluconazole: p =", format(wilcox.test(var3$YPD, var3$Fluconazole, paired = TRUE)$p.value, digits = 3), "\n")
+cat("  SC2Glu vs Fluc:     p =", format(wilcox.test(var3$SC2Glu, var3$Fluconazole, paired = TRUE)$p.value, digits = 3), "\n")
+
+# which condition has the highest variance per gene
+winner <- var3 %>% mutate(highest = case_when(
+  YPD >= SC2Glu & YPD >= Fluconazole ~ "YPD",
+  SC2Glu >= YPD & SC2Glu >= Fluconazole ~ "SC2Glu",
+  TRUE ~ "Fluconazole")) %>%
+  count(highest) %>% mutate(pct = round(100 * n / sum(n), 1)) %>% arrange(desc(n))
+cat("\nGene wins highest variance:\n"); print(winner)
+```
+
+```{r var-density, fig.width=8, fig.height=5}
+cond_labs <- c(YPD = "YPD", SC2Glu = "SC 2% glucose", Fluconazole = "Fluconazole")
+
+figV1 <- ggplot(var3_long, aes(log2(variance + 1), fill = condition, color = condition)) +
+  geom_density(alpha = 0.4, linewidth = 0.8) +
+  geom_vline(data = med3, aes(xintercept = median_log, color = condition),
+             linetype = "dashed", linewidth = 1) +
+  geom_text(data = med3,
+            aes(x = median_log, y = Inf, color = condition,
+                label = paste0(cond_labs[as.character(condition)], "\nmedian=", round(median_val, 2))),
+            vjust = c(1.3, 3.8, 6.3), hjust = -0.07, size = 3.8, fontface = "bold", show.legend = FALSE) +
+  scale_fill_manual(values = cond_colors, labels = cond_labs) +
+  scale_color_manual(values = cond_colors, labels = cond_labs) +
+  labs(title = "Gene expression variance across strains",
+       subtitle = paste0("Shared ", length(g3), " genes x ", length(s3), " strains"),
+       x = "log2(variance + 1)", y = "Density", fill = "Condition", color = "Condition") +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5, color = "grey40"),
+        axis.title = element_text(face = "bold"))
+print(figV1)
+ggsave(file.path(OUT, "figV1_variance_density.tiff"), figV1,
+       width = 8, height = 5, dpi = 600, units = "in", device = "tiff", compression = "lzw")
+```
+
+```{r var-box, fig.width=6, fig.height=5}
+figV2 <- ggplot(var3_long, aes(condition, log2(variance + 1), fill = condition)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA, width = 0.5) +
+  scale_fill_manual(values = cond_colors, guide = "none") +
+  scale_x_discrete(labels = cond_labs) +
+  labs(title = "Gene expression variance across strains",
+       subtitle = paste0("Shared ", length(g3), " genes x ", length(s3), " strains"),
+       x = NULL, y = "log2(variance + 1)") +
+  theme_classic(base_size = 13) +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5, color = "grey40"),
+        axis.title = element_text(face = "bold"))
+print(figV2)
+ggsave(file.path(OUT, "figV2_variance_boxplot.tiff"), figV2,
+       width = 6, height = 5, dpi = 600, units = "in", device = "tiff", compression = "lzw")
+```
+
+```{r var-scatter, fig.width=6, fig.height=5}
+# pairwise per-gene scatter, each on its own shared gene/strain set (n differs by pair)
+scatter_pair <- function(mA, mB, labA, labB) {
+  g <- intersect(rownames(mA), rownames(mB)); s <- intersect(colnames(mA), colnames(mB))
+  d <- data.frame(vA = var_across(mA, g, s), vB = var_across(mB, g, s))
+  p <- format(wilcox.test(d$vA, d$vB, paired = TRUE)$p.value, digits = 3)
+  ggplot(d, aes(log2(vB + 1), log2(vA + 1))) +
+    geom_point(alpha = 0.2, size = 0.8, color = "grey40") +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red", linewidth = 0.8) +
+    annotate("text", x = Inf, y = -Inf, label = paste0("Wilcoxon p = ", p),
+             hjust = 1.1, vjust = -0.5, size = 4, fontface = "bold") +
+    labs(title = paste0("Variance: ", labA, " vs ", labB),
+         subtitle = paste0(length(s), " shared strains"),
+         x = paste0("log2(variance + 1) - ", labB),
+         y = paste0("log2(variance + 1) - ", labA)) +
+    theme_classic(base_size = 13) +
+    theme(plot.title = element_text(face = "bold", hjust = 0.5),
+          plot.subtitle = element_text(hjust = 0.5, color = "grey40"),
+          axis.title = element_text(face = "bold"))
+}
+print(scatter_pair(ypd_mat,    fluconazole_mat, "YPD",           "Fluconazole"))
+print(scatter_pair(ypd_mat,    sc2glu_mat,      "YPD",           "SC 2% glucose"))
+print(scatter_pair(sc2glu_mat, fluconazole_mat, "SC 2% glucose", "Fluconazole"))
+```
+
+# 3. Combine once
+
+All downstream chunks reuse `combined`. `CT` normalizes the cis/trans column
+(the tables carry either `cis_trans` or `Location`).
+
+```{r combine}
+all_clumped_YPD.1$condition       <- "YPD"
+all_clumped_sc2glu$condition      <- "SC2Glu"
+all_clumped_fluconazole$condition <- "Fluconazole"
+
+get_cistrans <- function(df) if ("cis_trans" %in% names(df)) df$cis_trans else df$Location
+signed_col   <- if ("SnpWeight" %in% names(all_clumped_YPD.1)) "SnpWeight" else "EffectSize"
+
+combined <- bind_rows(all_clumped_YPD.1, all_clumped_sc2glu, all_clumped_fluconazole)
+combined$CT        <- get_cistrans(combined)
+combined$condition <- factor(combined$condition, levels = cond_levels)
+
+# eGene sets and SNP-gene pair sets, reused throughout
+genes_YPD    <- unique(all_clumped_YPD.1$Pheno)
+genes_sc2glu <- unique(all_clumped_sc2glu$Pheno)
+genes_flu    <- unique(all_clumped_fluconazole$Pheno)
+
+ypd_pairs    <- unique(paste(all_clumped_YPD.1$SNP, all_clumped_YPD.1$Pheno, sep = "_"))
+sc2glu_pairs <- unique(paste(all_clumped_sc2glu$SNP, all_clumped_sc2glu$Pheno, sep = "_"))
+flu_pairs    <- unique(paste(all_clumped_fluconazole$SNP, all_clumped_fluconazole$Pheno, sep = "_"))
+```
+
+# 4. eQTL detection and experimental scale (Supplementary)
+
+The single count-based figure, kept as **supplementary**. Absolute eQTL numbers
+track strain count and between-strain variance (Section 2), so a drop under
+fluconazole is expected on power grounds and is *not* interpreted as biology.
+Everything downstream uses proportions and effect-size concordance instead.
+
+```{r scale, fig.width=7, fig.height=4.5}
+pheno_strain_summary <- data.frame(
+  condition    = cond_levels,
+  n_phenotypes = c(nrow(gene_matrix_YPD.1), nrow(gene_matrix_sc2glu), nrow(gene_matrix_fluconazole)),
+  n_strains    = c(ncol(gene_matrix_YPD.1) - 1, ncol(gene_matrix_sc2glu) - 1, ncol(gene_matrix_fluconazole) - 1),
+  n_eQTLs      = c(nrow(all_clumped_YPD.1), nrow(all_clumped_sc2gflu), nrow(all_clumped_fluconazole)))
+print(pheno_strain_summary)
+
+figS_scale <- pheno_strain_summary %>%
+  pivot_longer(c(n_phenotypes, n_strains, n_eQTLs), names_to = "metric", values_to = "count") %>%
+  mutate(condition = factor(condition, levels = cond_levels),
+         metric = factor(metric, levels = c("n_phenotypes","n_strains","n_eQTLs"),
+                         labels = c("Phenotypes (genes)","Strains","eQTLs detected"))) %>%
+  ggplot(aes(metric, count, fill = condition)) +
+  geom_col(position = "dodge", width = 0.7) +
+  geom_text(aes(label = count), position = position_dodge(0.7), vjust = -0.4, size = 3.3, fontface = "bold") +
+  scale_fill_manual(values = cond_colors) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(x = NULL, y = "Count", fill = "Condition",
+       title = "Experimental scale and eQTL detection (supplementary)") +
+  theme_classic(base_size = 12) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        axis.text.x = element_text(angle = 30, hjust = 1))
+print(figS_scale)
+ggsave(file.path(OUT, "figS_scale_eqtl_detection.tiff"), figS_scale,
+       width = 7, height = 4.5, dpi = 600, units = "in", device = "tiff", compression = "lzw")
+```
+
+**Supplementary:** genomic distribution of eQTLs per condition and variant type
+(eQTL count per chromosome). Descriptive only — shows where detected eQTLs fall
+along the genome in each condition; goes in the supplement alongside the scale
+figure above.
+
+```{r geno-dist-supp, fig.width=10, fig.height=6}
+# ---- SUPPLEMENTARY figure ----
+roman_lv <- c("I","II","III","IV","V","VI","VII","VIII",
+              "IX","X","XI","XII","XIII","XIV","XV","XVI")
+norm_chr_lab <- function(x){
+  x <- as.character(x)
+  x <- gsub("^chr(omosome)?[_ ]?", "", x, ignore.case = TRUE)
+  num <- suppressWarnings(as.integer(x))
+  ifelse(!is.na(num) & num %in% 1:16, roman_lv[num],
+         ifelse(x %in% roman_lv, x, NA_character_))
+}
+vchr_col <- intersect(c("Chr","var_chr","SNP_Chr","chromosome","var_chr_roman"),
+                      names(combined))[1]
+
+geno_ok <- tryCatch({
+  gd <- combined %>%
+    mutate(chr = factor(norm_chr_lab(.data[[vchr_col]]), levels = roman_lv),
+           Genetic_variants = factor(Genetic_variants, levels = variant_levels),
+           condition = factor(condition, levels = cond_levels)) %>%
+    filter(!is.na(chr)) %>%
+    count(condition, Genetic_variants, chr)
+
+  variant_colors <- c(SNPs="#4472C4", InDels="#FFC000", SVs="#C41E3A", CNVs="#70AD47")
+  figS_geno <- ggplot(gd, aes(chr, n, fill = Genetic_variants)) +
+    geom_col(position = position_dodge2(preserve = "single", padding = 0.15),
+             width = 0.8, color = "grey30", linewidth = 0.15) +
+    facet_grid(condition ~ ., scales = "free_y") +
+    scale_fill_manual(values = variant_colors, name = "Variant type") +
+    labs(x = "Chromosome", y = "eQTLs detected",
+         title = "Genomic distribution of eQTLs by condition and variant type (supplementary)") +
+    theme_bw(base_size = 12) +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+          strip.text.y = element_text(face = "bold", angle = 0),
+          panel.grid.minor = element_blank(),
+          legend.position = "top",
+          axis.text.x = element_text(size = 8))
+  print(figS_geno)
+  ggsave(file.path(OUT, "figS_genomic_distribution_by_condition_type.tiff"), figS_geno,
+         width = 10, height = 6, dpi = 600, units = "in", device = "tiff", compression = "lzw")
+  TRUE
+}, error = function(e){ cat("Genomic distribution skipped:", conditionMessage(e),
+   "\n(no recognizable variant chromosome column in `combined`)\n"); FALSE })
+```
+
+# 5. Effect size by variant type and location
+
+Effect size is split by **variant type** (facet columns: SNPs, InDels, SVs,
+CNVs) and **location** (x-axis: Cis, Trans), with the **three conditions shown
+side by side as coloured violins** within each cell. This makes the
+cross-condition comparison the primary read: for a given variant type and
+location, is |β| the same in YPD, SC-2%-glucose, and fluconazole? The cis/trans
+split still carries the secondary message — SVs/CNVs look small because they are
+almost all trans, and trans < cis within every type. A per-cell Kruskal-Wallis
+tests whether the three conditions differ in |β|, printed where at least two
+conditions have ≥3 eQTLs.
+
+
+What the test is. Within one panel (say SNPs) at one location (say Cis), you have three groups of |β| values — the YPD cis-SNP effect sizes, the SC2Glu cis-SNP effect sizes, the fluconazole cis-SNP effect sizes. The Kruskal-Wallis test asks a single question: are these three distributions of effect size the same, or does at least one condition differ? It's the non-parametric (rank-based) version of a one-way ANOVA — it doesn't assume the effect sizes are normally distributed, which they aren't.
+
+So in the SNPs panel:
+
+the left KW p-value = "do YPD, SC2Glu, fluconazole differ in cis-SNP effect size?"
+the right KW p-value = "do they differ in trans-SNP effect size?"
+
+```{r effect-size, fig.width=12, fig.height=6}
+combined$abs_beta <- abs(combined[[signed_col]])
+
+es <- combined %>%
+  filter(CT %in% c("Cis", "Trans"), !is.na(abs_beta)) %>%
+  mutate(Genetic_variants = factor(Genetic_variants, levels = variant_levels),
+         condition        = factor(condition, levels = cond_levels),
+         CT               = factor(CT, levels = c("Cis", "Trans")))
+
+# per-condition eQTL counts (shown under each violin)
+n_lab <- es %>% count(Genetic_variants, CT, condition, name = "n") %>%
+  mutate(condition = factor(condition, levels = cond_levels))
+
+# Within each variant type x location cell, compare the THREE conditions
+# (Kruskal-Wallis) where each condition has >= 3 eQTLs.
+p_lab <- es %>% group_by(Genetic_variants, CT) %>%
+  summarise(p = {
+    ok <- table(condition[abs_beta >= 0])
+    if (sum(ok >= 3) >= 2 && n_distinct(condition[!is.na(abs_beta)]) >= 2)
+      tryCatch(format.pval(kruskal.test(abs_beta ~ condition)$p.value, digits = 2),
+               error = function(e) NA_character_)
+    else NA_character_
+  }, .groups = "drop") %>%
+  filter(!is.na(p)) %>% mutate(label = paste0("KW p = ", p))
+
+dodge <- position_dodge(width = 0.8)
+figES <- ggplot(es, aes(CT, abs_beta, fill = condition)) +
+  geom_violin(trim = FALSE, alpha = 0.6, scale = "width", position = dodge,
+              width = 0.75, linewidth = 0.3) +
+  geom_boxplot(aes(group = interaction(CT, condition)),
+               width = 0.12, fill = "white", outlier.shape = NA, position = dodge,
+               linewidth = 0.3) +
+  facet_grid(. ~ Genetic_variants) +
+  geom_text(data = p_lab, aes(x = as.integer(factor(CT, levels = c("Cis","Trans"))),
+                              y = Inf, label = label),
+            inherit.aes = FALSE, vjust = 1.4, size = 2.7) +
+  geom_text(data = n_lab, aes(x = CT, y = 0, label = paste0("n=", n),
+                              color = condition, group = condition),
+            position = dodge, vjust = 1.5, size = 2.5, fontface = "bold",
+            show.legend = FALSE) +
+  scale_fill_manual(values = cond_colors, name = "Condition") +
+  scale_color_manual(values = cond_colors, guide = "none") +
+  coord_cartesian(ylim = c(0, quantile(es$abs_beta, 0.99, na.rm = TRUE) * 1.15),
+                  clip = "off") +
+  labs(x = "Variant location", y = "Absolute effect size (|\u03b2|)",
+       title = "Effect size by variant type and location: conditions side by side") +
+  theme_bw(base_size = 13) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        strip.text = element_text(face = "bold"),
+        legend.position = "top",
+        panel.grid.minor = element_blank(),
+        plot.margin = margin(t = 10, r = 15, b = 25, l = 10))
+print(figES)
+ggsave(file.path(OUT, "fig_effect_size_by_type_and_location.tiff"), figES,
+       width = 12, height = 6, dpi = 600, units = "in", device = "tiff", compression = "lzw")
+```
+
+The cis/trans composition itself (few cis for SV/CNV) is reported as counts —
+this is the number the effect-size story rests on:
+
+```{r cis-trans-numbers}
+cat("Cis/trans counts by variant type and condition:\n")
+print(with(combined, table(Genetic_variants, CT, condition)))
+```
+
+# 6. Stress-vs-baseline eQTL overlap (two pairwise Venns)
+
+SNP-gene pairs are the sharing currency (shared *regulation*, not just a shared
+gene). The design is deliberately **two pairwise comparisons, both centred on
+fluconazole**: YPD vs Fluconazole and SC-2%-glucose vs Fluconazole. YPD and
+SC2Glu are near-identical baselines, so each pairwise Venn is an independent
+read of the same question — *what does fluconazole change relative to normal
+growth?* Agreement between the two panels replicates the drug signature across
+two baselines. The YPD-vs-SC2Glu overlap (the two baselines against each other)
+is reported only as a sanity check in the supplement — it should be large.
+
+```{r overlap-pairs, fig.width=12, fig.height=6}
+# pairwise-shared SNP-gene pair sets (reused downstream)
+shared_ypd_flu <- intersect(ypd_pairs, flu_pairs)
+shared_sc2_flu <- intersect(sc2glu_pairs, flu_pairs)
+shared_ypd_sc2 <- intersect(ypd_pairs, sc2glu_pairs)
+shared_all3    <- Reduce(intersect, list(ypd_pairs, flu_pairs, sc2glu_pairs))
+shared_any     <- unique(c(shared_ypd_flu, shared_sc2_flu, shared_ypd_sc2))
+
+cat("SNP-gene pair overlap:\n")
+cat("  YPD-Flu shared:   ", length(shared_ypd_flu),
+    "| YPD only:", length(setdiff(ypd_pairs, flu_pairs)),
+    "| Flu only:", length(setdiff(flu_pairs, ypd_pairs)), "\n")
+cat("  SC2Glu-Flu shared:", length(shared_sc2_flu),
+    "| SC2Glu only:", length(setdiff(sc2glu_pairs, flu_pairs)),
+    "| Flu only:", length(setdiff(flu_pairs, sc2glu_pairs)), "\n")
+cat("  YPD-SC2Glu shared (baseline sanity):", length(shared_ypd_sc2), "\n")
+
+p_venn_yf <- ggvenn(list(YPD = ypd_pairs, Fluconazole = flu_pairs),
+       fill_color = unname(cond_colors[c("YPD","Fluconazole")]),
+       set_name_size = 5, text_size = 4.5, show_percentage = FALSE) +
+  ggtitle("YPD vs Fluconazole") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 14))
+
+p_venn_sf <- ggvenn(list(SC2Glu = sc2glu_pairs, Fluconazole = flu_pairs),
+       fill_color = unname(cond_colors[c("SC2Glu","Fluconazole")]),
+       set_name_size = 5, text_size = 4.5, show_percentage = FALSE) +
+  ggtitle("SC-2%-glucose vs Fluconazole") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 14))
+
+print(p_venn_yf); print(p_venn_sf)
+ggsave(file.path(OUT, "fig_venn_YPD_vs_Flu.tiff"), p_venn_yf, width = 6, height = 6,
+       dpi = 600, units = "in", device = "tiff", compression = "lzw")
+ggsave(file.path(OUT, "fig_venn_SC2Glu_vs_Flu.tiff"), p_venn_sf, width = 6, height = 6,
+       dpi = 600, units = "in", device = "tiff", compression = "lzw")
+```
+
+```{r overlap-egene-supp, fig.width=12, fig.height=6}
+total_genes_ref <- read.csv("/scratch/aa9679/SingleCell_cerevisiae/Gene_exp_analysis/yeast_custom_annotations.csv") %>%
+  filter(gene_biotype == "protein_coding") %>% pull(gene_id) %>% unique() %>% length()
+
+run_fisher_pair <- function(setA, setB, nameA, nameB, total) {
+  overlap <- intersect(setA, setB)
+  mat <- matrix(c(length(overlap), length(setdiff(setA, setB)),
+                  length(setdiff(setB, setA)), total - length(union(setA, setB))),
+                nrow = 2, byrow = TRUE)
+  res <- fisher.test(mat)
+  cat(sprintf("%s vs %s: overlap=%d  OR=%.2f  p=%.3g\n",
+              nameA, nameB, length(overlap), res$estimate, res$p.value))
+  res
+}
+cat("=== eGene overlap Fisher tests (supplement) ===\n")
+invisible(run_fisher_pair(genes_YPD, genes_flu,    "YPD", "Flu",    total_genes_ref))
+invisible(run_fisher_pair(genes_sc2glu, genes_flu, "SC2Glu", "Flu", total_genes_ref))
+invisible(run_fisher_pair(genes_YPD, genes_sc2glu, "YPD", "SC2Glu (baseline)", total_genes_ref))
+
+pe_yf <- ggvenn(list(YPD = genes_YPD, Fluconazole = genes_flu),
+       fill_color = unname(cond_colors[c("YPD","Fluconazole")]),
+       set_name_size = 5, text_size = 4.5, show_percentage = FALSE) +
+  ggtitle("eGene overlap: YPD vs Fluconazole (supp)") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 13))
+pe_sf <- ggvenn(list(SC2Glu = genes_sc2glu, Fluconazole = genes_flu),
+       fill_color = unname(cond_colors[c("SC2Glu","Fluconazole")]),
+       set_name_size = 5, text_size = 4.5, show_percentage = FALSE) +
+  ggtitle("eGene overlap: SC2Glu vs Fluconazole (supp)") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 13))
+print(pe_yf); print(pe_sf)
+```
+
+# 7. MAIN FIGURE A — condition-sharing of eQTLs by variant type
+
+Complementary to the Venn: the Venn gives pooled shared/unique counts; this
+breaks the *same* sharing down by variant type, asking whether structural
+variants (SV/CNV) are more condition-labile than SNPs. Keep only if that
+variant-type-lability contrast is a point in the paper.
+
+```{r figA-sharing, fig.width=7, fig.height=5}
+pair_tab <- combined %>%
+  mutate(pair = paste(SNP, Pheno, sep = "_")) %>%
+  distinct(pair, condition, Genetic_variants)
+
+share_prop <- pair_tab %>%
+  group_by(pair, Genetic_variants) %>%
+  summarise(n_cond = n_distinct(condition), .groups = "drop") %>%
+  mutate(sharing = case_when(n_cond == 3 ~ "All three",
+                             n_cond == 2 ~ "Two conditions",
+                             TRUE        ~ "Condition-specific")) %>%
+  count(Genetic_variants, sharing) %>%
+  group_by(Genetic_variants) %>% mutate(prop = n / sum(n)) %>% ungroup() %>%
+  mutate(sharing = factor(sharing, levels = c("Condition-specific","Two conditions","All three")),
+         Genetic_variants = factor(Genetic_variants, levels = variant_levels))
+
+figA <- ggplot(share_prop, aes(Genetic_variants, prop, fill = sharing)) +
+  geom_col(width = 0.72, color = "black", linewidth = 0.3) +
+  geom_text(aes(label = ifelse(prop > 0.04, percent(prop, 1), "")),
+            position = position_stack(vjust = 0.5), size = 3.2, fontface = "bold") +
+  scale_fill_manual(values = c("Condition-specific" = "#B0BEC5",
+                               "Two conditions" = "#FFB74D", "All three" = "#455A64"), name = NULL) +
+  scale_y_continuous(labels = percent, expand = expansion(mult = c(0, 0.02))) +
+  labs(x = NULL, y = "Fraction of eQTLs", title = "Condition-sharing of eQTLs by variant type") +
+  theme_classic(base_size = 13) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        legend.position = "top", axis.text.x = element_text(face = "bold"))
+print(figA)
+ggsave(file.path(OUT, "figA_sharing_by_variant_type.tiff"), figA,
+       width = 7, height = 5, dpi = 600, units = "in", device = "tiff", compression = "lzw")
+```
+
+# 8. MAIN FIGURE B — effect-size concordance of shared eQTLs (all pairwise)
+
+For eQTLs (SNP-gene pairs) detected in **any** two conditions, do the effect
+sizes agree, and are there sign flips (regulatory reversal)? One panel per
+condition-pair; N and sign-flip count reported per panel.
+
+```{r figB-concordance, fig.width=10, fig.height=4.5}
+mk <- function(df) df %>% transmute(pair = paste(SNP, Pheno, sep = "_"),
+                                    beta = .data[[signed_col]], Genetic_variants)
+build_pair <- function(dfA, dfB, labA, labB) {
+  inner_join(mk(dfA), mk(dfB), by = c("pair","Genetic_variants"), suffix = c("_A","_B")) %>%
+    mutate(comparison = paste0(labA, " vs ", labB))
+}
+shared_beta <- bind_rows(
+  build_pair(all_clumped_YPD.1,  all_clumped_fluconazole, "YPD",    "Flu"),
+  build_pair(all_clumped_sc2glu, all_clumped_fluconazole, "SC2Glu", "Flu"),
+  build_pair(all_clumped_YPD.1,  all_clumped_sc2glu,      "YPD",    "SC2Glu")) %>%
+  mutate(sign_flip = sign(beta_A) != sign(beta_B),
+         comparison = factor(comparison, levels = c("YPD vs Flu","SC2Glu vs Flu","YPD vs SC2Glu")))
+
+concordance_summary <- shared_beta %>% group_by(comparison) %>%
+  summarise(n_shared = n(), n_sign_flip = sum(sign_flip),
+            pct_flip = round(100 * mean(sign_flip), 1),
+            pearson_r = round(cor(beta_A, beta_B), 3), .groups = "drop")
+cat("Effect-size concordance per condition-pair:\n"); print(concordance_summary)
+
+figB <- ggplot(shared_beta, aes(beta_A, beta_B, color = sign_flip)) +
+  geom_hline(yintercept = 0, linewidth = 0.3, color = "grey70") +
+  geom_vline(xintercept = 0, linewidth = 0.3, color = "grey70") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey50") +
+  geom_point(alpha = 0.6, size = 1.6) +
+  geom_text(data = concordance_summary, inherit.aes = FALSE,
+            aes(x = -Inf, y = Inf, label = paste0("n=", n_shared, ", r=", pearson_r,
+                                                   "\nflips=", n_sign_flip, " (", pct_flip, "%)")),
+            hjust = -0.08, vjust = 1.2, size = 3.2, fontface = "bold") +
+  facet_wrap(~ comparison, ncol = 3) +
+  scale_color_manual(values = c("FALSE" = "#455A64", "TRUE" = "#C41E3A"),
+                     labels = c("Concordant", "Sign flip"), name = NULL) +
+  labs(x = "Effect size (condition 1)", y = "Effect size (condition 2)",
+       title = "Effect-size concordance of shared eQTLs") +
+  theme_classic(base_size = 12) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"), legend.position = "top",
+        strip.background = element_rect(fill = "grey90", color = NA),
+        strip.text = element_text(face = "bold"))
+print(figB)
+ggsave(file.path(OUT, "figB_effect_concordance_all_pairs.tiff"), figB,
+       width = 10, height = 4.5, dpi = 600, units = "in", device = "tiff", compression = "lzw")
+```
+
+
+
+
+# 10. GO enrichment — two stress-vs-baseline comparisons
+
+Two comparative GO dotplots, one per baseline, each with three eGene categories:
+
+- **Plot 1 (YPD vs Fluconazole):** YPD-only, Flu-only, Shared YPD-Flu
+- **Plot 2 (SC2Glu vs Fluconazole):** SC2Glu-only, Flu-only, Shared SC2Glu-Flu
+
+Same rationale as the Venns — keep the stress against one baseline at a time,
+so the x-axis reads as *lost under stress / gained under stress / robust to
+stress* rather than a six-way grid. If the **Flu-only** column shows the same
+enriched terms in both plots, the fluconazole response is reproducible across
+baselines. Over-representation vs the protein-coding universe (`enrichGO`, ORF
+keys, `ont="ALL"`, BH, p < 0.05, q < 0.1); categories with <10 genes are skipped.
+
+```{r go-setup}
+library(clusterProfiler)
+library(org.Sc.sgd.db)
+
+tested_universe <- read.csv("/scratch/aa9679/SingleCell_cerevisiae/Gene_exp_analysis/yeast_custom_annotations.csv") %>%
+  filter(gene_biotype == "protein_coding") %>% pull(gene_id) %>% unique()
+
+run_enrichGO <- function(gene_list, label, universe, ontology = "ALL") {
+  g <- intersect(gene_list, universe)
+  cat("\n", label, "| genes in universe:", length(g), "\n")
+  if (length(g) < 10) { cat("  too few genes (<10), skipping\n"); return(NULL) }
+  res <- enrichGO(gene = g, universe = universe, OrgDb = org.Sc.sgd.db, keyType = "ORF",
+                  ont = ontology, pAdjustMethod = "BH", pvalueCutoff = 0.05, qvalueCutoff = 0.1)
+  if (is.null(res) || nrow(res) == 0) { cat("  no significant terms\n"); return(NULL) }
+  cat("  significant terms:", nrow(res), "\n"); res
+}
+
+# build one comparative dotplot from a named list of gene sets
+plot_go_pair <- function(go_lists, title, outfile) {
+  cat("\n===", title, "=== eGene category sizes:\n"); print(sapply(go_lists, length))
+  go_res <- lapply(names(go_lists), function(g)
+              run_enrichGO(go_lists[[g]], g, tested_universe)) %>% setNames(names(go_lists))
+  go_res <- go_res[!sapply(go_res, is.null)]
+  if (length(go_res) < 2) {
+    cat("  Fewer than 2 categories with significant terms — dotplot skipped.\n"); return(invisible(NULL))
+  }
+  SHOW_N <- 10   # terms per category
+  cg <- merge_result(go_res)
+  cg@compareClusterResult$Cluster <- factor(cg@compareClusterResult$Cluster, levels = names(go_lists))
+  # wide wrap: keep most terms on ONE line; only very long ones break
+  cg@compareClusterResult$Description <- stringr::str_wrap(cg@compareClusterResult$Description, width = 60)
+
+  p <- dotplot(cg, showCategory = SHOW_N) + ggtitle(title) + theme_bw(base_size = 13) +
+    theme(plot.title  = element_text(hjust = 0.5, face = "bold", size = 15, margin = margin(b = 10)),
+          axis.text.y = element_text(size = 8.5, color = "black", lineheight = 0.85),
+          axis.text.x = element_text(size = 11, face = "bold", color = "black", angle = 30, hjust = 1),
+          axis.title.x = element_text(size = 12, face = "bold"), axis.title.y = element_blank(),
+          legend.title = element_text(size = 11, face = "bold"), legend.text = element_text(size = 10))
+  print(p)
+  # height scales with the number of distinct terms actually shown, so rows never overlap
+  n_terms <- length(unique(p$data$Description))
+  ggsave(file.path(OUT, outfile), p, width = 10, height = max(7, 0.42 * n_terms + 2),
+         units = "in", dpi = 300, device = "tiff", compression = "lzw", limitsize = FALSE)
+  invisible(p)
+}
+```
+
+```{r go-YPD-vs-Flu, fig.width=10, fig.height=10}
+plot_go_pair(list(
+  "YPD-only"       = setdiff(genes_YPD, genes_flu),
+  "Flu-only"       = setdiff(genes_flu, genes_YPD),
+  "Shared YPD-Flu" = intersect(genes_YPD, genes_flu)),
+  "GO enrichment: YPD vs Fluconazole", "GO_comparison_YPD_vs_Flu.tiff")
+```
+
+```{r go-SC2Glu-vs-Flu, fig.width=10, fig.height=10}
+plot_go_pair(list(
+  "SC2Glu-only"       = setdiff(genes_sc2glu, genes_flu),
+  "Flu-only"          = setdiff(genes_flu, genes_sc2glu),
+  "Shared SC2Glu-Flu" = intersect(genes_sc2glu, genes_flu)),
+  "GO enrichment: SC-2%-glucose vs Fluconazole", "GO_comparison_SC2Glu_vs_Flu.tiff")
+```
+
+# 11. Fluconazole-specific eQTLs — candidate drug-response loci
+
+Fluconazole-specific SNP-gene pairs (present in fluconazole, in neither control),
+split by whether the target gene is also a baseline eGene, then cross-referenced
+against the linear-regression over-expressed gene list.
+
+```{r flu-specific}
+genes_baseline_any <- union(genes_YPD, genes_sc2glu)
+flu_specific_pairs <- setdiff(flu_pairs, union(ypd_pairs, sc2glu_pairs))
+all_clumped_flu_specific <- all_clumped_fluconazole %>%
+  filter(paste(SNP, Pheno, sep = "_") %in% flu_specific_pairs)
+
+genes_shared_gene_new_variant <- all_clumped_flu_specific %>%
+  filter(Pheno %in% genes_baseline_any) %>% pull(Pheno) %>% unique()
+genes_fully_novel <- all_clumped_flu_specific %>%
+  filter(!Pheno %in% genes_baseline_any) %>% pull(Pheno) %>% unique()
+cat("Flu-specific variant, baseline gene:", length(genes_shared_gene_new_variant), "\n")
+cat("Fully novel (gene + variant):", length(genes_fully_novel), "\n")
+
+lr_path <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/merged_fluconazole/new_fastlmm_march_26_2026/results/significant_genes_E2_fluc_from_linear_Regression.txt"
+if (file.exists(lr_path)) {
+  overexp_genes_lr <- unique(read.table(lr_path, header = TRUE, stringsAsFactors = FALSE)$ORF)
+  cat("\nOverlap with LR over-expressed genes:\n")
+  cat("  baseline-gene set:", length(intersect(overexp_genes_lr, genes_shared_gene_new_variant)), "\n")
+  cat("  novel set:", length(intersect(overexp_genes_lr, genes_fully_novel)), "\n")
+}
+```
+
+# 12. Session info
+
+```{r session}
+sessionInfo()
+```
+

@@ -1,0 +1,16 @@
+condition,regulon,n_genes,selection_method,n_go_hits
+YPD.1,GAL,4,GO-ORA,1
+YPD.1,NCR,4,canonical_fallback,0
+YPD.1,Stress,3,canonical_fallback,0
+YPD.2,GAL,1,canonical_fallback,0
+YPD.2,NCR,4,canonical_fallback,0
+YPD.2,Stress,23,GO-ORA,4
+Flu.1,GAL,1,canonical_fallback,0
+Flu.1,NCR,3,canonical_fallback,0
+Flu.1,Stress,4,canonical_fallback,0
+Flu.2,GAL,0,none_found,0
+Flu.2,NCR,4,canonical_fallback,0
+Flu.2,Stress,3,canonical_fallback,0
+sc2glu.2,GAL,3,GO-ORA,1
+sc2glu.2,NCR,4,canonical_fallback,0
+sc2glu.2,Stress,73,GO-ORA,2

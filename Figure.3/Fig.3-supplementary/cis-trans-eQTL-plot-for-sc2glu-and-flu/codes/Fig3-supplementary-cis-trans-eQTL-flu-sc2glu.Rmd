@@ -1,0 +1,334 @@
+---
+title: "Fig.3-Supplementary-panel-A-cis_trans_eqtl_mapping_flu-sc2glu"
+author: "Akriti Agrawal"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  html_document: 
+    toc: true
+    number_section: true
+    toc_float: 
+      collapsed: false
+      smooth_scroll: true
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(inputFile, encoding = encoding, output_dir = "../results/") })
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 10, fig.height = 10)
+```
+
+```{r libs, include=FALSE}
+library(tidyverse)
+library(data.table)
+library(GenomicRanges)
+select <- dplyr::select
+filter <- dplyr::filter
+```
+0. Config — set your four .clumped/assoc paths here; the indel switch is the confirmed REF_ALT. for fluconazole
+```{r config}
+RES  <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/merged_fluconazole/new_fastlmm_march_26_2026/results"
+CLMP <- file.path(RES)
+# All NEW outputs (annotated tables + figures) go here, NOT into RES:
+OUT  <- "../results"
+ANNOT_CSV <- "/scratch/aa9679/SingleCell_cerevisiae/Gene_exp_analysis/yeast_custom_annotations.csv"
+GENE_LOC  <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/merged_fluconazole/new_fastlmm_march_26_2026/data/pheno_data/gene_location.txt"
+CIS_WINDOW_BP <- 2000
+
+variant_cfg <- list(
+  SNP   = list(clumped = file.path(CLMP, "clumped_results_snp_82.clumped"), #it is in results folder only not in a subfolder
+               assoc   = file.path(RES,  "all_signif_SNPs_flu_with_threshold.txt")),
+  CNV   = list(clumped = file.path(CLMP, "clumped_results_CNVs.clumped"),
+               assoc   = file.path(RES,  "all_signif_CNVs_flu_with_threshold.txt")),
+  Indel = list(clumped = file.path(CLMP, "clumped_results_Indels.clumped"),
+               assoc   = file.path(RES,  "all_signif_Indels_flu_with_threshold.txt")),
+  SV    = list(clumped = file.path(CLMP, "clumped_results_SVs.clumped"),
+               assoc   = file.path(RES,  "all_signif_SVs_flu_with_threshold.txt"))
+)
+```
+
+```{}
+#fluconazole plink files:
+variant_types = {
+        'SNPs': {
+            'genotype': '/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/pan_transcriptome_paper/SNPs/SNPs_change_names_in_fam_968/SNPs_82fluc/full969Matrix.SNPs.Biallelic.Var.DP10.99percNonMissing.MAF15.NoSubTelo20kb.plink_YPD.1_82fluc_strains',
+            'outdir': '/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/merged_fluconazole/new_fastlmm_march_26_2026/results/results_SNPs'
+        },
+        'CNVs': {
+            'genotype': '/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/pan_transcriptome_paper/CNVs/CNVs_82fluc/CNV_969strains_gain_maf15_N400_20221121.plink_82fluc_strains',
+            'outdir': '/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/merged_fluconazole/new_fastlmm_march_26_2026/results/results_CNVs'
+        },
+        'Indels': {
+            'genotype': '/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/vcf_files_sent_by_Anne/SNPs_indels/modified_snp_indel_plink_for_96strains/Indels_only_fluc_81strains/indels._fluc_81strains',
+            'outdir': '/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/merged_fluconazole/new_fastlmm_march_26_2026/results/results_Indels'
+        },
+        'SVs': {
+            'genotype': '/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/vcf_files_sent_by_Anne/SVs_from_SV.1087/SV.1087samples_updated_fam_files/SVs_for_fluc_81strains/SV.1087samples.SVs_to_fluc_81strains',
+            'outdir': '/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/merged_fluconazole/new_fastlmm_march_26_2026/results/results_SVs'
+        }
+    }
+```
+
+0. Config — set your four .clumped/assoc paths here; the indel switch is the confirmed REF_ALT. for sc2glu
+```{r config}
+RES  <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2/fastlmm/results"
+CLMP <- file.path(RES, "plink_without_double_id")
+# All NEW outputs (annotated tables + figures) go here, NOT into RES:
+OUT  <- "../results"
+ANNOT_CSV <- "/scratch/aa9679/SingleCell_cerevisiae/Gene_exp_analysis/yeast_custom_annotations.csv"
+GENE_LOC  <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.1/fastlmm/data/pheno_data/gene_location.txt"
+CIS_WINDOW_BP <- 2000
+
+variant_cfg <- list(
+  SNP   = list(clumped = file.path(CLMP, "clumped_results_snp.clumped"),
+               assoc   = file.path(RES,  "all_signif_SNP_71_with_threshold.txt")),
+  CNV   = list(clumped = file.path(CLMP, "clumped_results_CNVs.clumped"),
+               assoc   = file.path(RES,  "all_signif_CNV_71_with_threshold.txt")),
+  Indel = list(clumped = file.path(CLMP, "clumped_results_Indels.clumped"),
+               assoc   = file.path(RES,  "all_signif_Indels_71_with_threshold.txt")),
+  SV    = list(clumped = file.path(CLMP, "clumped_results_SVs.clumped"),
+               assoc   = file.path(RES,  "all_signif_SVs_71_with_threshold.txt"))
+)
+```
+
+
+```{}
+#sc2glucose variant file information - the only difference is here I have filtered for 71 strains
+variant_types = {
+        'SNPs': {
+            'genotype': '/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/pan_transcriptome_paper/SNPs/SNPs_change_names_in_fam_968/SNPs_71/full969Matrix.SNPs.Biallelic.Var.DP10.99percNonMissing.MAF15.NoSubTelo20kb.plink_71strains',
+            'outdir': '/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2/fastlmm/results/results_SNPs_71'
+        },
+        'CNVs': {
+            'genotype': '/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/pan_transcriptome_paper/CNVs/CNVs_71/CNV_969strains_gain_maf15_N400_20221121.plink_71strains',
+            'outdir': '/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2/fastlmm/results/results_CNVs_71'
+        },
+        'CNVs.2_cov': {
+            'genotype': '/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/structural_variant_vcf/SVcalls/CNVs_for_71_strains/full1086.CNVs.MAC1.plink_to_71strains',
+            'outdir': '/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2/fastlmm/results/results_CNVs_71_cov'
+        },
+        'Indels': {
+            'genotype': '/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/vcf_files_sent_by_Anne/SNPs_indels/modified_snp_indel_plink_for_96strains/Indels_only_71/indels.71samples',
+            'outdir': '/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2/fastlmm/results/results_Indels_71'
+        },
+        'SVs': {
+            'genotype': '/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/vcf_files_sent_by_Anne/SVs_from_SV.1087/SV.1087samples_updated_fam_files/SVs_for_71_strains/SV.1087samples.SVs_to_71strains',
+            'outdir': '/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2/fastlmm/results/results_SVs_71'
+        }
+    }
+```
+
+1. Shared reference objects (chromosome coords, gene annotations, phenotype coords)
+```{r reference}
+ann <- read.csv(ANNOT_CSV)
+annotations_gr <- GRanges(ann$seqnames,
+                          IRanges(ann$start, ann$end),
+                          strand = ann$strand,
+                          type = ann$type, gene_id = ann$gene_id, gene_name = ann$gene_name)
+
+roman16 <- c("I","II","III","IV","V","VI","VII","VIII","IX","X","XI","XII","XIII","XIV","XV","XVI")
+num_to_roman <- function(x) roman16[x]
+
+chr_lengths <- c(I=230218, II=813184, III=316620, IV=1531933, V=576874, VI=270161,
+                 VII=1090940, VIII=562643, IX=439888, X=745751, XI=666816,
+                 XII=1078177, XIII=924431, XIV=784333, XV=1091291, XVI=948066)
+chr_offsets <- c(0, cumsum(chr_lengths[-length(chr_lengths)])); names(chr_offsets) <- roman16
+chr_mids <- chr_offsets + chr_lengths / 2
+
+gene_location_fixed <- read.table(GENE_LOC, header = TRUE, stringsAsFactors = FALSE) %>%
+  select(gene_id, gene_name, chr, left, right) %>%
+  mutate(right = right + 2,                                  # gene_end is start of stop codon
+         gene_id = str_replace(gene_id, "-", "."))
+
+feature_priority <- c(promoter=1, three_prime_UTR=2, five_prime_UTR=3,
+                      start_codon=4, stop_codon=5, CDS=6)
+prio <- function(f) { p <- feature_priority[f]; p[is.na(p)] <- 99; p }
+```
+Chunk 4 — reader (your process_clumped_variants, condensed)
+```{r}
+read_clumped <- function(clumped, assoc) {
+  ids <- read.table(clumped, header = TRUE)$SNP
+  read.table(assoc, header = TRUE, sep = "\t", stringsAsFactors = FALSE) %>%
+    filter(SNP %in% ids)
+}
+```
+
+
+Chunk 5 — point annotation (SNP = priority, CNV = first overlap)
+
+```{r annot-point}
+annotate_point <- function(df, pick = c("priority","first")) {
+  pick <- match.arg(pick)
+  df$var_chr_roman <- num_to_roman(df$Chr)
+  gr <- GRanges(df$var_chr_roman, IRanges(df$ChrPos, df$ChrPos))
+  df$causal_gene <- NA_character_; df$causal_gene_feature <- NA_character_
+
+  ov <- findOverlaps(gr, annotations_gr, type = "any")
+  for (i in unique(queryHits(ov))) {
+    subj <- subjectHits(ov)[queryHits(ov) == i]
+    k <- if (pick == "priority") subj[which.min(prio(annotations_gr$type[subj]))] else subj[1]
+    df$causal_gene[i] <- annotations_gr$gene_id[k]
+    df$causal_gene_feature[i] <- annotations_gr$type[k]
+  }
+  # intergenic: nearest gene within 2 kb, else intergenic_distant
+  m <- which(is.na(df$causal_gene))
+  if (length(m)) {
+    ng <- nearest(gr[m], annotations_gr); ok <- !is.na(ng)
+    d <- rep(NA_real_, length(m)); d[ok] <- distance(gr[m][ok], annotations_gr[ng[ok]])
+    near <- !is.na(d) & d <= CIS_WINDOW_BP
+    df$causal_gene[m[near]]          <- annotations_gr$gene_id[ng[near]]
+    df$causal_gene_feature[m[near]]  <- "intergenic_nearby"
+    df$causal_gene_feature[m[!near]] <- "intergenic_distant"
+  }
+  df
+}
+```
+
+
+Chunk 6 — range annotation (Indel = no nearest, SV = nearest)
+
+```{r annot-sv}
+annotate_range <- function(df, range_end, use_nearest) {
+  df$var_chr_roman <- num_to_roman(df$Chr)
+  gr <- GRanges(df$var_chr_roman, IRanges(df$ChrPos, range_end))
+  df$causal_gene <- NA_character_; df$causal_gene_feature <- NA_character_
+
+  ov <- findOverlaps(gr, annotations_gr, type = "any")
+  for (i in unique(queryHits(ov))) {
+    subj <- subjectHits(ov)[queryHits(ov) == i]
+    df$causal_gene[i]         <- paste(unique(annotations_gr$gene_id[subj]), collapse = "; ")
+    df$causal_gene_feature[i] <- paste(unique(annotations_gr$type[subj]),   collapse = "; ")
+  }
+  if (use_nearest) {                              # SV
+    m <- which(is.na(df$causal_gene))
+    if (length(m)) {
+      ng <- nearest(gr[m], annotations_gr); ok <- !is.na(ng)
+      d <- rep(NA_real_, length(m)); d[ok] <- distance(gr[m][ok], annotations_gr[ng[ok]])
+      near <- !is.na(d) & d <= CIS_WINDOW_BP
+      df$causal_gene[m[near]]          <- annotations_gr$gene_id[ng[near]]
+      df$causal_gene_feature[m[near]]  <- "intergenic_nearby"
+      df$causal_gene_feature[m[!near]] <- "intergenic_distant"
+    }
+  } else {                                        # Indel: original had nearest commented out
+    df$causal_gene_feature[is.na(df$causal_gene)] <- "intergenic_distant"
+  }
+  df
+}
+```
+Chunk 7 — per-type dispatch (builds each type's ranges the way your originals do)
+```{r annot-dispatch}
+annotate_variant <- function(df, vt) {
+  if (vt == "SNP") return(annotate_point(df, "priority"))
+  if (vt == "CNV") return(annotate_point(df, "first"))
+
+  if (vt == "Indel") {
+    p <- strsplit(df$SNP, "_")                    # CHR_POS_REF_ALT  (A1=ALT, A2=REF)
+    ref_len <- vapply(p, function(x) nchar(x[3]), 1L)
+    alt_len <- vapply(p, function(x) nchar(x[4]), 1L)
+    df$Indel_Size <- alt_len - ref_len            # +ve = insertion, -ve = deletion
+    range_end <- ifelse(df$Indel_Size < 0, df$ChrPos + ref_len - 1, df$ChrPos)
+    return(annotate_range(df, range_end, use_nearest = FALSE))
+  }
+  if (vt == "SV") {
+    sub <- vapply(strsplit(df$SNP, "_"), `[`, "", 2)
+    sz  <- vapply(strsplit(df$SNP, "_"), function(x){ i <- which(x=="len"); if(length(i)) as.numeric(x[i+1]) else NA_real_ }, 0)
+    range_end <- ifelse(sub %in% c("INS","TRA"), df$ChrPos, df$ChrPos + abs(sz))
+    range_end[is.na(range_end)] <- df$ChrPos[is.na(range_end)]
+    return(annotate_range(df, range_end, use_nearest = TRUE))
+  }
+}
+```
+Chunk 8 — cis/trans + harmonise (identical rule across all four originals)
+```{r harmonise}
+add_cis_trans <- function(df, vt) {
+  df %>%
+    left_join(gene_location_fixed, by = c("Pheno" = "gene_id")) %>%
+    mutate(Pheno_chr = chr, Pheno_start = left, Pheno_end = right,
+           dist_to_pheno = case_when(
+             var_chr_roman != Pheno_chr ~ NA_real_,
+             ChrPos < Pheno_start ~ Pheno_start - ChrPos,
+             ChrPos > Pheno_end   ~ ChrPos - Pheno_end,
+             TRUE ~ 0),
+           cis_trans = case_when(
+             var_chr_roman != Pheno_chr ~ "Trans",
+             dist_to_pheno == 0    ~ "Cis",
+             dist_to_pheno <= 2000 ~ "Cis",
+             causal_gene == Pheno  ~ "Cis",
+             TRUE                  ~ "Trans"),
+           variant_type = vt,
+           abs_effect_size = abs(SnpWeight)) %>%
+    select(variant_type, SNP, Pheno, var_chr_roman, ChrPos,
+           Pheno_chr, Pheno_start, Pheno_end, causal_gene,
+           cis_trans, abs_effect_size, PValue)
+}
+```
+
+Chunk 9 — build combined table
+```{r build-table}
+combined <- lapply(names(variant_cfg), function(vt) {
+  cfg <- variant_cfg[[vt]]
+  message("annotating ", vt, " ...")
+  read_clumped(cfg$clumped, cfg$assoc) %>% annotate_variant(vt) %>% add_cis_trans(vt)
+}) %>% bind_rows() %>%
+  mutate(var_chr_roman = factor(var_chr_roman, levels = roman16),
+         Pheno_chr     = factor(Pheno_chr,     levels = roman16),
+         variant_type  = factor(variant_type,  levels = c("SNP","CNV","Indel","SV")),
+         var_genome    = chr_offsets[as.character(var_chr_roman)] + ChrPos,
+         pheno_genome  = chr_offsets[as.character(Pheno_chr)] + (Pheno_start + Pheno_end)/2) %>%
+  filter(!is.na(var_genome), !is.na(pheno_genome), !is.na(cis_trans))
+
+table(combined$variant_type, combined$cis_trans)
+```
+Chunk 10 — Panel A: 2×2 cis/trans facet
+```{r panelA, fig.width=11, fig.height=11}
+panelA <- ggplot(combined, aes(var_genome, pheno_genome, color = cis_trans, size = abs_effect_size)) +
+  geom_point(alpha = 0.6) +
+  facet_wrap(~ variant_type, ncol = 2) +
+  scale_color_manual(name = "eQTL type", values = c(Cis = "#d73027", Trans = "#4575b4")) +
+  scale_size_continuous(name = "Effect size (|β|)", range = c(0.4, 2.6), trans = "log10") +
+  scale_x_continuous(breaks = chr_mids, labels = names(chr_mids), expand = c(0.01, 0)) +
+  scale_y_continuous(breaks = chr_mids, labels = names(chr_mids), expand = c(0.01, 0)) +
+  labs(x = "Variant position (chromosome)", y = "Gene position (chromosome)") +
+  theme_bw(base_size = 12) +
+  theme(strip.text = element_text(face = "bold"),
+        axis.text = element_text(size = 8),
+        legend.position = "bottom")
+
+ggsave(file.path(OUT, "Fig3_panelA_cis_trans_2x2.tiff"), panelA,
+       width = 11, height = 10, units = "in", dpi = 600, compression = "lzw")
+ggsave(file.path(OUT, "Fig3_panelA_cis_trans_2x2.png"),  panelA,
+       width = 11, height = 10, units = "in", dpi = 300)
+panelA
+```
+```{r}
+library(data.table)
+
+# --- per-type annotated tables (full columns, before harmonise) ---
+annotated_list <- lapply(names(variant_cfg), function(vt) {
+  cfg <- variant_cfg[[vt]]
+  read_clumped(cfg$clumped, cfg$assoc) %>% annotate_variant(vt) %>% add_cis_trans(vt)
+})
+names(annotated_list) <- names(variant_cfg)
+
+out_names <- c(SNP  = "snp_data_annotated_cis_trans.txt",
+               CNV  = "cnv_data_annotated_cis_trans.txt",
+               Indel= "indel_data_annotated_cis_trans.txt",
+               SV   = "sv_data_annotated_cis_trans.txt")
+
+for (vt in names(annotated_list)) {
+  f <- file.path(OUT, out_names[[vt]])
+  fwrite(annotated_list[[vt]], f, sep = "\t", quote = FALSE,
+         row.names = FALSE, na = "NA")
+  cat("Wrote", out_names[[vt]], "—", nrow(annotated_list[[vt]]), "rows\n")
+}
+
+# --- combined harmonised table used by the plot ---
+fwrite(combined, file.path(OUT, "all_variants_cis_trans_combined.txt"),
+       sep = "\t", quote = FALSE, row.names = FALSE, na = "NA")
+cat("Wrote all_variants_cis_trans_combined.txt —", nrow(combined), "rows\n")
+```
+
+```{r save-table}
+fwrite(combined, "../results/Fig3_panelA_combined_cis_trans_YPD.txt",
+       sep = "\t", quote = FALSE, na = "NA")
+```

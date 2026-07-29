@@ -1,0 +1,5 @@
+type,n_variants_pairs,decay_const_b_bp,half_length_bp,clump_kb_at_r2,empirical_cross_bp
+SNPs,4165939,2616,13228,,50
+CNVs,665,8189,6864,4.5,3150
+Indels,21033,693,893,,150
+SVs,157,260,,,50

@@ -1,0 +1,408 @@
+---
+title: "05_custom_gtf_annotations"
+author: "Akriti Agrawal"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  html_document: 
+    toc: true
+    number_section: true
+    toc_float: 
+      collapsed: false
+      smooth_scroll: true
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(inputFile, encoding = encoding, output_dir = "../results/") })
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      warning = FALSE, 
+                      message = FALSE,
+                      fig.width = 10, 
+                      fig.height = 6)
+```
+
+# Trans-eQTL Analysis with Allele Frequency Filtering
+
+This analysis processes eQTL data by filtering for SNPs with allele frequency greater than 5%. The workflow consists of two main steps:
+
+1. Process the VCF file to identify SNPs with allele frequency > 5%
+2. Filter each bootstrap file to keep only significant eQTLs with these common SNPs
+
+## Load Required Libraries
+
+```{r libraries}
+# Load necessary libraries
+library(data.table)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(ggplot2)
+library(org.Sc.sgd.db)
+# Be explicit if needed
+select <- dplyr::select
+filter <- dplyr::filter
+```
+
+---------------------------------------------------------
+# STEP 0: Load SNP and gene location data
+---------------------------------------------------------
+
+```{r load-snp-data}
+# 2. Read SNP matrix
+snp_matrix_df <- read.table("/scratch/aa9679/SingleCell_cerevisiae/Gene_exp_analysis/yeast/yeast.1/code/snp_matrix.txt", 
+                           header = TRUE, 
+                           sep = "\t", 
+                           stringsAsFactors = FALSE)
+
+# Convert back to matrix with rownames
+snp_matrix <- as.matrix(snp_matrix_df[, -1])  # Remove the SNP_ID column
+rownames(snp_matrix) <- snp_matrix_df$SNP_ID
+
+# 3. Read SNP location
+snp_location <- read.table("/scratch/aa9679/SingleCell_cerevisiae/Gene_exp_analysis/yeast/yeast.1/code/snp_location.txt", 
+                          header = TRUE, 
+                          sep = "\t", 
+                          stringsAsFactors = FALSE)
+
+dim(snp_matrix)
+dim(snp_location)
+
+
+# Read gene matrix file
+gene_matrix_df <- read.table("../results/pseudobulk_and_eqtl/gene_matrix.txt", 
+                            header = TRUE, 
+                            sep = "\t", 
+                            stringsAsFactors = FALSE)
+
+# Convert back to matrix with row names
+gene_ids <- gene_matrix_df$Gene_ID
+gene_matrix <- as.matrix(gene_matrix_df[, -1])  # Remove Gene_ID column
+rownames(gene_matrix) <- gene_ids
+
+# Check dimensions
+cat("Gene matrix dimensions:", nrow(gene_matrix), "genes by", ncol(gene_matrix), "samples\n")
+
+# Read gene location file
+gene_location <- read.table("../results/pseudobulk_and_eqtl/gene_location.txt", 
+                           header = TRUE,
+                           stringsAsFactors = FALSE)
+
+# Check dimensions
+cat("Gene location file:", nrow(gene_location), "rows\n")
+
+# Verify that the files were read correctly
+head(gene_matrix[, 1:5])  # Show first 5 columns of gene matrix
+head(gene_location)
+
+# Check for NA values in the position columns
+sum(is.na(gene_location$left))  # Count NA values in start position
+sum(is.na(gene_location$right)) # Count NA values in end position
+
+# Option 1: Remove genes with NA positions
+gene_location_fixed <- gene_location[!is.na(gene_location$left) & !is.na(gene_location$right), ]
+gene_location_fixed <- gene_location_fixed[, c("geneid", "chr", "left", "right")]
+names(gene_location_fixed) <- c("geneid", "chr", "start", "end")
+
+length(unique(gene_location$chr))
+```
+
+
+#Create custom annotations
+
+Look at the features
+
+```{r}
+library(rtracklayer)
+# Process the GTF annotation file
+gtf_file <- "/scratch/aa9679/SingleCell_cerevisiae/Saccharomyces_cerevisiae.R64-1-1.CLEAN.gtf.gz"
+yeast_annotations <- import(gtf_file)
+gene_annotations <- yeast_annotations[yeast_annotations$type == "gene"]
+
+# Explore different biotypes in yeast annotations
+library(dplyr)
+
+# Create the gene_type dataframe
+gene_type <- data.frame(
+  geneid = yeast_annotations$gene_id,
+  type = yeast_annotations$type,
+  gene_biotype = yeast_annotations$gene_biotype,
+  transcript_biotype = yeast_annotations$transcript_biotype,
+  stringsAsFactors = FALSE
+)
+
+cat("=== OVERVIEW OF ANNOTATION TYPES ===\n")
+cat("Total annotations:", nrow(gene_type), "\n\n")
+
+# 1. Explore the 'type' column (gene, transcript, exon, etc.)
+cat("=== ANNOTATION TYPES (type column) ===\n")
+type_counts <- table(gene_type$type, useNA = "ifany")
+print(type_counts)
+cat("\n")
+
+# 2. Explore gene_biotype
+cat("=== GENE BIOTYPES ===\n")
+gene_biotype_counts <- table(gene_type$gene_biotype, useNA = "ifany")
+print(gene_biotype_counts)
+cat("\nUnique gene biotypes:\n")
+unique_gene_biotypes <- unique(gene_type$gene_biotype)
+print(unique_gene_biotypes[!is.na(unique_gene_biotypes)])
+cat("\n")
+
+# 3. Explore transcript_biotype
+cat("=== TRANSCRIPT BIOTYPES ===\n")
+transcript_biotype_counts <- table(gene_type$transcript_biotype, useNA = "ifany")
+print(transcript_biotype_counts)
+cat("\nUnique transcript biotypes:\n")
+unique_transcript_biotypes <- unique(gene_type$transcript_biotype)
+print(unique_transcript_biotypes[!is.na(unique_transcript_biotypes)])
+cat("\n")
+
+
+# Step 1: Convert gene annotations to data frame
+gene_annotations_df <- as.data.frame(yeast_annotations)
+```
+
+#### Step 6b. Create custom annotation file for SNP annotations
+```{r}
+# Step 1: Convert gene annotations to data frame
+# Process the GTF annotation file
+gtf_file <- "/scratch/aa9679/SingleCell_cerevisiae/Saccharomyces_cerevisiae.R64-1-1.CLEAN.gtf.gz"
+yeast_annotations <- import(gtf_file)
+gene_annotations_df <- as.data.frame(yeast_annotations)
+
+
+# Create custom gene annotations for ALL genes
+# Processes both + and - strand genes
+
+library(dplyr)
+
+# Get all unique gene IDs
+all_gene_ids <- unique(gene_annotations_df$gene_id)
+all_gene_ids <- all_gene_ids[!is.na(all_gene_ids)]
+
+cat("Processing", length(all_gene_ids), "genes...\n")
+
+# Create a new dataframe for all custom annotations
+all_custom_gene_annotations <- data.frame()
+
+# Counter for progress tracking
+processed_count <- 0
+failed_count <- 0
+
+# Process each gene
+for(gene_id in all_gene_ids) {
+  
+  processed_count <- processed_count + 1
+  
+  # Progress update every 500 genes
+  if(processed_count %% 500 == 0) {
+    cat("Processed", processed_count, "of", length(all_gene_ids), "genes...\n")
+  }
+  
+  tryCatch({
+    
+    # Filter annotations for this gene
+    gene_features <- gene_annotations_df[gene_annotations_df$gene_id == gene_id, ]
+    
+    if(nrow(gene_features) == 0) {
+      failed_count <- failed_count + 1
+      next
+    }
+    
+    # Get gene info from first row
+    gene_info <- gene_features[1, ]
+    strand <- gene_info$strand
+    seqname <- gene_info$seqnames
+    source <- gene_info$source
+    
+    # Get CDS coordinates
+    cds_features <- gene_features[gene_features$type == "CDS", ]
+    if(nrow(cds_features) == 0) {
+      # Skip genes without CDS (like ncRNA, etc.)
+      next
+    }
+    
+    cds_start <- min(cds_features$start)
+    cds_end <- max(cds_features$end)
+    
+    # Get transcript coordinates
+    transcript_features <- gene_features[gene_features$type == "transcript", ]
+    if(nrow(transcript_features) > 0) {
+      transcript_start <- min(transcript_features$start)
+      transcript_end <- max(transcript_features$end)
+    } else {
+      # Use gene coordinates if transcript not available
+      gene_row <- gene_features[gene_features$type == "gene", ]
+      if(nrow(gene_row) > 0) {
+        transcript_start <- gene_row$start[1]
+        transcript_end <- gene_row$end[1]
+      } else {
+        # Fallback: use min/max of all features
+        transcript_start <- min(gene_features$start)
+        transcript_end <- max(gene_features$end)
+      }
+    }
+    
+    # Add existing CDS annotations
+    all_custom_gene_annotations <- rbind(all_custom_gene_annotations, cds_features)
+    
+    # Add start_codon and stop_codon if they exist
+    start_codon_features <- gene_features[gene_features$type == "start_codon", ]
+    if(nrow(start_codon_features) > 0) {
+      all_custom_gene_annotations <- rbind(all_custom_gene_annotations, start_codon_features)
+    }
+    
+    stop_codon_features <- gene_features[gene_features$type == "stop_codon", ]
+    if(nrow(stop_codon_features) > 0) {
+      all_custom_gene_annotations <- rbind(all_custom_gene_annotations, stop_codon_features)
+    }
+    
+    # Create UTR annotations based on strand
+    if(strand == "+") {
+      
+      # For positive strand:
+      # 5' UTR is from transcript start to CDS start
+      # 3' UTR is from CDS end to transcript end
+      
+      if(transcript_start < cds_start) {
+        # 5' UTR
+        five_prime_utr <- gene_info
+        five_prime_utr$start <- transcript_start
+        five_prime_utr$end <- cds_start - 1
+        five_prime_utr$width <- (cds_start - 1) - transcript_start + 1
+        five_prime_utr$type <- "five_prime_UTR"
+        five_prime_utr$score <- NA
+        five_prime_utr$phase <- NA
+        
+        all_custom_gene_annotations <- rbind(all_custom_gene_annotations, five_prime_utr)
+      }
+      
+      if(cds_end < transcript_end) {
+        # 3' UTR
+        three_prime_utr <- gene_info
+        three_prime_utr$start <- cds_end + 1
+        three_prime_utr$end <- transcript_end
+        three_prime_utr$width <- transcript_end - (cds_end + 1) + 1
+        three_prime_utr$type <- "three_prime_UTR"
+        three_prime_utr$score <- NA
+        three_prime_utr$phase <- NA
+        
+        all_custom_gene_annotations <- rbind(all_custom_gene_annotations, three_prime_utr)
+        
+        # Terminator region (15bp downstream of 3' UTR)
+        terminator <- gene_info
+        terminator$start <- transcript_end + 1
+        terminator$end <- transcript_end + 15
+        terminator$width <- 15
+        terminator$type <- "terminator"
+        terminator$score <- NA
+        terminator$phase <- NA
+        
+        all_custom_gene_annotations <- rbind(all_custom_gene_annotations, terminator)
+      }
+      
+      # Promoter region (200bp upstream of transcription start site)
+      promoter <- gene_info
+      promoter$start <- transcript_start - 200
+      promoter$end <- transcript_start - 1
+      promoter$width <- 200
+      promoter$type <- "promoter"
+      promoter$score <- NA
+      promoter$phase <- NA
+      
+      all_custom_gene_annotations <- rbind(all_custom_gene_annotations, promoter)
+      
+    } else if(strand == "-") {
+      
+      # For negative strand:
+      # 5' UTR is from CDS end to transcript end (3' in genomic coordinates)
+      # 3' UTR is from transcript start to CDS start (5' in genomic coordinates)
+      
+      if(transcript_start < cds_start) {
+        # 3' UTR (5' in genomic coordinates, but 3' relative to gene direction)
+        three_prime_utr <- gene_info
+        three_prime_utr$start <- transcript_start
+        three_prime_utr$end <- cds_start - 1
+        three_prime_utr$width <- (cds_start - 1) - transcript_start + 1
+        three_prime_utr$type <- "three_prime_UTR"
+        three_prime_utr$score <- NA
+        three_prime_utr$phase <- NA
+        
+        all_custom_gene_annotations <- rbind(all_custom_gene_annotations, three_prime_utr)
+        
+        # Terminator region (15bp upstream of 3' UTR in genomic coordinates)
+        terminator <- gene_info
+        terminator$start <- transcript_start - 15
+        terminator$end <- transcript_start - 1
+        terminator$width <- 15
+        terminator$type <- "terminator"
+        terminator$score <- NA
+        terminator$phase <- NA
+        
+        all_custom_gene_annotations <- rbind(all_custom_gene_annotations, terminator)
+      }
+      
+      if(cds_end < transcript_end) {
+        # 5' UTR (3' in genomic coordinates, but 5' relative to gene direction)
+        five_prime_utr <- gene_info
+        five_prime_utr$start <- cds_end + 1
+        five_prime_utr$end <- transcript_end
+        five_prime_utr$width <- transcript_end - (cds_end + 1) + 1
+        five_prime_utr$type <- "five_prime_UTR"
+        five_prime_utr$score <- NA
+        five_prime_utr$phase <- NA
+        
+        all_custom_gene_annotations <- rbind(all_custom_gene_annotations, five_prime_utr)
+      }
+      
+      # Promoter region (200bp upstream of gene start in genomic coordinates)
+      # For negative strand, upstream means higher coordinates
+      promoter <- gene_info
+      promoter$start <- transcript_end + 1
+      promoter$end <- transcript_end + 200
+      promoter$width <- 200
+      promoter$type <- "promoter"
+      promoter$score <- NA
+      promoter$phase <- NA
+      
+      all_custom_gene_annotations <- rbind(all_custom_gene_annotations, promoter)
+    }
+    
+  }, error = function(e) {
+    failed_count <<- failed_count + 1
+    cat("Error processing gene", gene_id, ":", e$message, "\n")
+  })
+}
+
+# Sort all annotations by chromosome and start position
+all_custom_gene_annotations <- all_custom_gene_annotations[order(all_custom_gene_annotations$seqnames, 
+                                                                 all_custom_gene_annotations$start), ]
+
+# Reset row names
+rownames(all_custom_gene_annotations) <- NULL
+
+# Final summary
+cat("\n=== PROCESSING COMPLETE ===\n")
+cat("Total genes processed:", processed_count, "\n")
+cat("Genes failed:", failed_count, "\n")
+cat("Total annotations created:", nrow(all_custom_gene_annotations), "\n")
+
+cat("\nSummary of annotation types:\n")
+print(table(all_custom_gene_annotations$type))
+
+cat("\nAnnotations per chromosome:\n")
+print(table(all_custom_gene_annotations$seqnames))
+
+# Display first few rows
+cat("\nFirst few annotations:\n")
+print(head(all_custom_gene_annotations[, c("seqnames", "type", "start", "end", "width", "strand", "gene_id")]))
+
+# Save to file (optional)
+write.csv(all_custom_gene_annotations, "../data/yeast_custom_annotations.csv", row.names = FALSE)
+
+```
+
+
+
+

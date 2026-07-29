@@ -1,0 +1,33 @@
+PLINK v1.9.0-b.8 64-bit (22 Oct 2024)
+Options in effect:
+  --bfile /projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/vcf_files_sent_by_Anne/SNPs_indels/modified_snp_indel_plink_for_96strains/Indels_only_96/indels.96samples
+  --keep keep_lists/keep_Indels.txt
+  --ld-window 999999
+  --ld-window-kb 20
+  --ld-window-r2 0
+  --out ld_tables/ld_Indels
+  --r2
+
+Hostname: cs686.hpc.nyu.edu
+Working directory: /projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.1/fastlmm/codes/scripts_step2/LD_decay_on_96_strains
+Start time: Mon Jul 27 13:13:00 2026
+
+Random number seed: 1785172380
+515108 MB RAM detected; reserving 257554 MB for main workspace.
+3021 variants loaded from .bim file.
+96 people (0 males, 0 females, 96 ambiguous) loaded from .fam.
+Ambiguous sex IDs written to ld_tables/ld_Indels.nosex .
+--keep: 96 people remaining.
+Using up to 3 threads (change this with --threads).
+Before main variant filters, 96 founders and 0 nonfounders present.
+Calculating allele frequencies... done.
+Total genotyping rate is exactly 1.
+3021 variants and 96 people pass filters and QC.
+Note: No phenotypes present.
+Running --r2 with the following filters:
+  --ld-window: 999999
+  --ld-window-kb: 20
+  --ld-window-r2: 0
+--r2 to ld_tables/ld_Indels.ld ... done.
+
+End time: Mon Jul 27 13:13:00 2026

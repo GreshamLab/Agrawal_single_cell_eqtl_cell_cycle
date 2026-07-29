@@ -1,0 +1,171 @@
+---
+title: "LD_output_analysis"
+output: html_document
+---
+
+```{r}
+library(data.table)
+library(ggplot2)
+library(minpack.lm)
+
+# ---- parameters ---------------------------------------------------------
+types    <- c("SNPs", "CNVs", "Indels", "SVs")
+max_dist <- 20000     # bp; matches --ld-window-kb 20
+clump_r2 <- 0.6       # your --clump-r2
+
+# Bin size is a PLOTTING/estimation choice, not a clumping parameter.
+# Noise in each bin depends on pairs-per-bin, so widen bins for sparse types:
+#   SNPs   ~4.2M pairs  -> 100 bp bins are precise
+#   Indels/CNVs/SVs few pairs -> wider bins pool more pairs -> stable mean
+bin_by_type      <- c(SNPs = 100, CNVs = 2000, Indels = 1000, SVs = 2000)
+MIN_PAIRS_TO_FIT <- 5000   # below this, too sparse to fit a decay curve
+
+# ---- worker: read one .ld, bin, fit -------------------------------------
+process_type <- function(ty) {
+  f <- sprintf("ld_tables/ld_%s.ld", ty)
+  if (!file.exists(f)) { message("MISSING: ", f); return(NULL) }
+  bs <- bin_by_type[[ty]]                          # per-type bin width
+  ld <- fread(f)                                   # CHR_A BP_A ... BP_B ... R2
+  ld[, Distance := abs(BP_B - BP_A)]
+  ld <- ld[Distance > 0 & Distance <= max_dist]
+  if (!nrow(ld)) { message("no pairs: ", ty); return(NULL) }
+
+  ld[, Bin := floor(Distance / bs) * bs + bs/2]    # bin midpoint
+  decay <- ld[, .(MeanR2 = mean(R2),
+                  Q25    = quantile(R2, .25),
+                  Q75    = quantile(R2, .75),
+                  FracGE = mean(R2 >= clump_r2),    # frac of pairs above clump-r2
+                  N      = .N), by = Bin][order(Bin)]
+  decay[, type := ty]
+
+  # Fit exponential decay only if there are enough pairs to mean anything
+  fit <- NULL
+  if (nrow(ld) >= MIN_PAIRS_TO_FIT) {
+    fit <- tryCatch(
+      nlsLM(MeanR2 ~ a*exp(-Bin/b) + c, data = decay,
+            start = list(a = 0.5, b = 2000, c = 0.1),
+            control = nls.lm.control(maxiter = 200)),
+      error = function(e) { message("fit failed for ", ty, ": ",
+                                    conditionMessage(e)); NULL })
+  } else {
+    message(ty, ": only ", nrow(ld), " pairs - too sparse to fit, no clump-kb")
+  }
+
+  b_const <- half_decay <- window95 <- NA_real_
+  if (!is.null(fit)) {
+    p <- coef(fit); b_const <- p["b"]
+    half_decay <- as.numeric(p["b"] * log(2))    # local LD halves
+    window95   <- as.numeric(p["b"] * log(20))   # local LD -> 5% (captures ~95%)
+  }
+  # Data-driven window: largest distance where >=1% of pairs still exceed clump_r2.
+  # This is the quantity that actually maps to --clump-kb.
+  emp_win <- suppressWarnings(max(decay[FracGE >= 0.01 & N >= 20, Bin]))
+  emp_win <- if (is.finite(emp_win)) emp_win else NA_real_
+
+  list(decay = decay, fit = fit, bin = bs,
+       summary = data.table(
+         type = ty, n_pairs = nrow(ld), bin_bp = bs,
+         plateau_c   = if (!is.null(fit)) round(coef(fit)["c"], 3) else NA_real_,
+         decay_b_bp  = round(b_const),
+         half_decay_bp = round(half_decay),
+         window95_bp   = round(window95),          # candidate --clump-kb (fit)
+         emp_window_bp = emp_win))                  # candidate --clump-kb (data)
+}
+
+res <- lapply(types, process_type)
+names(res) <- types
+res <- res[!vapply(res, is.null, logical(1))]
+
+# ---- summary table ------------------------------------------------------
+summary_tbl <- rbindlist(lapply(res, `[[`, "summary"))
+print(summary_tbl)
+fwrite(summary_tbl, "LD_decay_summary.csv")
+
+# ---- derive ONE clump-kb from SNPs, apply to all types ------------------
+snp <- summary_tbl[type == "SNPs"]
+clump_kb_bp <- if (nrow(snp) && !is.na(snp$emp_window_bp)) {
+  snp$emp_window_bp
+} else if (nrow(snp)) {
+  snp$window95_bp
+} else {
+  NA_real_
+}
+cat(sprintf("\n>> SNP-derived clump window: %.0f bp (%.1f kb)\n",
+            clump_kb_bp, clump_kb_bp/1000))
+cat(">> Apply this same --clump-kb to ALL variant types.\n")
+cat(">> CNV/Indel/SV curves are density-limited - do NOT set per-type windows.\n")
+
+# ---- per-type plots -----------------------------------------------------
+cols <- c(SNPs="#2E86AB", CNVs="#E1A100", Indels="#A23B72", SVs="#3B7A57")
+for (ty in names(res)) {
+  r <- res[[ty]]; d <- r$decay
+  pred <- NULL
+  if (!is.null(r$fit)) {
+    pred <- data.frame(Bin = seq(0, max_dist, length.out = 400))
+    pred$MeanR2 <- predict(r$fit, newdata = pred)
+  }
+  sparse_note <- if (is.null(r$fit)) " (sparse - descriptive only)" else ""
+  p <- ggplot(d, aes(Bin, MeanR2)) +
+    geom_ribbon(aes(ymin = Q25, ymax = Q75), fill = cols[ty], alpha = 0.15) +
+    geom_line(color = cols[ty], linewidth = 1.1) +
+    geom_point(color = cols[ty], size = 1.0, alpha = 0.6)
+  if (!is.null(pred)) p <- p + geom_line(data = pred, aes(Bin, MeanR2),
+                                         linetype = "dashed", color = "black")
+  p <- p +
+    geom_hline(yintercept = clump_r2, linetype = "dotted", color = "grey60") +
+    scale_x_continuous(breaks = seq(0, max_dist, 2000),
+                       labels = function(x) paste0(x/1000, "kb")) +
+    scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, .1)) +
+    labs(title = sprintf("LD decay - %s (95 strains)%s", ty, sparse_note),
+         subtitle = sprintf("bin %s bp | %s pairs | half-decay %s bp",
+                            r$bin, format(r$summary$n_pairs, big.mark=","),
+                            r$summary$half_decay_bp),
+         x = "Distance between variants (bp)",
+         y = expression(paste("Mean ", r^2))) +
+    theme_minimal(base_size = 12) +
+    theme(plot.title = element_text(face = "bold"),
+          panel.grid.minor = element_blank())
+  ggsave(sprintf("LD_decay_%s.png", ty), p, width = 9, height = 6, dpi = 300)
+  fwrite(d, sprintf("LD_decay_%s_binned.csv", ty))
+}
+
+# ---- SNP fraction-of-pairs >= clump_r2 vs distance (justifies clump-kb) --
+snp_d <- res$SNPs$decay
+p_frac <- ggplot(snp_d, aes(Bin, FracGE)) +
+  geom_line(color = cols["SNPs"], linewidth = 1.1) +
+  { if (!is.na(clump_kb_bp)) geom_vline(xintercept = clump_kb_bp,
+        linetype = "dotted", color = "grey30") } +
+  { if (!is.na(clump_kb_bp)) annotate("text", x = clump_kb_bp, y = 0.9,
+        hjust = -0.05, size = 3.4,
+        label = sprintf("clump-kb ~ %.1f kb", clump_kb_bp/1000)) } +
+  scale_x_continuous(breaks = seq(0, max_dist, 2000),
+                     labels = function(x) paste0(x/1000, "kb")) +
+  labs(title = "SNPs: fraction of pairs with r2 >= 0.6 vs distance",
+       subtitle = "The distance where this ~vanishes is the natural --clump-kb",
+       x = "Distance between variants (bp)",
+       y = expression(paste("Fraction of pairs with ", r^2, " >= 0.6"))) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"), panel.grid.minor = element_blank())
+ggsave("LD_SNP_frac_ge_0.6.png", p_frac, width = 9, height = 6, dpi = 300)
+
+# ---- overlay (SNPs = the interpretable curve) ---------------------------
+all_decay <- rbindlist(lapply(res, `[[`, "decay"))
+p_overlay <- ggplot(all_decay, aes(Bin, MeanR2, color = type)) +
+  geom_line(linewidth = 1.0) +
+  geom_hline(yintercept = clump_r2, linetype = "dotted", color = "grey60") +
+  scale_color_manual(values = cols, name = "Variant type") +
+  scale_x_continuous(breaks = seq(0, max_dist, 2000),
+                     labels = function(x) paste0(x/1000, "kb")) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, .1)) +
+  labs(title = "LD decay by variant type (95 strains)",
+       subtitle = "Only SNPs are dense enough to interpret; others are density-limited",
+       x = "Distance between variants (bp)",
+       y = expression(paste("Mean ", r^2))) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"), panel.grid.minor = element_blank())
+ggsave("LD_decay_overlay_all_types.png", p_overlay, width = 9, height = 6, dpi = 300)
+
+cat("\nWrote: per-type PNG+CSV, LD_SNP_frac_ge_0.6.png, overlay, LD_decay_summary.csv\n")
+
+```
+

@@ -312,7 +312,8 @@ fig2A <- (strip_A / hm_A$plot) +
   theme(legend.position = "right")
 
 print(fig2A)
-ggsave(file.path(OUT_DIR, "Fig2A_strain_DEG_heatmap.pdf"), fig2A, width = 10, height = 7, units = "in")
+ggsave(file.path(OUT_DIR, "Fig2A_strain_DEG_heatmap.tiff"), fig2A, width = 10, height = 7,
+       units = "in", dpi = 600, device = "tiff", compression = "lzw")
 ```
 
 
@@ -343,12 +344,20 @@ fig2B <- ggplot() +
   ggrepel::geom_text_repel(data = centroids_B, aes(tSNE1, tSNE2, label = clade),
                            size = 2.4, fontface = "bold", color = "black",
                            max.overlaps = 20, segment.size = 0.3) +
-  scale_color_manual(values = clade_colors, na.value = "white", guide = "none") +
+  scale_color_manual(values = clade_colors, na.value = "grey50", name = "Clade",
+                     breaks = names(clade_colors)) +
+  guides(color = guide_legend(override.aes = list(size = 3, alpha = 1), ncol = 1)) +
   labs(x = "t-SNE 1", y = "t-SNE 2") +
-  pub_theme
+  pub_theme +
+  theme(legend.position = "right",
+        legend.key.size = unit(0.35, "cm"),
+        legend.text  = element_text(size = 7),
+        legend.title = element_text(size = 8, face = "bold"))
 
 print(fig2B)
-ggsave(file.path(OUT_DIR, "Fig2B_tsne_clade.pdf"), fig2B, width = 4.2, height = 4, units = "in")
+# wider canvas so the added legend doesn't compress the plotting area
+ggsave(file.path(OUT_DIR, "Fig2B_tsne_clade.tiff"), fig2B, width = 6.2, height = 4,
+       units = "in", dpi = 600, device = "tiff", compression = "lzw")
 ```
 
 ```{r}
@@ -383,8 +392,10 @@ print(fig2C_NCR)
 n_row_GAL <- ceiling(length(gal_focus_genes) / 3)
 n_row_NCR <- ceiling(length(ncr_focus_genes) / 3)
 
-ggsave(file.path(OUT_DIR, "Fig2C1_GAL_regulon.pdf"), fig2C_GAL, width = 7.5, height = 2.6 * n_row_GAL, units = "in")
-ggsave(file.path(OUT_DIR, "Fig2C1_NCR_regulon.pdf"), fig2C_NCR, width = 7.5, height = 2.6 * n_row_NCR, units = "in")
+ggsave(file.path(OUT_DIR, "Fig2C1_GAL_regulon.tiff"), fig2C_GAL, width = 7.5, height = 2.6 * n_row_GAL,
+       units = "in", dpi = 600, device = "tiff", compression = "lzw")
+ggsave(file.path(OUT_DIR, "Fig2C1_NCR_regulon.tiff"), fig2C_NCR, width = 7.5, height = 2.6 * n_row_NCR,
+       units = "in", dpi = 600, device = "tiff", compression = "lzw")
 ```
 #function created
 ```{r}
@@ -459,11 +470,14 @@ clade_deg_counts <- dge_combined %>%
 clades_with_degs <- clade_deg_counts %>% filter(n_deg >= 5) %>% pull(clade)
 
 # All clades -> two multi-page PDFs (volcanoes, then GO dot plots)
-pdf(file.path(OUT_DIR, "Fig2C2_volcano_ALL.pdf"), width = 6, height = 5)
+# tiff() cannot hold multiple pages, so %02d writes one numbered TIFF per clade
+tiff(file.path(OUT_DIR, "Fig2C2_volcano_ALL_%02d.tiff"), width = 6, height = 5,
+     units = "in", res = 600, compression = "lzw")
 for (cl in clades_with_degs) print(plot_volcano(dge_results[[cl]], clade_label = cl))
 dev.off()
 
-pdf(file.path(OUT_DIR, "Fig2C2_GO_dotplot_ALL.pdf"), width = 6, height = 5)
+tiff(file.path(OUT_DIR, "Fig2C2_GO_dotplot_ALL_%02d.tiff"), width = 6, height = 5,
+     units = "in", res = 600, compression = "lzw")
 for (cl in clades_with_degs) {
   g <- plot_go_dotplot(ora_results[[cl]]$up, ora_results[[cl]]$down, clade_label = cl)
   if (!is.null(g)) grid::grid.draw(g)
@@ -476,13 +490,15 @@ top_clades <- head(clade_deg_counts$clade, 3)
 for (cl in top_clades) {
   v <- plot_volcano(dge_results[[cl]], clade_label = cl)
   print(v)
-  ggsave(file.path(OUT_DIR, paste0("Fig2C2_volcano_", cl, ".pdf")), v, width = 6, height = 5, units = "in")
+  ggsave(file.path(OUT_DIR, paste0("Fig2C2_volcano_", cl, ".tiff")), v, width = 6, height = 5,
+         units = "in", dpi = 600, device = "tiff", compression = "lzw")
 
   g <- plot_go_dotplot(ora_results[[cl]]$up, ora_results[[cl]]$down, clade_label = cl)
   if (!is.null(g)) {
     grid::grid.newpage()
     grid::grid.draw(g)
-    ggsave(file.path(OUT_DIR, paste0("Fig2C2_GO_", cl, ".pdf")), g, width = 6, height = 5, units = "in")
+    ggsave(file.path(OUT_DIR, paste0("Fig2C2_GO_", cl, ".tiff")), g, width = 6, height = 5,
+           units = "in", dpi = 600, device = "tiff", compression = "lzw")
   }
 }
 ```
@@ -629,7 +645,8 @@ fig2D <- (strip_D / hm_D$plot) +
   theme(legend.position = "right")
 
 print(fig2D)
-ggsave(file.path(OUT_DIR, "Fig2D_within_strain_coexpression_conservation.pdf"), fig2D, width = 8, height = 7, units = "in")
+ggsave(file.path(OUT_DIR, "Fig2D_within_strain_coexpression_conservation.tiff"), fig2D, width = 8, height = 7,
+       units = "in", dpi = 600, device = "tiff", compression = "lzw")
 ```
 ```{r}
 # ── Quantify: is conservation clade-structured, or uniform across strains? ──
@@ -654,8 +671,8 @@ fig2D_summary <- ggplot(meta_cor_long, aes(x = pair_type, y = meta_r, fill = pai
   pub_theme
 
 print(fig2D_summary)
-ggsave(file.path(OUT_DIR, "Fig2D_summary_same_vs_diff_clade.pdf"), fig2D_summary, width = 4, height = 4, units = "in")
+ggsave(file.path(OUT_DIR, "Fig2D_summary_same_vs_diff_clade.tiff"), fig2D_summary, width = 4, height = 4,
+       units = "in", dpi = 600, device = "tiff", compression = "lzw")
 
 write_csv(meta_cor_long, file.path(OUT_DIR, "Fig2D_meta_correlation_pairs.csv"))
 ```
-

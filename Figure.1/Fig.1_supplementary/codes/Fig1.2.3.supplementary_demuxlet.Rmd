@@ -162,24 +162,21 @@ make_abundance_panel <- function(cond, include_dgy3 = TRUE) {
   d <- dplyr::filter(strain_counts, Condition == cond)
   
   if (!include_dgy3) d <- dplyr::filter(d, Strain != "DGY3")
-
   strain_order <- d %>%
     dplyr::group_by(Strain) %>%
     dplyr::summarise(mean_n = mean(n_cells), .groups = "drop") %>%
     dplyr::arrange(mean_n) %>%
     dplyr::pull(Strain)
-
   d <- dplyr::mutate(d,
     Strain   = factor(Strain, levels = strain_order),
     RunLabel = factor(RunLabel)
   )
-
   n_reps  <- dplyr::n_distinct(d$RunLabel)
   subtitle <- if (include_dgy3) "With S288C" else "Without S288C"
-
   ggplot(d, aes(x = Strain, y = n_cells, fill = RunLabel)) +
     geom_bar(stat = "identity", position = position_dodge(preserve = "single"),
              width = 0.7) +
+    geom_hline(yintercept = 200, color = "red", linetype = "solid", linewidth = 1) +  # ← ADD THIS
     scale_fill_manual(
       values = if (n_reps == 1) COND_COLORS[[as.character(cond)]] else c("#4E79A7", "#76B7B2"),
       name   = "Run"
@@ -201,17 +198,18 @@ make_abundance_panel <- function(cond, include_dgy3 = TRUE) {
 for (cond in levels(all_demux$Condition)) {
   p_with    <- make_abundance_panel(cond, include_dgy3 = TRUE)
   p_without <- make_abundance_panel(cond, include_dgy3 = FALSE)
-
   fig <- (p_with / p_without) +
     plot_annotation(
       title = paste0("Supplementary Figure 1 — ", cond, ": Genotype abundance distribution"),
       theme = theme(plot.title = element_text(size = 10, face = "bold", hjust = 0.5))
     )
-
   print(fig)
-
+  
+  # Clean filename: replace spaces, %, and other special chars
+  clean_cond <- gsub("[^a-zA-Z0-9._-]", "_", cond)  # ← Keep only alphanumeric, dots, underscores, hyphens
+  
   ggsave(
-    file.path(OUT_DIR, paste0("SuppFig1_", gsub(" ", "_", cond), "_genotype_abundance.pdf")),
+    file.path(OUT_DIR, paste0("SuppFig1_", clean_cond, "_genotype_abundance.pdf")),
     fig, width = 12, height = 8
   )
 }
