@@ -1,0 +1,605 @@
+---
+title: "Fig.3-supplementary-YPD1-vs-YPD2-eQTL-reproducibility"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# eQTL replicate reproducibility: YPD.1 vs YPD.2
+
+This supplementary analysis checks how reproducible the FastLMM eQTL calls are
+between the two independent YPD replicate datasets (YPD.1, YPD.2), across
+SNPs, CNVs, and InDels. It reports (1) overlap of significant eQTL calls at
+the association/SNP/gene level, (2) concordance of p-values and effect sizes
+for shared eQTLs, and (3) a permutation-based test of whether effect-size
+sign concordance exceeds chance.
+
+```{r libs}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(ggplot2)
+  library(scales)
+  library(patchwork)
+})
+
+select <- dplyr::select
+filter <- dplyr::filter
+
+BASE <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all"
+OUT  <- "../results"
+dir.create(OUT, recursive = TRUE, showWarnings = FALSE)
+
+variant_colors <- c("SNP" = "#4472C4", "CNV" = "#70AD47", "Indel" = "#FFC000")
+variant_levels <- c("SNP", "CNV", "Indel", "All")
+
+dataset_colors <- c("YPD.1" = "#E76F51", "YPD.2" = "#2196ac")
+
+category_colors <- c(
+  "SHARED"     = "#4DAC26",
+  "YPD1-ONLY"  = "#E76F51",
+  "YPD2-ONLY"  = "#2196ac"
+)
+clean_labels <- c(
+  "SHARED"    = "Shared",
+  "YPD1-ONLY" = "YPD.1 only",
+  "YPD2-ONLY" = "YPD.2 only"
+)
+
+pub_theme <- theme_classic(base_size = 14) +
+  theme(
+    axis.text.x        = element_text(size = 12, color = "black"),
+    axis.text.y        = element_text(size = 12, color = "black"),
+    axis.title.y       = element_text(size = 13, face = "bold", margin = margin(r = 10)),
+    axis.title.x       = element_blank(),
+    legend.position    = "none",
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.4),
+    axis.line          = element_line(color = "black", linewidth = 0.5),
+    axis.ticks         = element_line(color = "black", linewidth = 0.5),
+    strip.text         = element_text(size = 12, face = "bold"),
+    plot.margin        = margin(14, 18, 12, 14)
+  )
+
+save_tiff <- function(plot, filename, width = 10, height = 4.5) {
+  ggsave(
+    filename    = file.path(OUT, filename),
+    plot        = plot,
+    device      = "tiff",
+    width       = width,
+    height      = height,
+    units       = "in",
+    dpi         = 600,
+    compression = "lzw"
+  )
+  message("Saved: ", filename)
+}
+```
+
+## 1. Load significant eQTL calls (YPD.1 and YPD.2)
+
+```{r load-signif}
+read_signif <- function(cond, vt_file) {
+  read.table(
+    file.path(BASE, cond, "fastlmm/results", vt_file),
+    header = TRUE, sep = "\t", stringsAsFactors = FALSE, quote = ""
+  )
+}
+
+all_snps_eqtl_YPD1  <- read_signif("YPD.1", "all_signif_SNP_YPD.1_with_double_id_with_threshold.txt")
+all_CNV_eqtl_YPD1   <- read_signif("YPD.1", "all_signif_CNV_YPD.1_with_double_id_with_threshold.txt")
+all_indel_eqtl_YPD1 <- read_signif("YPD.1", "all_signif_Indels_YPD.1_with_double_id_with_threshold.txt")
+
+all_snps_eqtl_YPD2  <- read_signif("YPD.2", "all_signif_SNP_YPD.1_with_double_id_with_threshold.txt")
+all_CNV_eqtl_YPD2   <- read_signif("YPD.2", "all_signif_CNV_YPD.1_with_double_id_with_threshold.txt")
+all_indel_eqtl_YPD2 <- read_signif("YPD.2", "all_signif_Indels_YPD.1_with_double_id_with_threshold.txt")
+
+add_key <- function(df) {
+  df$Chr_ChrPos_Pheno <- paste0(df$Chr, "_", df$ChrPos, "_", df$Pheno)
+  df
+}
+
+all_snps_eqtl_YPD1  <- add_key(all_snps_eqtl_YPD1)
+all_CNV_eqtl_YPD1   <- add_key(all_CNV_eqtl_YPD1)
+all_indel_eqtl_YPD1 <- add_key(all_indel_eqtl_YPD1)
+all_snps_eqtl_YPD2  <- add_key(all_snps_eqtl_YPD2)
+all_CNV_eqtl_YPD2   <- add_key(all_CNV_eqtl_YPD2)
+all_indel_eqtl_YPD2 <- add_key(all_indel_eqtl_YPD2)
+
+all_eqtl_YPD1 <- bind_rows(
+  mutate(all_snps_eqtl_YPD1,  variant_type = "SNP"),
+  mutate(all_CNV_eqtl_YPD1,   variant_type = "CNV"),
+  mutate(all_indel_eqtl_YPD1, variant_type = "Indel")
+)
+all_eqtl_YPD2 <- bind_rows(
+  mutate(all_snps_eqtl_YPD2,  variant_type = "SNP"),
+  mutate(all_CNV_eqtl_YPD2,   variant_type = "CNV"),
+  mutate(all_indel_eqtl_YPD2, variant_type = "Indel")
+)
+
+cat("YPD.1 total eQTLs (all variant types):", nrow(all_eqtl_YPD1), "\n")
+cat("YPD.2 total eQTLs (all variant types):", nrow(all_eqtl_YPD2), "\n")
+```
+
+## 2. Overlap at association / SNP / gene level
+
+```{r compare-fn}
+compare_eqtls <- function(df1, df2, label1 = "YPD.1", label2 = "YPD.2", variant = "All") {
+  assocs1 <- unique(df1$Chr_ChrPos_Pheno); assocs2 <- unique(df2$Chr_ChrPos_Pheno)
+  common_assocs <- intersect(assocs1, assocs2)
+
+  snps1 <- unique(df1$SNP); snps2 <- unique(df2$SNP)
+  common_snps <- intersect(snps1, snps2)
+
+  genes1 <- unique(df1$Pheno); genes2 <- unique(df2$Pheno)
+  common_genes <- intersect(genes1, genes2)
+
+  invisible(list(
+    variant = variant,
+    assocs1 = assocs1, assocs2 = assocs2, common_assocs = common_assocs,
+    snps1 = snps1, snps2 = snps2, common_snps = common_snps,
+    genes1 = genes1, genes2 = genes2, common_genes = common_genes
+  ))
+}
+
+res_snp   <- compare_eqtls(all_snps_eqtl_YPD1,  all_snps_eqtl_YPD2,  variant = "SNP")
+res_cnv   <- compare_eqtls(all_CNV_eqtl_YPD1,   all_CNV_eqtl_YPD2,   variant = "CNV")
+res_indel <- compare_eqtls(all_indel_eqtl_YPD1, all_indel_eqtl_YPD2, variant = "Indel")
+res_all   <- compare_eqtls(all_eqtl_YPD1,        all_eqtl_YPD2,       variant = "All")
+
+make_summary_row <- function(res, level = "association") {
+  if (level == "association") { v1 <- res$assocs1; v2 <- res$assocs2; common <- res$common_assocs }
+  else if (level == "SNP")    { v1 <- res$snps1;   v2 <- res$snps2;   common <- res$common_snps }
+  else                        { v1 <- res$genes1;  v2 <- res$genes2;  common <- res$common_genes }
+
+  data.frame(
+    Variant     = res$variant, Level = level,
+    YPD1_n      = length(v1), YPD2_n = length(v2), Shared_n = length(common),
+    Pct_of_YPD1 = round(100 * length(common) / length(v1), 1),
+    Pct_of_YPD2 = round(100 * length(common) / length(v2), 1)
+  )
+}
+
+summary_table <- bind_rows(
+  make_summary_row(res_snp,   "association"), make_summary_row(res_snp,   "SNP"), make_summary_row(res_snp,   "gene"),
+  make_summary_row(res_cnv,   "association"), make_summary_row(res_cnv,   "SNP"), make_summary_row(res_cnv,   "gene"),
+  make_summary_row(res_indel, "association"), make_summary_row(res_indel, "SNP"), make_summary_row(res_indel, "gene"),
+  make_summary_row(res_all,   "association"), make_summary_row(res_all,   "SNP"), make_summary_row(res_all,   "gene")
+)
+
+print(summary_table, row.names = FALSE)
+write.csv(summary_table, file.path(OUT, "YPD1_vs_YPD2_overlap_summary_table.csv"), row.names = FALSE)
+```
+
+## 3. MAIN: total eQTL counts per variant type (dodged, faceted)
+
+```{r fig-counts}
+count_df <- data.frame(
+  Dataset      = rep(c("YPD.1", "YPD.2"), 4),
+  Variant_type = c("SNP", "SNP", "CNV", "CNV", "Indel", "Indel", "All", "All"),
+  Count        = c(
+    nrow(all_snps_eqtl_YPD1),  nrow(all_snps_eqtl_YPD2),
+    nrow(all_CNV_eqtl_YPD1),   nrow(all_CNV_eqtl_YPD2),
+    nrow(all_indel_eqtl_YPD1), nrow(all_indel_eqtl_YPD2),
+    nrow(all_eqtl_YPD1),       nrow(all_eqtl_YPD2)
+  )
+) %>%
+  mutate(
+    Variant_type = factor(Variant_type, levels = variant_levels),
+    Dataset      = factor(Dataset, levels = c("YPD.1", "YPD.2"))
+  )
+
+fig_counts <- ggplot(count_df, aes(x = Dataset, y = Count, fill = Dataset)) +
+  geom_col(width = 0.6, color = "white", linewidth = 0.3, position = position_dodge(width = 0.7)) +
+  geom_text(aes(label = scales::comma(Count)), vjust = -0.4, size = 3.5) +
+  scale_fill_manual(values = dataset_colors) +
+  scale_y_continuous(labels = scales::comma, expand = expansion(mult = c(0, 0.15))) +
+  facet_wrap(~ Variant_type, scales = "free_y", nrow = 1) +
+  labs(y = "Number of significant eQTLs") +
+  pub_theme
+
+print(fig_counts)
+save_tiff(fig_counts, "figS_YPD1_vs_YPD2_eqtl_counts_by_variant.tiff", width = 10, height = 4.5)
+```
+
+## 4. MAIN: shared vs unique eQTL associations per variant type
+
+```{r fig-overlap}
+overlap_df <- bind_rows(
+  data.frame(Variant = "SNP",   Category = c("YPD.1 only", "YPD.2 only", "Shared"),
+             Count = c(length(setdiff(res_snp$assocs1, res_snp$assocs2)),
+                       length(setdiff(res_snp$assocs2, res_snp$assocs1)),
+                       length(res_snp$common_assocs))),
+  data.frame(Variant = "CNV",   Category = c("YPD.1 only", "YPD.2 only", "Shared"),
+             Count = c(length(setdiff(res_cnv$assocs1, res_cnv$assocs2)),
+                       length(setdiff(res_cnv$assocs2, res_cnv$assocs1)),
+                       length(res_cnv$common_assocs))),
+  data.frame(Variant = "Indel", Category = c("YPD.1 only", "YPD.2 only", "Shared"),
+             Count = c(length(setdiff(res_indel$assocs1, res_indel$assocs2)),
+                       length(setdiff(res_indel$assocs2, res_indel$assocs1)),
+                       length(res_indel$common_assocs))),
+  data.frame(Variant = "All",   Category = c("YPD.1 only", "YPD.2 only", "Shared"),
+             Count = c(length(setdiff(res_all$assocs1, res_all$assocs2)),
+                       length(setdiff(res_all$assocs2, res_all$assocs1)),
+                       length(res_all$common_assocs)))
+) %>%
+  mutate(
+    Variant  = factor(Variant,  levels = variant_levels),
+    Category = factor(Category, levels = c("YPD.1 only", "YPD.2 only", "Shared"))
+  )
+
+overlap_colors <- c("YPD.1 only" = "#E76F51", "YPD.2 only" = "#2196ac", "Shared" = "#4CAF50")
+
+fig_overlap <- ggplot(overlap_df, aes(x = Category, y = Count, fill = Category)) +
+  geom_col(width = 0.6, color = "white", linewidth = 0.3) +
+  geom_text(aes(label = scales::comma(Count)), vjust = -0.4, size = 3.5) +
+  scale_fill_manual(values = overlap_colors) +
+  scale_y_continuous(labels = scales::comma, expand = expansion(mult = c(0, 0.15))) +
+  facet_wrap(~ Variant, scales = "free_y", nrow = 1) +
+  labs(y = "Number of associations") +
+  pub_theme +
+  theme(axis.text.x = element_text(size = 11, color = "black", angle = 35, hjust = 1),
+        plot.margin = margin(14, 18, 20, 14))
+
+print(fig_overlap)
+save_tiff(fig_overlap, "figS_YPD1_vs_YPD2_overlap_by_variant.tiff", width = 10, height = 4.5)
+```
+
+## 5. Per-eQTL categorization (shared / YPD.1-only / YPD.2-only)
+
+```{r build-unified}
+build_unified <- function(df1, df2) {
+  d1 <- df1 %>%
+    mutate(YPD1_neglog10p = -log10(PValue), YPD1_thr_neglog10p = -log10(thr_perm),
+           YPD1_distance_above_thr = YPD1_neglog10p - YPD1_thr_neglog10p) %>%
+    select(Chr_ChrPos_Pheno, Pheno, Chr, ChrPos,
+           YPD1_neglog10p, YPD1_thr_neglog10p, YPD1_distance_above_thr,
+           YPD1_SnpWeight = SnpWeight)
+
+  d2 <- df2 %>%
+    mutate(YPD2_neglog10p = -log10(PValue), YPD2_thr_neglog10p = -log10(thr_perm),
+           YPD2_distance_above_thr = YPD2_neglog10p - YPD2_thr_neglog10p) %>%
+    select(Chr_ChrPos_Pheno, Pheno, Chr, ChrPos,
+           YPD2_neglog10p, YPD2_thr_neglog10p, YPD2_distance_above_thr,
+           YPD2_SnpWeight = SnpWeight)
+
+  ids1 <- d1$Chr_ChrPos_Pheno; ids2 <- d2$Chr_ChrPos_Pheno
+
+  unified <- d2 %>%
+    mutate(In_YPD1 = Chr_ChrPos_Pheno %in% ids1,
+           Category = ifelse(In_YPD1, "SHARED", "YPD2-ONLY")) %>%
+    left_join(d1 %>% select(Chr_ChrPos_Pheno, YPD1_neglog10p, YPD1_thr_neglog10p,
+                             YPD1_distance_above_thr, YPD1_SnpWeight),
+              by = "Chr_ChrPos_Pheno")
+
+  ypd1_only <- d1 %>%
+    filter(!Chr_ChrPos_Pheno %in% ids2) %>%
+    mutate(Category = "YPD1-ONLY", In_YPD1 = TRUE,
+           YPD2_neglog10p = NA, YPD2_thr_neglog10p = NA,
+           YPD2_distance_above_thr = NA, YPD2_SnpWeight = NA) %>%
+    select(Chr_ChrPos_Pheno, Pheno, Chr, ChrPos,
+           YPD2_neglog10p, YPD2_thr_neglog10p, YPD2_distance_above_thr, YPD2_SnpWeight,
+           YPD1_neglog10p, YPD1_thr_neglog10p, YPD1_distance_above_thr, YPD1_SnpWeight,
+           Category, In_YPD1)
+
+  bind_rows(unified, ypd1_only)
+}
+
+unified_snp   <- build_unified(all_snps_eqtl_YPD1,  all_snps_eqtl_YPD2)
+unified_cnv   <- build_unified(all_CNV_eqtl_YPD1,   all_CNV_eqtl_YPD2)
+unified_indel <- build_unified(all_indel_eqtl_YPD1, all_indel_eqtl_YPD2)
+unified_all   <- build_unified(all_eqtl_YPD1,        all_eqtl_YPD2)
+
+for (nm in c("SNP", "CNV", "Indel", "All")) {
+  ud <- get(paste0("unified_", tolower(nm)))
+  cat(nm, "— Total:", nrow(ud),
+      "| Shared:", sum(ud$Category == "SHARED"),
+      "| YPD1-only:", sum(ud$Category == "YPD1-ONLY"),
+      "| YPD2-only:", sum(ud$Category == "YPD2-ONLY"), "\n")
+}
+```
+
+## 6. Signal strength by category (boxplot + jitter)
+
+```{r fig-boxplot}
+make_boxplot <- function(ud, variant_label) {
+  plot_data <- ud %>%
+    mutate(
+      neglog10p = case_when(
+        Category == "SHARED"     ~ (YPD1_neglog10p + YPD2_neglog10p) / 2,
+        Category == "YPD1-ONLY"  ~ YPD1_neglog10p,
+        Category == "YPD2-ONLY"  ~ YPD2_neglog10p
+      ),
+      Category = factor(Category, levels = c("YPD1-ONLY", "YPD2-ONLY", "SHARED")),
+      variant_label = variant_label   # <-- ADD THIS LINE
+    ) %>%
+    filter(!is.na(neglog10p))
+
+  summary_stats <- plot_data %>%
+    group_by(Category) %>%
+    summarise(n = n(), median = median(neglog10p), .groups = "drop")
+  
+  # Get shared y-axis limits across all unified datasets
+
+  all_neglog10p <- c(
+  unified_snp$YPD1_neglog10p,   unified_snp$YPD2_neglog10p,
+  unified_cnv$YPD1_neglog10p,   unified_cnv$YPD2_neglog10p,
+  unified_indel$YPD1_neglog10p, unified_indel$YPD2_neglog10p,
+  unified_all$YPD1_neglog10p,   unified_all$YPD2_neglog10p
+)
+
+y_max <- max(all_neglog10p, na.rm = TRUE) * 1.05
+y_min <- min(all_neglog10p, na.rm = TRUE)
+
+  ggplot(plot_data, aes(x = Category, y = neglog10p, color = Category, fill = Category)) +
+    geom_boxplot(alpha = 0.15, width = 0.5, outlier.shape = NA) +
+    geom_jitter(width = 0.2, alpha = 0.3, size = 1.5) +
+    stat_summary(fun = mean, geom = "point", shape = 18, size = 5, color = "white") +
+    geom_text(data = summary_stats,
+              aes(x = Category, y = -0.5,
+                  label = paste0("n=", scales::comma(n), "\nmedian=", round(median, 1))),
+              inherit.aes = FALSE, size = 3.8, color = "black", fontface = "bold", vjust = 1) +
+    scale_color_manual(values = category_colors, labels = clean_labels) +
+    scale_fill_manual(values = category_colors, labels = clean_labels) +
+    scale_x_discrete(labels = clean_labels) +
+    scale_y_continuous(expand = expansion(mult = c(0.15, 0.08))) +
+    labs(x = NULL, y = expression(-log[10](italic(p)-value))) +
+    facet_wrap(~variant_label) +
+    theme_minimal(base_size = 14) +
+    theme(
+      legend.position    = "none",
+      panel.grid.major.x = element_blank(),
+      strip.text         = element_text(size = 13, face = "bold"),
+      axis.text.x        = element_text(size = 12, color = "black", angle = 35, hjust = 1),
+      axis.text.y        = element_text(size = 12, color = "black"),
+      axis.title.y       = element_text(size = 13, face = "bold", margin = margin(r = 8)),
+      plot.margin        = margin(12, 16, 20, 12)
+    )
+}
+
+box_list <- list(
+  make_boxplot(unified_snp,   "SNP"),
+  make_boxplot(unified_cnv,   "CNV"),
+  make_boxplot(unified_indel, "Indel"),
+  make_boxplot(unified_all,   "All")
+)
+
+# Apply shared y limits to all panels
+box_list <- lapply(box_list, function(p) {
+  p + scale_y_continuous(limits = c(y_min, y_max),
+                         expand = expansion(mult = c(0.15, 0.08)))
+})
+
+fig_boxplots <- wrap_plots(box_list, nrow = 1)
+print(fig_boxplots)
+save_tiff(fig_boxplots, "figS_YPD1_vs_YPD2_boxplot_neglog10p_by_variant.tiff", width = 14, height = 5)
+```
+
+## 7. MAIN: effect-size (SnpWeight) and p-value concordance for shared eQTLs
+
+```{r fig-scatter-pval}
+make_scatter_pval <- function(ud, variant_label) {
+  plot_data <- ud %>%
+    mutate(
+      x_val    = if_else(is.na(YPD2_neglog10p), 0, YPD2_neglog10p),
+      y_val    = if_else(is.na(YPD1_neglog10p), 0, YPD1_neglog10p),
+      Category = factor(Category, levels = c("YPD1-ONLY", "YPD2-ONLY", "SHARED"))
+    )
+  ax_lim   <- max(c(plot_data$x_val, plot_data$y_val), na.rm = TRUE) * 1.05
+  n_shared <- sum(plot_data$Category == "SHARED")
+  n_ypd1   <- sum(plot_data$Category == "YPD1-ONLY")
+  n_ypd2   <- sum(plot_data$Category == "YPD2-ONLY")
+
+  ggplot(plot_data, aes(x = x_val, y = y_val, color = Category)) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey60", linewidth = 0.7) +
+    geom_point(data = plot_data %>% filter(Category != "SHARED"), alpha = 0.4, size = 1.8) +
+    geom_point(data = plot_data %>% filter(Category == "SHARED"), alpha = 0.6, size = 2) +
+    scale_color_manual(values = category_colors,
+      labels = c("YPD1-ONLY" = paste0("YPD.1 only (n=", comma(n_ypd1), ")"),
+                 "YPD2-ONLY" = paste0("YPD.2 only (n=", comma(n_ypd2), ")"),
+                 "SHARED"    = paste0("Shared (n=", comma(n_shared), ")"))) +
+    coord_fixed(ratio = 1, xlim = c(0, ax_lim), ylim = c(0, ax_lim)) +
+    labs(title = variant_label,
+         x = expression(bold("YPD.2") ~ -log[10](italic(p)-value)),
+         y = expression(bold("YPD.1") ~ -log[10](italic(p)-value)), color = NULL) +
+    theme_minimal(base_size = 13) +
+    theme(plot.title = element_text(size = 13, face = "bold", hjust = 0.5),
+          axis.text = element_text(size = 11, color = "black"),
+          legend.position = "bottom", legend.text = element_text(size = 9),
+          plot.margin = margin(10, 12, 10, 10))
+}
+
+scatter_pval_list <- list(
+  make_scatter_pval(unified_snp, "SNP"), make_scatter_pval(unified_cnv, "CNV"),
+  make_scatter_pval(unified_indel, "Indel"), make_scatter_pval(unified_all, "All")
+)
+fig_scatter_pval <- wrap_plots(scatter_pval_list, nrow = 1)
+print(fig_scatter_pval)
+save_tiff(fig_scatter_pval, "figS_YPD1_vs_YPD2_scatter_pval_by_variant.tiff", width = 15, height = 4.5)
+```
+
+```{r fig-scatter-effect}
+make_scatter_effect <- function(ud, variant_label) {
+  plot_data <- ud %>%
+    mutate(
+      x_val    = if_else(is.na(YPD2_SnpWeight), 0, YPD2_SnpWeight),
+      y_val    = if_else(is.na(YPD1_SnpWeight), 0, YPD1_SnpWeight),
+      Category = factor(Category, levels = c("YPD1-ONLY", "YPD2-ONLY", "SHARED"))
+    )
+  ax_abs   <- max(abs(c(plot_data$x_val, plot_data$y_val)), na.rm = TRUE) * 1.05
+  n_shared <- sum(plot_data$Category == "SHARED")
+  n_ypd1   <- sum(plot_data$Category == "YPD1-ONLY")
+  n_ypd2   <- sum(plot_data$Category == "YPD2-ONLY")
+
+  ggplot(plot_data, aes(x = x_val, y = y_val, color = Category)) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey60", linewidth = 0.7) +
+    geom_abline(slope = -1, intercept = 0, linetype = "dotted", color = "grey80", linewidth = 0.5) +
+    geom_hline(yintercept = 0, color = "grey85", linewidth = 0.4) +
+    geom_vline(xintercept = 0, color = "grey85", linewidth = 0.4) +
+    geom_point(data = plot_data %>% filter(Category != "SHARED"), alpha = 0.4, size = 1.8) +
+    geom_point(data = plot_data %>% filter(Category == "SHARED"), alpha = 0.6, size = 2) +
+    scale_color_manual(values = category_colors,
+      labels = c("YPD1-ONLY" = paste0("YPD.1 only (n=", comma(n_ypd1), ")"),
+                 "YPD2-ONLY" = paste0("YPD.2 only (n=", comma(n_ypd2), ")"),
+                 "SHARED"    = paste0("Shared (n=", comma(n_shared), ")"))) +
+    coord_fixed(ratio = 1, xlim = c(-ax_abs, ax_abs), ylim = c(-ax_abs, ax_abs)) +
+    labs(title = variant_label,
+         x = expression(bold("YPD.2  SnpWeight") ~ (beta)),
+         y = expression(bold("YPD.1  SnpWeight") ~ (beta)), color = NULL) +
+    theme_minimal(base_size = 13) +
+    theme(plot.title = element_text(size = 13, face = "bold", hjust = 0.5),
+          axis.text = element_text(size = 11, color = "black"),
+          legend.position = "bottom", legend.text = element_text(size = 9),
+          plot.margin = margin(10, 12, 10, 10))
+}
+
+scatter_effect_list <- list(
+  make_scatter_effect(unified_snp, "SNP"), make_scatter_effect(unified_cnv, "CNV"),
+  make_scatter_effect(unified_indel, "Indel"), make_scatter_effect(unified_all, "All")
+)
+fig_scatter_effect <- wrap_plots(scatter_effect_list, nrow = 1)
+print(fig_scatter_effect)
+save_tiff(fig_scatter_effect, "figS_YPD1_vs_YPD2_scatter_effect_by_variant.tiff", width = 15, height = 4.5)
+```
+
+## 8. Sign concordance of SNP effect sizes (YPD.1-significant eQTLs looked up in YPD.2)
+
+Raw per-gene FastLMM association files (`<gene>.first_assoc.txt`) are only
+available for SNPs in the paths supplied, so the sign-concordance /
+permutation analysis below is restricted to SNP eQTLs. Extending it to
+CNV/Indel would need the equivalent per-gene raw-association directories for
+YPD.2.
+
+```{r sign-concordance-lookup}
+YPD1_SNP_DIR <- file.path(BASE, "YPD.1/fastlmm/results/results_SNPs_968_with_double_id")
+YPD2_SNP_DIR <- file.path(BASE, "YPD.2/fastlmm/results/results_SNPs_968_with_double_id")
+
+ypd1_genes <- unique(all_snps_eqtl_YPD1$Pheno)
+cat("Unique genes with YPD.1-significant SNP eQTLs:", length(ypd1_genes), "\n")
+
+ypd2_lookup <- lapply(seq_along(ypd1_genes), function(i) {
+  gene <- ypd1_genes[i]
+  path <- file.path(YPD2_SNP_DIR, gene, paste0(gene, ".first_assoc.txt"))
+  if (!file.exists(path)) return(NULL)
+
+  ypd1_snps <- all_snps_eqtl_YPD1 %>%
+    filter(Pheno == gene) %>%
+    select(SNP, Beta_YPD1 = SnpWeight, P_YPD1 = PValue)
+
+  ypd2 <- read.table(path, header = TRUE, sep = "\t", stringsAsFactors = FALSE, quote = "") %>%
+    select(SNP, Beta_YPD2 = SnpWeight, P_YPD2 = PValue)
+
+  inner_join(ypd1_snps, ypd2, by = "SNP") %>% mutate(Pheno = gene)
+}) %>% bind_rows()
+
+cat("Total SNP x Pheno pairs retrieved:", nrow(ypd2_lookup), "\n")
+cat("Genes with YPD.2 data found:      ", n_distinct(ypd2_lookup$Pheno), "\n")
+
+write.table(ypd2_lookup, file.path(OUT, "ypd2_lookup_YPD1_signif_SNPs.txt"),
+            sep = "\t", quote = FALSE, row.names = FALSE)
+```
+
+```{r fig-sign-concordance}
+ypd2_lookup <- ypd2_lookup %>%
+  mutate(direction = ifelse(sign(Beta_YPD1) == sign(Beta_YPD2), "Concordant", "Discordant"))
+
+beta_cor         <- cor(ypd2_lookup$Beta_YPD1, ypd2_lookup$Beta_YPD2, method = "pearson", use = "complete.obs")
+sign_concordance <- mean(sign(ypd2_lookup$Beta_YPD1) == sign(ypd2_lookup$Beta_YPD2), na.rm = TRUE)
+
+cat(sprintf("Beta correlation (Pearson r): %.3f\n", beta_cor))
+cat(sprintf("Sign concordance:             %.1f%%\n", sign_concordance * 100))
+
+fig_effect_concordance <- ggplot(ypd2_lookup, aes(x = Beta_YPD1, y = Beta_YPD2, color = direction)) +
+  geom_point(size = 1.5, alpha = 0.3) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "black", linewidth = 0.6) +
+  geom_smooth(method = "lm", color = "grey30", se = TRUE, linewidth = 0.8) +
+  geom_hline(yintercept = 0, color = "grey60", linewidth = 0.3) +
+  geom_vline(xintercept = 0, color = "grey60", linewidth = 0.3) +
+  scale_color_manual(values = c("Concordant" = "#27AE60", "Discordant" = "#E74C3C")) +
+  annotate("text", x = -Inf, y = Inf, hjust = -0.1, vjust = 1.5,
+           label = sprintf("Pearson r = %.3f\nSign concordance = %.1f%%\nn = %d eQTLs",
+                            beta_cor, sign_concordance * 100, nrow(ypd2_lookup)),
+           size = 4, fontface = "bold") +
+  labs(x = "Effect size Beta (YPD.1)", y = "Effect size Beta (YPD.2)", color = "Direction") +
+  theme_classic(base_size = 13) +
+  theme(legend.position = "bottom")
+
+print(fig_effect_concordance)
+save_tiff(fig_effect_concordance, "figS_YPD1_signif_SNP_effect_size_concordance.tiff", width = 7, height = 6.5)
+```
+
+## 9. Statistical significance of the sign concordance (binomial + permutation test)
+
+```{r sign-concordance-stats}
+n_total       <- nrow(ypd2_lookup)
+n_concordant  <- sum(sign(ypd2_lookup$Beta_YPD1) == sign(ypd2_lookup$Beta_YPD2), na.rm = TRUE)
+obs_sign_conc <- n_concordant / n_total
+obs_r         <- cor(ypd2_lookup$Beta_YPD1, ypd2_lookup$Beta_YPD2, method = "pearson", use = "complete.obs")
+
+cat(sprintf("Observed sign concordance : %.3f (%d / %d)\n", obs_sign_conc, n_concordant, n_total))
+cat(sprintf("Observed Pearson r        : %.3f\n\n", obs_r))
+
+binom_result <- binom.test(n_concordant, n_total, p = 0.5, alternative = "greater")
+cat("Binomial test (H0: sign concordance = 0.50):\n")
+cat(sprintf("  p-value : %.3e\n", binom_result$p.value))
+cat(sprintf("  95%% CI  : [%.3f, %.3f]\n\n", binom_result$conf.int[1], binom_result$conf.int[2]))
+
+set.seed(42)
+n_perm    <- 5000
+perm_sign <- numeric(n_perm)
+perm_r    <- numeric(n_perm)
+
+complete <- complete.cases(ypd2_lookup$Beta_YPD1, ypd2_lookup$Beta_YPD2)
+b1 <- ypd2_lookup$Beta_YPD1[complete]
+b2 <- ypd2_lookup$Beta_YPD2[complete]
+
+for (i in seq_len(n_perm)) {
+  b2_shuf      <- sample(b2)
+  perm_sign[i] <- mean(sign(b1) == sign(b2_shuf))
+  perm_r[i]    <- cor(b1, b2_shuf, method = "pearson")
+}
+
+perm_p_sign <- mean(perm_sign >= obs_sign_conc)
+perm_p_r    <- mean(perm_r    >= obs_r)
+
+cat("Permutation test (n = 5000, beta-shuffling):\n")
+cat(sprintf("  Sign concordance: obs = %.3f | null mean = %.3f | p = %.4f\n", obs_sign_conc, mean(perm_sign), perm_p_sign))
+cat(sprintf("  Pearson r       : obs = %.3f | null mean = %.3f | p = %.4f\n", obs_r, mean(perm_r), perm_p_r))
+```
+
+```{r fig-null-dist}
+perm_df <- data.frame(sign_conc = perm_sign, pearson_r = perm_r)
+
+p_null_sign <- ggplot(perm_df, aes(x = sign_conc)) +
+  geom_histogram(bins = 60, fill = "grey70", color = "white", linewidth = 0.2) +
+  geom_vline(xintercept = obs_sign_conc, color = "#E74C3C", linewidth = 1) +
+  geom_vline(xintercept = 0.5, color = "black", linewidth = 0.6, linetype = "dashed") +
+  annotate("text", x = obs_sign_conc, y = Inf, label = sprintf("Observed\n%.3f", obs_sign_conc),
+           hjust = -0.1, vjust = 1.5, color = "#E74C3C", size = 3.5, fontface = "bold") +
+  annotate("text", x = Inf, y = Inf,
+           label = sprintf("Binomial p = %.2e\nPerm p = %.4f", binom_result$p.value, perm_p_sign),
+           hjust = 1.1, vjust = 1.5, size = 3.5, fontface = "bold") +
+  labs(x = "Sign concordance (fraction same direction)", y = "Count") +
+  theme_classic(base_size = 12)
+
+p_null_r <- ggplot(perm_df, aes(x = pearson_r)) +
+  geom_histogram(bins = 60, fill = "grey70", color = "white", linewidth = 0.2) +
+  geom_vline(xintercept = obs_r, color = "#27AE60", linewidth = 1) +
+  geom_vline(xintercept = 0, color = "black", linewidth = 0.6, linetype = "dashed") +
+  annotate("text", x = obs_r, y = Inf, label = sprintf("Observed\nr = %.3f", obs_r),
+           hjust = -0.1, vjust = 1.5, color = "#27AE60", size = 3.5, fontface = "bold") +
+  annotate("text", x = Inf, y = Inf, label = sprintf("Perm p = %.4f", perm_p_r),
+           hjust = 1.1, vjust = 1.5, size = 3.5, fontface = "bold") +
+  labs(x = "Pearson r (Beta YPD.1 vs Beta YPD.2)", y = "Count") +
+  theme_classic(base_size = 12)
+
+fig_null_dist <- p_null_sign + p_null_r
+print(fig_null_dist)
+save_tiff(fig_null_dist, "figS_YPD1_vs_YPD2_permutation_null_distributions.tiff", width = 11, height = 5)
+```
+
+## Session info
+
+```{r session-info}
+sessionInfo()
+```

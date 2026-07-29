@@ -765,8 +765,4 @@ if (file.exists(lr_path)) {
 }
 ```
 
-# 12. Session info
 
-```{r session}
-sessionInfo()
-```
