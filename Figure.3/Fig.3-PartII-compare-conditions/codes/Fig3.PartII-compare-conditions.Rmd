@@ -244,7 +244,7 @@ pheno_strain_summary <- data.frame(
   condition    = cond_levels,
   n_phenotypes = c(nrow(gene_matrix_YPD.1), nrow(gene_matrix_sc2glu), nrow(gene_matrix_fluconazole)),
   n_strains    = c(ncol(gene_matrix_YPD.1) - 1, ncol(gene_matrix_sc2glu) - 1, ncol(gene_matrix_fluconazole) - 1),
-  n_eQTLs      = c(nrow(all_clumped_YPD.1), nrow(all_clumped_sc2gflu), nrow(all_clumped_fluconazole)))
+  n_eQTLs      = c(nrow(all_clumped_YPD.1), nrow(all_clumped_sc2glu), nrow(all_clumped_fluconazole)))
 print(pheno_strain_summary)
 
 figS_scale <- pheno_strain_summary %>%
@@ -267,53 +267,37 @@ ggsave(file.path(OUT, "figS_scale_eqtl_detection.tiff"), figS_scale,
        width = 7, height = 4.5, dpi = 600, units = "in", device = "tiff", compression = "lzw")
 ```
 
-**Supplementary:** genomic distribution of eQTLs per condition and variant type
-(eQTL count per chromosome). Descriptive only — shows where detected eQTLs fall
-along the genome in each condition; goes in the supplement alongside the scale
-figure above.
+**Supplementary:** eQTL counts by variant type across conditions. Descriptive —
+how many eQTLs of each variant type were detected in each condition; goes in the
+supplement alongside the scale figure above.
 
-```{r geno-dist-supp, fig.width=10, fig.height=6}
-# ---- SUPPLEMENTARY figure ----
-roman_lv <- c("I","II","III","IV","V","VI","VII","VIII",
-              "IX","X","XI","XII","XIII","XIV","XV","XVI")
-norm_chr_lab <- function(x){
-  x <- as.character(x)
-  x <- gsub("^chr(omosome)?[_ ]?", "", x, ignore.case = TRUE)
-  num <- suppressWarnings(as.integer(x))
-  ifelse(!is.na(num) & num %in% 1:16, roman_lv[num],
-         ifelse(x %in% roman_lv, x, NA_character_))
-}
-vchr_col <- intersect(c("Chr","var_chr","SNP_Chr","chromosome","var_chr_roman"),
-                      names(combined))[1]
+```{r eqtl-count-by-type, fig.width=8, fig.height=5}
+cat("=== eQTLs BY VARIANT TYPE ===\n")
+cat("Fluconazole:\n"); print(table(all_clumped_fluconazole$Genetic_variants))
+cat("\nYPD:\n");        print(table(all_clumped_YPD.1$Genetic_variants))
+cat("\nSC2glu:\n");     print(table(all_clumped_sc2glu$Genetic_variants))
 
-geno_ok <- tryCatch({
-  gd <- combined %>%
-    mutate(chr = factor(norm_chr_lab(.data[[vchr_col]]), levels = roman_lv),
-           Genetic_variants = factor(Genetic_variants, levels = variant_levels),
-           condition = factor(condition, levels = cond_levels)) %>%
-    filter(!is.na(chr)) %>%
-    count(condition, Genetic_variants, chr)
+variant_counts <- combined %>%
+  count(condition, Genetic_variants) %>%
+  mutate(Genetic_variants = factor(Genetic_variants, levels = variant_levels),
+         condition        = factor(condition, levels = cond_levels))
 
-  variant_colors <- c(SNPs="#4472C4", InDels="#FFC000", SVs="#C41E3A", CNVs="#70AD47")
-  figS_geno <- ggplot(gd, aes(chr, n, fill = Genetic_variants)) +
-    geom_col(position = position_dodge2(preserve = "single", padding = 0.15),
-             width = 0.8, color = "grey30", linewidth = 0.15) +
-    facet_grid(condition ~ ., scales = "free_y") +
-    scale_fill_manual(values = variant_colors, name = "Variant type") +
-    labs(x = "Chromosome", y = "eQTLs detected",
-         title = "Genomic distribution of eQTLs by condition and variant type (supplementary)") +
-    theme_bw(base_size = 12) +
-    theme(plot.title = element_text(hjust = 0.5, face = "bold"),
-          strip.text.y = element_text(face = "bold", angle = 0),
-          panel.grid.minor = element_blank(),
-          legend.position = "top",
-          axis.text.x = element_text(size = 8))
-  print(figS_geno)
-  ggsave(file.path(OUT, "figS_genomic_distribution_by_condition_type.tiff"), figS_geno,
-         width = 10, height = 6, dpi = 600, units = "in", device = "tiff", compression = "lzw")
-  TRUE
-}, error = function(e){ cat("Genomic distribution skipped:", conditionMessage(e),
-   "\n(no recognizable variant chromosome column in `combined`)\n"); FALSE })
+figS_typecount <- ggplot(variant_counts, aes(Genetic_variants, n, fill = condition)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7,
+           color = "grey30", linewidth = 0.15) +
+  geom_text(aes(label = n), position = position_dodge(width = 0.8),
+            vjust = -0.3, size = 2.8, fontface = "bold") +
+  scale_fill_manual(values = cond_colors, name = "Condition") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
+  labs(x = "Variant type", y = "Number of eQTLs",
+       title = "eQTL counts by variant type (supplementary)") +
+  theme_classic(base_size = 12) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        legend.position = "top",
+        axis.text.x = element_text(angle = 30, hjust = 1))
+print(figS_typecount)
+ggsave(file.path(OUT, "figS_eqtl_count_by_variant_type.tiff"), figS_typecount,
+       width = 8, height = 5, dpi = 600, units = "in", device = "tiff", compression = "lzw")
 ```
 
 # 5. Effect size by variant type and location
@@ -327,14 +311,6 @@ split still carries the secondary message — SVs/CNVs look small because they a
 almost all trans, and trans < cis within every type. A per-cell Kruskal-Wallis
 tests whether the three conditions differ in |β|, printed where at least two
 conditions have ≥3 eQTLs.
-
-
-What the test is. Within one panel (say SNPs) at one location (say Cis), you have three groups of |β| values — the YPD cis-SNP effect sizes, the SC2Glu cis-SNP effect sizes, the fluconazole cis-SNP effect sizes. The Kruskal-Wallis test asks a single question: are these three distributions of effect size the same, or does at least one condition differ? It's the non-parametric (rank-based) version of a one-way ANOVA — it doesn't assume the effect sizes are normally distributed, which they aren't.
-
-So in the SNPs panel:
-
-the left KW p-value = "do YPD, SC2Glu, fluconazole differ in cis-SNP effect size?"
-the right KW p-value = "do they differ in trans-SNP effect size?"
 
 ```{r effect-size, fig.width=12, fig.height=6}
 combined$abs_beta <- abs(combined[[signed_col]])
@@ -365,9 +341,9 @@ dodge <- position_dodge(width = 0.8)
 figES <- ggplot(es, aes(CT, abs_beta, fill = condition)) +
   geom_violin(trim = FALSE, alpha = 0.6, scale = "width", position = dodge,
               width = 0.75, linewidth = 0.3) +
-  geom_boxplot(aes(group = interaction(CT, condition)),
+    geom_boxplot(aes(group = interaction(CT, condition)),
                width = 0.12, fill = "white", outlier.shape = NA, position = dodge,
-               linewidth = 0.3) +
+               linewidth = 0.3, coef = 0) +
   facet_grid(. ~ Genetic_variants) +
   geom_text(data = p_lab, aes(x = as.integer(factor(CT, levels = c("Cis","Trans"))),
                               y = Inf, label = label),
@@ -378,8 +354,8 @@ figES <- ggplot(es, aes(CT, abs_beta, fill = condition)) +
             show.legend = FALSE) +
   scale_fill_manual(values = cond_colors, name = "Condition") +
   scale_color_manual(values = cond_colors, guide = "none") +
-  coord_cartesian(ylim = c(0, quantile(es$abs_beta, 0.99, na.rm = TRUE) * 1.15),
-                  clip = "off") +
+  coord_cartesian(ylim = c(0, max(es$abs_beta, 0.98, na.rm = TRUE) * 1.15),
+                clip = "off") +
   labs(x = "Variant location", y = "Absolute effect size (|\u03b2|)",
        title = "Effect size by variant type and location: conditions side by side") +
   theme_bw(base_size = 13) +
@@ -393,12 +369,127 @@ ggsave(file.path(OUT, "fig_effect_size_by_type_and_location.tiff"), figES,
        width = 12, height = 6, dpi = 600, units = "in", device = "tiff", compression = "lzw")
 ```
 
+The two marginal views below collapse one dimension each: the first pools Cis and
+Trans to compare |β| **by variant type only**, the second pools all variant types
+to compare |β| **by location only** (Cis vs Trans). Conditions remain side-by-side
+coloured violins in both.
+
+```{r effect-size-by-type-only, fig.width=8, fig.height=5}
+# --- Effect size by VARIANT TYPE only (Cis + Trans pooled) ---
+n_lab_type <- es %>% count(Genetic_variants, condition, name = "n") %>%
+  mutate(condition = factor(condition, levels = cond_levels))
+
+p_lab_type <- es %>% group_by(Genetic_variants) %>%
+  summarise(p = {
+    ok <- table(condition[abs_beta >= 0])
+    if (sum(ok >= 3) >= 2 && n_distinct(condition[!is.na(abs_beta)]) >= 2)
+      tryCatch(format.pval(kruskal.test(abs_beta ~ condition)$p.value, digits = 2),
+               error = function(e) NA_character_)
+    else NA_character_
+  }, .groups = "drop") %>%
+  filter(!is.na(p)) %>% mutate(label = paste0("KW p = ", p))
+
+figES_type <- ggplot(es, aes(Genetic_variants, abs_beta, fill = condition)) +
+  geom_violin(trim = FALSE, alpha = 0.6, scale = "width", position = dodge,
+              width = 0.75, linewidth = 0.3) +
+    geom_boxplot(aes(group = interaction(Genetic_variants, condition)),
+               width = 0.12, fill = "white", outlier.shape = NA, position = dodge,
+               linewidth = 0.3, coef = 0) +
+  geom_text(data = p_lab_type,
+            aes(x = as.integer(factor(Genetic_variants, levels = variant_levels)),
+                y = Inf, label = label),
+            inherit.aes = FALSE, vjust = 1.4, size = 2.7) +
+  geom_text(data = n_lab_type, aes(x = Genetic_variants, y = 0, label = paste0("n=", n),
+                                   color = condition, group = condition),
+            position = dodge, vjust = 1.5, size = 2.5, fontface = "bold",
+            show.legend = FALSE) +
+  scale_fill_manual(values = cond_colors, name = "Condition") +
+  scale_color_manual(values = cond_colors, guide = "none") +
+  coord_cartesian(ylim = c(0, max(es$abs_beta, 0.98, na.rm = TRUE) * 1.15),
+                clip = "off") +
+  labs(x = "Variant type", y = "Absolute effect size (|\u03b2|)",
+       title = "Effect size by variant type only (Cis + Trans pooled)") +
+  theme_bw(base_size = 13) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        legend.position = "top",
+        panel.grid.minor = element_blank(),
+        plot.margin = margin(t = 10, r = 15, b = 25, l = 10))
+print(figES_type)
+ggsave(file.path(OUT, "fig_effect_size_by_variant_type_only.tiff"), figES_type,
+       width = 8, height = 5, dpi = 600, units = "in", device = "tiff", compression = "lzw")
+```
+
+```{r effect-size-by-location-only, fig.width=6.5, fig.height=5}
+# --- Effect size by LOCATION only (all variant types pooled) ---
+n_lab_loc <- es %>% count(CT, condition, name = "n") %>%
+  mutate(condition = factor(condition, levels = cond_levels),
+         CT        = factor(CT, levels = c("Cis", "Trans")))
+
+p_lab_loc <- es %>% group_by(CT) %>%
+  summarise(p = {
+    ok <- table(condition[abs_beta >= 0])
+    if (sum(ok >= 3) >= 2 && n_distinct(condition[!is.na(abs_beta)]) >= 2)
+      tryCatch(format.pval(kruskal.test(abs_beta ~ condition)$p.value, digits = 2),
+               error = function(e) NA_character_)
+    else NA_character_
+  }, .groups = "drop") %>%
+  filter(!is.na(p)) %>% mutate(label = paste0("KW p = ", p))
+
+figES_loc <- ggplot(es, aes(CT, abs_beta, fill = condition)) +
+  geom_violin(trim = FALSE, alpha = 0.6, scale = "width", position = dodge,
+              width = 0.75, linewidth = 0.3) +
+    geom_boxplot(aes(group = interaction(CT, condition)),
+               width = 0.12, fill = "white", outlier.shape = NA, position = dodge,
+               linewidth = 0.3, coef = 0) +
+  geom_text(data = p_lab_loc, aes(x = as.integer(factor(CT, levels = c("Cis","Trans"))),
+                                  y = Inf, label = label),
+            inherit.aes = FALSE, vjust = 1.4, size = 2.7) +
+  geom_text(data = n_lab_loc, aes(x = CT, y = 0, label = paste0("n=", n),
+                                  color = condition, group = condition),
+            position = dodge, vjust = 1.5, size = 2.5, fontface = "bold",
+            show.legend = FALSE) +
+  scale_fill_manual(values = cond_colors, name = "Condition") +
+  scale_color_manual(values = cond_colors, guide = "none") +
+  coord_cartesian(ylim = c(0, max(es$abs_beta, 0.98, na.rm = TRUE) * 1.15),
+                clip = "off") +
+  labs(x = "Variant location", y = "Absolute effect size (|\u03b2|)",
+       title = "Effect size by location only (all variant types pooled)") +
+  theme_bw(base_size = 13) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        legend.position = "top",
+        panel.grid.minor = element_blank(),
+        plot.margin = margin(t = 10, r = 15, b = 25, l = 10))
+print(figES_loc)
+ggsave(file.path(OUT, "fig_effect_size_by_location_only.tiff"), figES_loc,
+       width = 6.5, height = 5, dpi = 600, units = "in", device = "tiff", compression = "lzw")
+```
+
 The cis/trans composition itself (few cis for SV/CNV) is reported as counts —
 this is the number the effect-size story rests on:
 
 ```{r cis-trans-numbers}
 cat("Cis/trans counts by variant type and condition:\n")
 print(with(combined, table(Genetic_variants, CT, condition)))
+
+# --- Cis vs Trans effect size comparison (sc2glu and fluconazole) ---
+cat("=== CIS vs TRANS EFFECT SIZE COMPARISON ===\n\n")
+
+for (cond in c("SC2Glu", "Fluconazole")) {
+  es_cond <- es %>% filter(condition == cond)
+  
+  cis_es <- es_cond %>% filter(CT == "Cis") %>% pull(abs_beta)
+  trans_es <- es_cond %>% filter(CT == "Trans") %>% pull(abs_beta)
+  
+  w <- wilcox.test(cis_es, trans_es, alternative = "greater")  # cis > trans
+  
+  cat(sprintf("\n%s:\n", cond))
+  cat(sprintf("  Cis (n=%d):   median = %.4f, mean = %.4f\n", 
+              length(cis_es), median(cis_es, na.rm=TRUE), mean(cis_es, na.rm=TRUE)))
+  cat(sprintf("  Trans (n=%d): median = %.4f, mean = %.4f\n", 
+              length(trans_es), median(trans_es, na.rm=TRUE), mean(trans_es, na.rm=TRUE)))
+  cat(sprintf("  Wilcoxon (Cis > Trans): W = %.0f, p = %.2e\n", 
+              w$statistic, w$p.value))
+}
 ```
 
 # 6. Stress-vs-baseline eQTL overlap (two pairwise Venns)
@@ -534,10 +625,9 @@ build_pair <- function(dfA, dfB, labA, labB) {
 }
 shared_beta <- bind_rows(
   build_pair(all_clumped_YPD.1,  all_clumped_fluconazole, "YPD",    "Flu"),
-  build_pair(all_clumped_sc2glu, all_clumped_fluconazole, "SC2Glu", "Flu"),
-  build_pair(all_clumped_YPD.1,  all_clumped_sc2glu,      "YPD",    "SC2Glu")) %>%
+  build_pair(all_clumped_sc2glu, all_clumped_fluconazole, "SC2Glu", "Flu")) %>%
   mutate(sign_flip = sign(beta_A) != sign(beta_B),
-         comparison = factor(comparison, levels = c("YPD vs Flu","SC2Glu vs Flu","YPD vs SC2Glu")))
+         comparison = factor(comparison, levels = c("YPD vs Flu", "SC2Glu vs Flu")))
 
 concordance_summary <- shared_beta %>% group_by(comparison) %>%
   summarise(n_shared = n(), n_sign_flip = sum(sign_flip),
@@ -554,7 +644,7 @@ figB <- ggplot(shared_beta, aes(beta_A, beta_B, color = sign_flip)) +
             aes(x = -Inf, y = Inf, label = paste0("n=", n_shared, ", r=", pearson_r,
                                                    "\nflips=", n_sign_flip, " (", pct_flip, "%)")),
             hjust = -0.08, vjust = 1.2, size = 3.2, fontface = "bold") +
-  facet_wrap(~ comparison, ncol = 3) +
+  facet_wrap(~ comparison, ncol = 2) +
   scale_color_manual(values = c("FALSE" = "#455A64", "TRUE" = "#C41E3A"),
                      labels = c("Concordant", "Sign flip"), name = NULL) +
   labs(x = "Effect size (condition 1)", y = "Effect size (condition 2)",
@@ -565,9 +655,8 @@ figB <- ggplot(shared_beta, aes(beta_A, beta_B, color = sign_flip)) +
         strip.text = element_text(face = "bold"))
 print(figB)
 ggsave(file.path(OUT, "figB_effect_concordance_all_pairs.tiff"), figB,
-       width = 10, height = 4.5, dpi = 600, units = "in", device = "tiff", compression = "lzw")
+       width = 7, height = 4.5, dpi = 600, units = "in", device = "tiff", compression = "lzw")
 ```
-
 
 
 
@@ -681,4 +770,3 @@ if (file.exists(lr_path)) {
 ```{r session}
 sessionInfo()
 ```
-

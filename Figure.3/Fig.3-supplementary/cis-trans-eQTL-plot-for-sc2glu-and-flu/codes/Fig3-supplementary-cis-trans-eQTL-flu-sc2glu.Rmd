@@ -1,5 +1,5 @@
 ---
-title: "Fig.3-Supplementary-panel-A-cis_trans_eqtl_mapping_flu-sc2glu"
+title: "Fig.3-Supplementary — cis/trans eQTL mapping (Fluconazole & sc2glu), all variant types"
 author: "Akriti Agrawal"
 date: "`r format(Sys.time(), '%d %B, %Y')`"
 output: 
@@ -15,7 +15,7 @@ knit: (function(inputFile, encoding) {
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
-                      fig.width = 10, fig.height = 10)
+                      fig.width = 11, fig.height = 11)
 ```
 
 ```{r libs, include=FALSE}
@@ -25,100 +25,68 @@ library(GenomicRanges)
 select <- dplyr::select
 filter <- dplyr::filter
 ```
-0. Config — set your four .clumped/assoc paths here; the indel switch is the confirmed REF_ALT. for fluconazole
+
+# Config — both conditions in one list
+
+Each condition carries its own `RES`, clumped-file directory (`CLMP`), gene-location
+file, and the four `.clumped`/assoc paths. The indel switch is the confirmed
+`REF_ALT` convention (A1 = ALT, A2 = REF). All NEW outputs go to `OUT`, never into `RES`.
+
+Note the per-condition differences:
+
+  * **Fluconazole** — SNP clumped file is `clumped_results_snp_82.clumped` and all four
+    clumped files sit directly in `RES` (no `plink_without_double_id` subfolder).
+  * **sc2glu** — clumped files sit in the `plink_without_double_id` subfolder; assoc files
+    use the `_71` strain-count suffix.
+
 ```{r config}
-RES  <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/merged_fluconazole/new_fastlmm_march_26_2026/results"
-CLMP <- file.path(RES)
-# All NEW outputs (annotated tables + figures) go here, NOT into RES:
-OUT  <- "../results"
-ANNOT_CSV <- "/scratch/aa9679/SingleCell_cerevisiae/Gene_exp_analysis/yeast_custom_annotations.csv"
-GENE_LOC  <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/merged_fluconazole/new_fastlmm_march_26_2026/data/pheno_data/gene_location.txt"
+OUT           <- "../results"
+ANNOT_CSV     <- "/scratch/aa9679/SingleCell_cerevisiae/Gene_exp_analysis/yeast_custom_annotations.csv"
 CIS_WINDOW_BP <- 2000
 
-variant_cfg <- list(
-  SNP   = list(clumped = file.path(CLMP, "clumped_results_snp_82.clumped"), #it is in results folder only not in a subfolder
-               assoc   = file.path(RES,  "all_signif_SNPs_flu_with_threshold.txt")),
-  CNV   = list(clumped = file.path(CLMP, "clumped_results_CNVs.clumped"),
-               assoc   = file.path(RES,  "all_signif_CNVs_flu_with_threshold.txt")),
-  Indel = list(clumped = file.path(CLMP, "clumped_results_Indels.clumped"),
-               assoc   = file.path(RES,  "all_signif_Indels_flu_with_threshold.txt")),
-  SV    = list(clumped = file.path(CLMP, "clumped_results_SVs.clumped"),
-               assoc   = file.path(RES,  "all_signif_SVs_flu_with_threshold.txt"))
+# ---- Fluconazole ----------------------------------------------------------
+flu_RES  <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/merged_fluconazole/new_fastlmm_march_26_2026/results"
+flu_CLMP <- flu_RES                                    # clumped files are in RES directly
+
+# ---- sc2glu ---------------------------------------------------------------
+sc2_RES  <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2/fastlmm/results"
+sc2_CLMP <- file.path(sc2_RES, "plink")
+
+CONDITIONS <- list(
+  Fluconazole = list(
+    GENE_LOC = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/merged_fluconazole/new_fastlmm_march_26_2026/data/pheno_data/gene_location.txt",
+    variant_cfg = list(
+      SNP   = list(clumped = file.path(flu_CLMP, "clumped_results_snp_82.clumped"),
+                   assoc   = file.path(flu_RES,  "all_signif_SNPs_flu_with_threshold.txt")),
+      CNV   = list(clumped = file.path(flu_CLMP, "clumped_results_CNVs.clumped"),
+                   assoc   = file.path(flu_RES,  "all_signif_CNVs_flu_with_threshold.txt")),
+      Indel = list(clumped = file.path(flu_CLMP, "clumped_results_Indels.clumped"),
+                   assoc   = file.path(flu_RES,  "all_signif_Indels_flu_with_threshold.txt")),
+      SV    = list(clumped = file.path(flu_CLMP, "clumped_results_SVs.clumped"),
+                   assoc   = file.path(flu_RES,  "all_signif_SVs_flu_with_threshold.txt"))
+    )
+  ),
+  sc2glu = list(
+    GENE_LOC = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.1/fastlmm/data/pheno_data/gene_location.txt",
+    variant_cfg = list(
+      SNP   = list(clumped = file.path(sc2_CLMP, "clumped_results_snp.clumped"),
+                   assoc   = file.path(sc2_RES,  "all_signif_SNP_71_with_threshold.txt")),
+      CNV   = list(clumped = file.path(sc2_CLMP, "clumped_results_CNVs.clumped"),
+                   assoc   = file.path(sc2_RES,  "all_signif_CNV_71_with_threshold.txt")),
+      Indel = list(clumped = file.path(sc2_CLMP, "clumped_results_Indels.clumped"),
+                   assoc   = file.path(sc2_RES,  "all_signif_Indels_71_with_threshold.txt")),
+      SV    = list(clumped = file.path(sc2_CLMP, "clumped_results_SVs.clumped"),
+                   assoc   = file.path(sc2_RES,  "all_signif_SVs_71_with_threshold.txt"))
+    )
+  )
 )
 ```
 
-```{}
-#fluconazole plink files:
-variant_types = {
-        'SNPs': {
-            'genotype': '/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/pan_transcriptome_paper/SNPs/SNPs_change_names_in_fam_968/SNPs_82fluc/full969Matrix.SNPs.Biallelic.Var.DP10.99percNonMissing.MAF15.NoSubTelo20kb.plink_YPD.1_82fluc_strains',
-            'outdir': '/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/merged_fluconazole/new_fastlmm_march_26_2026/results/results_SNPs'
-        },
-        'CNVs': {
-            'genotype': '/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/pan_transcriptome_paper/CNVs/CNVs_82fluc/CNV_969strains_gain_maf15_N400_20221121.plink_82fluc_strains',
-            'outdir': '/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/merged_fluconazole/new_fastlmm_march_26_2026/results/results_CNVs'
-        },
-        'Indels': {
-            'genotype': '/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/vcf_files_sent_by_Anne/SNPs_indels/modified_snp_indel_plink_for_96strains/Indels_only_fluc_81strains/indels._fluc_81strains',
-            'outdir': '/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/merged_fluconazole/new_fastlmm_march_26_2026/results/results_Indels'
-        },
-        'SVs': {
-            'genotype': '/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/vcf_files_sent_by_Anne/SVs_from_SV.1087/SV.1087samples_updated_fam_files/SVs_for_fluc_81strains/SV.1087samples.SVs_to_fluc_81strains',
-            'outdir': '/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/merged_fluconazole/new_fastlmm_march_26_2026/results/results_SVs'
-        }
-    }
-```
+# Shared reference objects (annotations, chromosome coordinates)
 
-0. Config — set your four .clumped/assoc paths here; the indel switch is the confirmed REF_ALT. for sc2glu
-```{r config}
-RES  <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2/fastlmm/results"
-CLMP <- file.path(RES, "plink_without_double_id")
-# All NEW outputs (annotated tables + figures) go here, NOT into RES:
-OUT  <- "../results"
-ANNOT_CSV <- "/scratch/aa9679/SingleCell_cerevisiae/Gene_exp_analysis/yeast_custom_annotations.csv"
-GENE_LOC  <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.1/fastlmm/data/pheno_data/gene_location.txt"
-CIS_WINDOW_BP <- 2000
+These are the same across both conditions (one genome, R64) so they are built once.
+The per-condition `gene_location.txt` is rebuilt inside the loop.
 
-variant_cfg <- list(
-  SNP   = list(clumped = file.path(CLMP, "clumped_results_snp.clumped"),
-               assoc   = file.path(RES,  "all_signif_SNP_71_with_threshold.txt")),
-  CNV   = list(clumped = file.path(CLMP, "clumped_results_CNVs.clumped"),
-               assoc   = file.path(RES,  "all_signif_CNV_71_with_threshold.txt")),
-  Indel = list(clumped = file.path(CLMP, "clumped_results_Indels.clumped"),
-               assoc   = file.path(RES,  "all_signif_Indels_71_with_threshold.txt")),
-  SV    = list(clumped = file.path(CLMP, "clumped_results_SVs.clumped"),
-               assoc   = file.path(RES,  "all_signif_SVs_71_with_threshold.txt"))
-)
-```
-
-
-```{}
-#sc2glucose variant file information - the only difference is here I have filtered for 71 strains
-variant_types = {
-        'SNPs': {
-            'genotype': '/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/pan_transcriptome_paper/SNPs/SNPs_change_names_in_fam_968/SNPs_71/full969Matrix.SNPs.Biallelic.Var.DP10.99percNonMissing.MAF15.NoSubTelo20kb.plink_71strains',
-            'outdir': '/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2/fastlmm/results/results_SNPs_71'
-        },
-        'CNVs': {
-            'genotype': '/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/pan_transcriptome_paper/CNVs/CNVs_71/CNV_969strains_gain_maf15_N400_20221121.plink_71strains',
-            'outdir': '/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2/fastlmm/results/results_CNVs_71'
-        },
-        'CNVs.2_cov': {
-            'genotype': '/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/structural_variant_vcf/SVcalls/CNVs_for_71_strains/full1086.CNVs.MAC1.plink_to_71strains',
-            'outdir': '/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2/fastlmm/results/results_CNVs_71_cov'
-        },
-        'Indels': {
-            'genotype': '/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/vcf_files_sent_by_Anne/SNPs_indels/modified_snp_indel_plink_for_96strains/Indels_only_71/indels.71samples',
-            'outdir': '/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2/fastlmm/results/results_Indels_71'
-        },
-        'SVs': {
-            'genotype': '/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/vcf_files_sent_by_Anne/SVs_from_SV.1087/SV.1087samples_updated_fam_files/SVs_for_71_strains/SV.1087samples.SVs_to_71strains',
-            'outdir': '/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2/fastlmm/results/results_SVs_71'
-        }
-    }
-```
-
-1. Shared reference objects (chromosome coords, gene annotations, phenotype coords)
 ```{r reference}
 ann <- read.csv(ANNOT_CSV)
 annotations_gr <- GRanges(ann$seqnames,
@@ -135,17 +103,22 @@ chr_lengths <- c(I=230218, II=813184, III=316620, IV=1531933, V=576874, VI=27016
 chr_offsets <- c(0, cumsum(chr_lengths[-length(chr_lengths)])); names(chr_offsets) <- roman16
 chr_mids <- chr_offsets + chr_lengths / 2
 
-gene_location_fixed <- read.table(GENE_LOC, header = TRUE, stringsAsFactors = FALSE) %>%
-  select(gene_id, gene_name, chr, left, right) %>%
-  mutate(right = right + 2,                                  # gene_end is start of stop codon
-         gene_id = str_replace(gene_id, "-", "."))
-
 feature_priority <- c(promoter=1, three_prime_UTR=2, five_prime_UTR=3,
                       start_codon=4, stop_codon=5, CDS=6)
 prio <- function(f) { p <- feature_priority[f]; p[is.na(p)] <- 99; p }
+
+# per-condition gene-location loader (called inside the loop)
+build_gene_loc <- function(path) {
+  read.table(path, header = TRUE, stringsAsFactors = FALSE) %>%
+    select(gene_id, gene_name, chr, left, right) %>%
+    mutate(right = right + 2,                           # gene_end is start of stop codon
+           gene_id = str_replace(gene_id, "-", "."))
+}
 ```
-Chunk 4 — reader (your process_clumped_variants, condensed)
-```{r}
+
+# Annotation functions (your originals, unchanged)
+
+```{r reader}
 read_clumped <- function(clumped, assoc) {
   ids <- read.table(clumped, header = TRUE)$SNP
   read.table(assoc, header = TRUE, sep = "\t", stringsAsFactors = FALSE) %>%
@@ -153,10 +126,8 @@ read_clumped <- function(clumped, assoc) {
 }
 ```
 
-
-Chunk 5 — point annotation (SNP = priority, CNV = first overlap)
-
 ```{r annot-point}
+# point annotation (SNP = priority feature, CNV = first overlap)
 annotate_point <- function(df, pick = c("priority","first")) {
   pick <- match.arg(pick)
   df$var_chr_roman <- num_to_roman(df$Chr)
@@ -184,10 +155,8 @@ annotate_point <- function(df, pick = c("priority","first")) {
 }
 ```
 
-
-Chunk 6 — range annotation (Indel = no nearest, SV = nearest)
-
-```{r annot-sv}
+```{r annot-range}
+# range annotation (Indel = overlap only, SV = overlap + nearest)
 annotate_range <- function(df, range_end, use_nearest) {
   df$var_chr_roman <- num_to_roman(df$Chr)
   gr <- GRanges(df$var_chr_roman, IRanges(df$ChrPos, range_end))
@@ -215,8 +184,9 @@ annotate_range <- function(df, range_end, use_nearest) {
   df
 }
 ```
-Chunk 7 — per-type dispatch (builds each type's ranges the way your originals do)
+
 ```{r annot-dispatch}
+# per-type dispatch (builds each type's ranges the way your originals do)
 annotate_variant <- function(df, vt) {
   if (vt == "SNP") return(annotate_point(df, "priority"))
   if (vt == "CNV") return(annotate_point(df, "first"))
@@ -238,8 +208,10 @@ annotate_variant <- function(df, vt) {
   }
 }
 ```
-Chunk 8 — cis/trans + harmonise (identical rule across all four originals)
+
 ```{r harmonise}
+# cis/trans + harmonise (identical rule across all four originals)
+# reads gene_location_fixed from the global env (set per condition inside the loop)
 add_cis_trans <- function(df, vt) {
   df %>%
     left_join(gene_location_fixed, by = c("Pheno" = "gene_id")) %>%
@@ -263,72 +235,97 @@ add_cis_trans <- function(df, vt) {
 }
 ```
 
-Chunk 9 — build combined table
-```{r build-table}
-combined <- lapply(names(variant_cfg), function(vt) {
-  cfg <- variant_cfg[[vt]]
-  message("annotating ", vt, " ...")
-  read_clumped(cfg$clumped, cfg$assoc) %>% annotate_variant(vt) %>% add_cis_trans(vt)
-}) %>% bind_rows() %>%
-  mutate(var_chr_roman = factor(var_chr_roman, levels = roman16),
-         Pheno_chr     = factor(Pheno_chr,     levels = roman16),
-         variant_type  = factor(variant_type,  levels = c("SNP","CNV","Indel","SV")),
-         var_genome    = chr_offsets[as.character(var_chr_roman)] + ChrPos,
-         pheno_genome  = chr_offsets[as.character(Pheno_chr)] + (Pheno_start + Pheno_end)/2) %>%
-  filter(!is.na(var_genome), !is.na(pheno_genome), !is.na(cis_trans))
+# Per-condition runner
 
-table(combined$variant_type, combined$cis_trans)
-```
-Chunk 10 — Panel A: 2×2 cis/trans facet
-```{r panelA, fig.width=11, fig.height=11}
-panelA <- ggplot(combined, aes(var_genome, pheno_genome, color = cis_trans, size = abs_effect_size)) +
-  geom_point(alpha = 0.6) +
-  facet_wrap(~ variant_type, ncol = 2) +
-  scale_color_manual(name = "eQTL type", values = c(Cis = "#d73027", Trans = "#4575b4")) +
-  scale_size_continuous(name = "Effect size (|β|)", range = c(0.4, 2.6), trans = "log10") +
-  scale_x_continuous(breaks = chr_mids, labels = names(chr_mids), expand = c(0.01, 0)) +
-  scale_y_continuous(breaks = chr_mids, labels = names(chr_mids), expand = c(0.01, 0)) +
-  labs(x = "Variant position (chromosome)", y = "Gene position (chromosome)") +
-  theme_bw(base_size = 12) +
-  theme(strip.text = element_text(face = "bold"),
-        axis.text = element_text(size = 8),
-        legend.position = "bottom")
+For one condition this: (1) rebuilds `gene_location_fixed` from that condition's gene-location
+file, (2) reads → annotates → harmonises each of the four variant types, (3) writes the four
+per-type annotated tables and the combined table (condition-suffixed), and (4) builds and saves
+the 2×2 cis/trans facet (one panel per variant type, Cis/Trans coloured).
 
-ggsave(file.path(OUT, "Fig3_panelA_cis_trans_2x2.tiff"), panelA,
-       width = 11, height = 10, units = "in", dpi = 600, compression = "lzw")
-ggsave(file.path(OUT, "Fig3_panelA_cis_trans_2x2.png"),  panelA,
-       width = 11, height = 10, units = "in", dpi = 300)
-panelA
-```
-```{r}
-library(data.table)
+```{r runner}
+run_condition <- function(cond_label, cond) {
+  message("==== ", cond_label, " ====")
+  gene_location_fixed <<- build_gene_loc(cond$GENE_LOC)   # pipeline reads this global
+  vcfg <- cond$variant_cfg
 
-# --- per-type annotated tables (full columns, before harmonise) ---
-annotated_list <- lapply(names(variant_cfg), function(vt) {
-  cfg <- variant_cfg[[vt]]
-  read_clumped(cfg$clumped, cfg$assoc) %>% annotate_variant(vt) %>% add_cis_trans(vt)
-})
-names(annotated_list) <- names(variant_cfg)
+  # annotate each type once, keep the per-type tables
+  per_type <- lapply(names(vcfg), function(vt) {
+    cfg <- vcfg[[vt]]
+    message("  annotating ", vt, " ...")
+    read_clumped(cfg$clumped, cfg$assoc) %>% annotate_variant(vt) %>% add_cis_trans(vt)
+  })
+  names(per_type) <- names(vcfg)
 
-out_names <- c(SNP  = "snp_data_annotated_cis_trans.txt",
-               CNV  = "cnv_data_annotated_cis_trans.txt",
-               Indel= "indel_data_annotated_cis_trans.txt",
-               SV   = "sv_data_annotated_cis_trans.txt")
+  combined <- bind_rows(per_type) %>%
+    mutate(var_chr_roman = factor(var_chr_roman, levels = roman16),
+           Pheno_chr     = factor(Pheno_chr,     levels = roman16),
+           variant_type  = factor(variant_type,  levels = c("SNP","CNV","Indel","SV")),
+           var_genome    = chr_offsets[as.character(var_chr_roman)] + ChrPos,
+           pheno_genome  = chr_offsets[as.character(Pheno_chr)] + (Pheno_start + Pheno_end)/2) %>%
+    filter(!is.na(var_genome), !is.na(pheno_genome), !is.na(cis_trans))
 
-for (vt in names(annotated_list)) {
-  f <- file.path(OUT, out_names[[vt]])
-  fwrite(annotated_list[[vt]], f, sep = "\t", quote = FALSE,
-         row.names = FALSE, na = "NA")
-  cat("Wrote", out_names[[vt]], "—", nrow(annotated_list[[vt]]), "rows\n")
+  # ---- write per-type annotated tables + combined (condition-suffixed) ----
+  out_stub <- c(SNP="snp", CNV="cnv", Indel="indel", SV="sv")
+  for (vt in names(per_type)) {
+    fwrite(per_type[[vt]],
+           file.path(OUT, sprintf("%s_data_annotated_cis_trans_%s.txt", out_stub[[vt]], cond_label)),
+           sep = "\t", quote = FALSE, row.names = FALSE, na = "NA")
+  }
+  fwrite(combined,
+         file.path(OUT, sprintf("all_variants_cis_trans_combined_%s.txt", cond_label)),
+         sep = "\t", quote = FALSE, row.names = FALSE, na = "NA")
+
+  # ---- 2x2 cis/trans facet ----
+  panelA <- ggplot(combined, aes(var_genome, pheno_genome,
+                                 color = cis_trans, size = abs_effect_size)) +
+    geom_point(alpha = 0.6) +
+    facet_wrap(~ variant_type, ncol = 2) +
+    scale_color_manual(name = "eQTL type", values = c(Cis = "#d73027", Trans = "#4575b4")) +
+    scale_size_continuous(name = "Effect size (|\u03b2|)", range = c(0.4, 2.6), trans = "log10") +
+    scale_x_continuous(breaks = chr_mids, labels = names(chr_mids), expand = c(0.01, 0)) +
+    scale_y_continuous(breaks = chr_mids, labels = names(chr_mids), expand = c(0.01, 0)) +
+    labs(x = "Variant position (chromosome)", y = "Gene position (chromosome)",
+         title = cond_label) +
+    theme_bw(base_size = 12) +
+    theme(strip.text = element_text(face = "bold"),
+          axis.text = element_text(size = 8),
+          legend.position = "bottom")
+
+  ggsave(file.path(OUT, sprintf("Fig3S_panelA_cis_trans_2x2_%s.tiff", cond_label)), panelA,
+         width = 11, height = 10, units = "in", dpi = 600, device = "tiff", compression = "lzw")
+  ggsave(file.path(OUT, sprintf("Fig3S_panelA_cis_trans_2x2_%s.png", cond_label)), panelA,
+         width = 11, height = 10, units = "in", dpi = 300)
+
+  cat("\n---", cond_label, "cis/trans counts ---\n")
+  print(table(combined$variant_type, combined$cis_trans))
+
+  list(combined = combined, panelA = panelA)
 }
-
-# --- combined harmonised table used by the plot ---
-fwrite(combined, file.path(OUT, "all_variants_cis_trans_combined.txt"),
-       sep = "\t", quote = FALSE, row.names = FALSE, na = "NA")
-cat("Wrote all_variants_cis_trans_combined.txt —", nrow(combined), "rows\n")
 ```
 
-```{r save-table}
-fwrite(combined, "../results/Fig3_panelA_combined_cis_trans_YPD.txt",
-       sep = "\t", quote = FALSE, na = "NA")
+# Run both conditions
+
+```{r run-all}
+results <- lapply(names(CONDITIONS), function(cl) run_condition(cl, CONDITIONS[[cl]]))
+names(results) <- names(CONDITIONS)
+```
+
+# Figures
+
+## Fluconazole
+
+```{r fig-flu, fig.width=11, fig.height=11}
+results$Fluconazole$panelA
+```
+
+## sc2glu
+
+```{r fig-sc2, fig.width=11, fig.height=11}
+results$sc2glu$panelA
+```
+
+# Session info
+
+```{r session-info}
+sessionInfo()
 ```
