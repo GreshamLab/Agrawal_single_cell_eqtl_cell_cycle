@@ -1,0 +1,518 @@
+---
+title: "1.cell_cycle_assignment.Rmd"
+author: "Akriti Agrawal"
+date: "2025-09-11"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+For finding eQTLs in cell cycle phase there are a few steps
+1. Assignment of cell cycle phase which we do on normalized data
+2. Then we use this assignment on raw seurat object for pseudobulking. Pseudobulking is always on raw data but before that as a separate step we do need to generate normalized seurat object to have it assigned with cell cycle phases 
+
+
+
+# Load packages
+```{r}
+# Install BiocManager if you don't have it
+# if (!require("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# 
+# # Install the organism database
+# BiocManager::install("org.Sc.sgd.db")
+library(org.Sc.sgd.db)
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+
+# Be explicit if needed
+select <- dplyr::select
+filter <- dplyr::filter
+```
+
+#Load the demuxlet output
+```{r}
+data <- read.delim("../../demuxlet/merged_demuxlet_output_YPD.tsv")
+head(data)
+str(data)
+
+data$BEST.LLK <- as.numeric(data$BEST.LLK)
+data$NUM.READS <- as.numeric(data$NUM.READS)
+data$NUM.SNPS <- as.numeric(data$NUM.SNPS)
+data$NEXT.LLK <- as.numeric(data$NEXT.LLK)
+data$DIFF.LLK.BEST.NEXT <- as.numeric(data$DIFF.LLK.BEST.NEXT)
+data$BEST.POSTERIOR <- as.numeric(data$BEST.POSTERIOR)
+data$SNG.POSTERIOR <- as.numeric(data$SNG.POSTERIOR)
+data$SNG.BEST.LLK <- as.numeric(data$SNG.BEST.LLK)
+data$SNG.NEXT.LLK <- as.numeric(data$SNG.NEXT.LLK)
+data$SNG.ONLY.POSTERIOR <- as.numeric(data$SNG.ONLY.POSTERIOR)
+data$DBL.BEST.LLK <- as.numeric(data$DBL.BEST.LLK)
+data$DIFF.LLK.SNG.DBL <- as.numeric(data$DIFF.LLK.SNG.DBL)
+data <- na.omit(data)
+```
+
+```{r}
+expression_data <- Read10X(data.dir = "../../alignment/output_of_alignment_YPD1_with_clean_gtf/run_count/outs/filtered_feature_bc_matrix/")
+Na_va_data <- CreateSeuratObject(counts = expression_data, project = "natural variants", min.cells = 3, min.features = 200)
+head(Na_va_data@meta.data)
+print(dim(Na_va_data))
+
+GetAssayData(Na_va_data, slot = "counts")
+```
+# Add the cell identities
+Add the cell identities assigned by demuxlet to the metadata of the seurat object Na_va_data.
+```{r}
+# Add all the columns of the data dataframe to the metadata of the Seurat object
+#Match the rows of demuxlet assignment "data" with the seurat metadata colum "BARCODE". because both have common barcodes
+metadata_to_add <- data[match(colnames(Na_va_data), data$BARCODE), ]
+#Add the matching demuxlet identities to the metadata
+Na_va_data <- AddMetaData(Na_va_data, metadata = metadata_to_add)
+```
+
+## Perfrom qc from seurat pipeline. 
+### Step.1 : Filter the cells with low or suspiciously high ncount_RNA
+```{r}
+# Filter cells based on nCount_RNA and nFeature_RNA
+#Na_va_data_subsetted <- subset(Na_va_data, subset = nFeature_RNA > 200) Don't need it
+```
+
+
+###  Step.2 : Exclude the entries forKANMX and NATMX. 
+
+We do this because DGY3 was part of a separate pool and it formed a different cluster from all the other strains. We removed KANMX and NATMX because these barcoded antibiotic markers were added in the DGY3 to identify them. 
+```{r}
+
+# Check the dimensions of the filtered Seurat object
+print(dim(Na_va_data))
+
+# Optionally, check the first few rows of the metadata to confirm the filtering
+head(Na_va_data@meta.data)
+
+# Remove specific DGY3
+Na_va_data_subsetted <- subset(Na_va_data, subset = SNG.BEST.GUESS != "DGY3")
+
+# Check the dimensions of the filtered Seurat object
+print(dim(Na_va_data_subsetted))
+
+```
+
+### Step 3. Remove entries containing AMB and DBL droplet.type. 
+
+We'll be using the demuxlet identities for cluster identification and we want to be sure to keep only the unique identities
+```{r}
+# Subset Na_va_data to include only entries where DROPLET.TYPE is "AMB" or "DBL"
+Na_va_data_subsetted <- subset(Na_va_data_subsetted, !(subset = DROPLET.TYPE %in% c("AMB", "DBL")))
+
+# Check the dimensions of the filtered Seurat object
+print(dim(Na_va_data_subsetted))
+
+# Optionally, check the first few rows of the metadata to confirm the filtering
+head(Na_va_data_subsetted@meta.data)
+
+#Optional - you can also set identities of the cluster using Idents
+Na_va_data_subsetted <- SetIdent(Na_va_data_subsetted, value = Na_va_data_subsetted$SNG.BEST.GUESS)
+
+saveRDS(Na_va_data_subsetted, file = "../data/Na_va_data_subsetted.rds")
+```
+
+### Step 4. Normalization - 
+
+Aims to adjust for differences in cellular sequencing depth, due to fluctuations in cellular RNA content, efficiency in lysis and reverse transcription and stochastix samling during next-gen sequencing. It also aims to do variance stabilization - to address the relationship between gene abundance and gene variance. And to ensure both lowly and highly expressed genes can contribute to the cellular states
+
+```{r}
+###Normalization using log normalization and scaling of the data
+Normalized_Na_va_data <- NormalizeData(Na_va_data_subsetted)
+Normalized_Na_va_data <- FindVariableFeatures(Normalized_Na_va_data, selection.method = "vst", nfeatures = 2000)
+# Scale the data
+all.genes <- rownames(Normalized_Na_va_data)
+Normalized_Na_va_data <- ScaleData(Normalized_Na_va_data, features = all.genes)
+```
+
+
+### Step 5. - PCA
+
+```{r}
+# Perform linear dimensional reduction (PCA)
+Normalized_Na_va_data <- RunPCA(Normalized_Na_va_data, features = VariableFeatures(object = Normalized_Na_va_data))
+
+# Save the normalized Seurat object
+saveRDS(Normalized_Na_va_data, file = "../data/Normalized_Na_va_data.rds")
+```
+
+
+## Cell cycle gene assingment
+
+
+### Step 1. Clustering - Cell clustering is on the basis of PCA scores -- each PC representing a metafeature that combines information across a correlated featue set
+
+1. FindNeighbors -- constructs KNN graph based on the euclidean distance in PCA space, refine the edge weights between any two cells based on shared overlap in their local neighboorhood (jaccard similarity -- if the two cells have same number of similar features they are more similar then the other)
+
+2. Find clusters -- Actuall clustering -- Louvain algorithm -- to iteratively group cells together, with the goal of optimizing the standard modularity function.
+
+```{r}
+Normalized_Na_va_data_clustered_for_Cell_cycle <- FindNeighbors(Normalized_Na_va_data, dims = 1:5)
+Normalized_Na_va_data_clustered_for_Cell_cycle  <- FindClusters(Normalized_Na_va_data_clustered_for_Cell_cycle , resolution = 0.5)
+```
+
+#Plot the UMAP
+```{r}
+Normalized_Na_va_data_clustered_for_Cell_cycle <- RunUMAP(Normalized_Na_va_data_clustered_for_Cell_cycle, dims = 1:5)
+DimPlot(Normalized_Na_va_data_clustered_for_Cell_cycle, reduction = "umap")
+```
+
+### Step 2. Find differentially expressed markers
+For every cluster compared to all remaining cells, report only the positive ones
+
+```{r}
+Normalized_Na_va_data_clustered_for_Cell_cycle.markers <- FindAllMarkers(Normalized_Na_va_data_clustered_for_Cell_cycle, only.pos = TRUE)
+
+Normalized_Na_va_data_clustered_for_Cell_cycle.markers %>% 
+  group_by(cluster) %>%
+    dplyr::filter(avg_log2FC > 0.2 & p_val_adj < 0.05)
+
+```
+
+### Step 3. Add common name and ORF column to the list
+```{r}
+add_gene_annotation_columns <- function(markers_df) {
+  # Extract all gene names
+  gene_names <- markers_df$gene
+  
+  # Initialize new columns
+  markers_df$orf_id <- NA
+  markers_df$common_name <- NA
+  
+  # Identify which genes are likely already ORFs (systematic names)
+  is_orf <- grepl("^Y[A-Z]{2}\\d", gene_names)
+  
+  # Set ORF IDs for genes already in ORF format
+  markers_df$orf_id[is_orf] <- gene_names[is_orf]
+  
+  # Set common names for genes not in ORF format (already common names)
+  markers_df$common_name[!is_orf] <- gene_names[!is_orf]
+  
+  # Look up common names for ORFs
+  if(sum(is_orf) > 0) {
+    orf_common_mapping <- tryCatch({
+      AnnotationDbi::select(org.Sc.sgd.db, 
+                            keys = gene_names[is_orf],
+                            columns = "COMMON", 
+                            keytype = "ORF")
+    }, error = function(e) {
+      warning("Error mapping ORFs to common names: ", e$message)
+      return(NULL)
+    })
+    
+    # Apply the mapping to our dataframe
+    if(!is.null(orf_common_mapping)) {
+      for(i in which(is_orf)) {
+        orf <- gene_names[i]
+        common <- orf_common_mapping$COMMON[orf_common_mapping$ORF == orf]
+        if(length(common) > 0 && !is.na(common[1])) {
+          markers_df$common_name[i] <- common[1]
+        }
+      }
+    }
+  }
+  
+  # Look up ORFs for common names
+  if(sum(!is_orf) > 0) {
+    common_orf_mapping <- tryCatch({
+      AnnotationDbi::select(org.Sc.sgd.db, 
+                            keys = gene_names[!is_orf],
+                            columns = "ORF", 
+                            keytype = "COMMON")
+    }, error = function(e) {
+      warning("Error mapping common names to ORFs: ", e$message)
+      return(NULL)
+    })
+    
+    # Apply the mapping to our dataframe
+    if(!is.null(common_orf_mapping)) {
+      for(i in which(!is_orf)) {
+        common <- gene_names[i]
+        orf <- common_orf_mapping$ORF[common_orf_mapping$COMMON == common]
+        if(length(orf) > 0 && !is.na(orf[1])) {
+          markers_df$orf_id[i] <- orf[1]
+        }
+      }
+    }
+  }
+  
+  # Report mapping statistics
+  cat(sprintf("Gene annotation statistics:\n"))
+  cat(sprintf("  - Total genes: %d\n", length(gene_names)))
+  cat(sprintf("  - Original ORFs: %d\n", sum(is_orf)))
+  cat(sprintf("  - Original common names: %d\n", sum(!is_orf)))
+  cat(sprintf("  - Genes with resolved common names: %d\n", sum(!is.na(markers_df$common_name))))
+  cat(sprintf("  - Genes with resolved ORF IDs: %d\n", sum(!is.na(markers_df$orf_id))))
+  
+  return(markers_df)
+}
+
+# Apply the function to your dataframe
+Normalized_Na_va_data_clustered_for_Cell_cycle.markers <- add_gene_annotation_columns(Normalized_Na_va_data_clustered_for_Cell_cycle.markers)
+
+write.table(Normalized_Na_va_data_clustered_for_Cell_cycle.markers, file = "../data/Normalized_Na_va_data_clustered_for_Cell_cycle.markers.txt")
+
+# Normalized_Na_va_data_clustered_for_Cell_cycle.markers <- read.table("../data/Normalized_Na_va_data_clustered_for_Cell_cycle.markers.txt")
+
+str(Normalized_Na_va_data_clustered_for_Cell_cycle.markers)
+head(Normalized_Na_va_data_clustered_for_Cell_cycle.markers)
+```
+
+### Step 4. Annotate cell cycle using cell cycle annotation -- as annotate by Chris jackson
+```{r}
+cell_cycle_annotation <- read.delim("../../../cell_cycle_annotation.tsv")
+str(cell_cycle_annotation)
+table(cell_cycle_annotation$Group)
+```
+
+
+####Step 4.1 Define cell cycle groups to keep
+```{r}
+# Define the cell cycle groups to keep
+cell_cycle_groups <- c("M/G1", "G1", "S", "G2", "M")
+
+# Filter the table to include only cell cycle groups
+cell_cycle_annotation <- cell_cycle_annotation[cell_cycle_annotation$Group %in% cell_cycle_groups, ]
+
+# Print some information about the filtering
+cat("Filtered table has", nrow(cell_cycle_annotation), "rows\n")
+cat("Retained groups:", paste(unique(cell_cycle_annotation$Group), collapse = ", "), "\n")
+
+cell_cycle_annotation$Group <- gsub("M/G1", "M-G1", cell_cycle_annotation$Group)
+
+# If you want to write the filtered data back to a file
+write.table(cell_cycle_annotation, file = "../data/CellCycle_Genes.tsv", sep = "\t", 
+          row.names = FALSE, quote = FALSE)
+
+cell_cycle_annotation <- read.table("../data/CellCycle_Genes.tsv", header = T)
+str(cell_cycle_annotation)
+table(cell_cycle_annotation$Group)
+```
+
+####Step 4.2 Perform gene-to-group mapping (which gene belongs to which cell cycle phase)
+
+```{r}
+# Make a copy of your current data frame
+annotated_df <- Normalized_Na_va_data_clustered_for_Cell_cycle.markers
+
+# Add a new column for cell cycle group
+annotated_df$cell_cycle_group <- NA
+
+# Annotate each gene with its cell cycle group
+for (i in 1:nrow(annotated_df)) {
+  # Get the current gene's ORF ID
+  current_orf <- annotated_df$orf_id[i]
+  
+  # Find matching entry in cell cycle annotation
+  match_idx <- which(cell_cycle_annotation$Gene == current_orf)
+  
+  # If a match is found, add the cell cycle group
+  if (length(match_idx) > 0) {
+    annotated_df$cell_cycle_group[i] <- cell_cycle_annotation$Group[match_idx[1]]
+  }
+}
+
+# Summarize the data
+table(annotated_df$cell_cycle_group, useNA = "ifany")
+
+# You can also create a table showing how many genes from each cell cycle group 
+# appear in each cluster
+if ("cluster" %in% colnames(annotated_df)) {
+  cell_cycle_by_cluster <- table(annotated_df$cluster, annotated_df$cell_cycle_group, useNA = "ifany")
+  print(cell_cycle_by_cluster)
+}
+
+# Save the annotated data if needed
+# write.table(annotated_df, file = "annotated_markers.tsv", sep = "\t", row.names = FALSE, quote = FALSE)
+```
+
+####Step 4.3 Perform cell-to-group assignment (which cell cycle phase each cell is in)
+
+For single-cell RNA-seq data, assigning cells to cell cycle phases involves:
+1. Considering the combined expression of all genes in each cell cycle group
+2. Determining which cell cycle program is most active in each cell
+
+
+In Seurat objects, the data is organized in assays (like "RNA", "integrated", etc.), and within each assay, there are different "slots" or "layers" that contain different types of data:
+
+"counts": The raw count data (unmodified, original counts)
+"data": The normalized data (after normalization)
+"scale.data": The scaled data (after scaling)
+
+When we talk about "each phase might have a different baseline level of expression," we're addressing an important biological reality in gene expression data.
+Different cell cycle phases (G1, S, G2, M, etc.) involve different biological processes, and the genes associated with each phase may have inherently different expression levels. For example:
+
+Some phases might have genes that are naturally expressed at higher levels even in their "baseline" state
+Some phases might have more genes associated with them than others
+Some phases might have genes that are more widely expressed across many cell types
+
+Without standardizing the scores, you might incorrectly assign cells to phases that simply have higher overall expression. For instance, if G1 genes are generally expressed at higher levels than S phase genes, cells might be incorrectly classified as G1 even when they're actually in S phase.
+
+Z-scoring solves this problem by:
+
+Subtracting the mean (centering the distribution around zero)
+Dividing by the standard deviation (making the spread comparable)
+
+After Z-scoring, what matters is not the absolute expression level but how much a cell's expression of a particular phase's genes deviates from the average across all cells. This allows for fair comparison between phases with different baseline expression characteristics.
+For example, if a cell has:
+
+A G1 score that's 1.5 standard deviations above the mean G1 score
+An S score that's 2.0 standard deviations above the mean S score
+
+The cell would be assigned to S phase because its expression of S phase genes is more unusual/distinctive relative to other cells, even if the raw G1 expression values might have been higher.
+
+```{r}
+# Create a list to store cell cycle gene sets
+cell_cycle_gene_sets <- list()
+
+# Populate the gene sets with genes from each category
+for(group in cell_cycle_groups) {
+  cell_cycle_gene_sets[[group]] <- cell_cycle_annotation$Gene[cell_cycle_annotation$Group == group]
+}
+
+# Initialize matrix to store scores
+scores_matrix <- matrix(0, ncol = length(cell_cycle_gene_sets), nrow = ncol(Normalized_Na_va_data_clustered_for_Cell_cycle))
+colnames(scores_matrix) <- names(cell_cycle_gene_sets)
+
+# Get normalized expression matrix
+expr_matrix <- GetAssayData(Normalized_Na_va_data_clustered_for_Cell_cycle, layer = "data")
+
+# Calculate total counts per cell
+total_counts <- colSums(expr_matrix)
+
+# For each cell cycle group, calculate the score:
+#This double loop is the core scoring calculation:
+#For each cell cycle phase (outer loop)
+#Get the list of genes for this phase
+#Find which genes actually exist in our dataset
+#For each cell (inner loop)
+#Sum the expression of all genes in this phase
+#Divide by the total expression in the cell (normalization)
+#Store the result in the scores matrix
+#This gives a normalized score representing what fraction of each cell's total expression comes from genes in each cell cycle #phase.
+
+for(i in 1:length(cell_cycle_gene_sets)) {
+  group <- names(cell_cycle_gene_sets)[i]
+  genes <- cell_cycle_gene_sets[[group]]
+  
+  # Find genes present in the dataset
+  genes_in_data <- intersect(genes, rownames(expr_matrix))
+  
+  if(length(genes_in_data) > 0) {
+    # For each cell
+    for(cell_idx in 1:ncol(expr_matrix)) {
+      # Sum expression of genes in this cell cycle group
+      cell_expression <- sum(expr_matrix[genes_in_data, cell_idx])
+      
+      # Normalize by total expression in this cell
+      scores_matrix[cell_idx, i] <- cell_expression / total_counts[cell_idx]
+    }
+  }
+}
+
+#This standardizes each column of scores (each cell cycle phase):
+#Calculate the mean and standard deviation of scores for each phase
+#Convert each score to a z-score: (value - mean) / standard deviation
+#Z-scoring makes the scores comparable across different phases, since each phase might have a different baseline level of expression.
+# Z-score each column (for each cell cycle group)
+
+for(i in 1:ncol(scores_matrix)) {
+  col_mean <- mean(scores_matrix[, i])
+  col_sd <- sd(scores_matrix[, i])
+  scores_matrix[, i] <- (scores_matrix[, i] - col_mean) / col_sd
+}
+
+
+# Find the maximum score for each cell
+cell_phases <- colnames(scores_matrix)[max.col(scores_matrix)]
+
+#This finds which cell cycle phase has the highest z-score for each cell:
+#max.col(scores_matrix) returns the column index with the maximum value for each row
+#colnames(scores_matrix)[...] converts these indices to the corresponding phase names
+
+
+```
+
+####Step 4.4 Add cell cycle phases to seurat meta object
+```{r}
+# Add cell cycle phase to Seurat object metadata
+Normalized_Na_va_data_clustered_for_Cell_cycle$cell_cycle_phase <- cell_phases
+Normalized_Na_va_data_clustered_for_Cell_cycle$cell_cycle_phase <- factor(
+  Normalized_Na_va_data_clustered_for_Cell_cycle$cell_cycle_phase, 
+  levels = cell_cycle_groups
+)
+
+# Add individual scores to metadata
+for(group in names(cell_cycle_gene_sets)) {
+  col_name <- paste0("cc_", group)
+  Normalized_Na_va_data_clustered_for_Cell_cycle[[col_name]] <- scores_matrix[, group]
+}
+
+```
+
+
+####Step 4.5 #Save the data with cell cycle assignment 
+
+```{r}
+saveRDS(Normalized_Na_va_data_clustered_for_Cell_cycle, "../data/seurat_with_cell_cycle.rds")
+#Normalized_Na_va_data_clustered_for_Cell_cycle <- readRDS("../data/seurat_with_cell_cycle.rds")
+```
+
+
+Visualize the cluster in dimplot
+```{r}
+# Show distribution of cells across cell cycle phases
+print(table(Normalized_Na_va_data_clustered_for_Cell_cycle$cell_cycle_phase))
+
+# Visualize cell cycle phases on a dimensionality reduction plot and save as PDF
+if("umap" %in% names(Normalized_Na_va_data_clustered_for_Cell_cycle@reductions)) {
+  # Open PDF device
+  pdf("../results/cell_cycle_phase_plot.pdf", width = 10, height = 8)
+  
+   # Create the plot
+cell_cycle_plot <- DimPlot(Normalized_Na_va_data_clustered_for_Cell_cycle, 
+              reduction = "umap", 
+              group.by = "cell_cycle_phase",
+              pt.size = 0.5,
+              label = TRUE,
+              label.size = 5,
+              repel = TRUE) +
+        ggtitle("Cell Cycle Phase Classification")
+
+# Get the same limits as your first plot
+x_limits <- range(Normalized_Na_va_data_clustered_for_Cell_cycle@reductions$umap@cell.embeddings[, 1])
+y_limits <- range(Normalized_Na_va_data_clustered_for_Cell_cycle@reductions$umap@cell.embeddings[, 2])
+max_limit <- max(abs(x_limits), abs(y_limits))
+
+# Apply the same limits
+cell_cycle_plot <- cell_cycle_plot + 
+  coord_cartesian(xlim = c(-max_limit, max_limit), ylim = c(-max_limit, max_limit))
+
+# Now print the plot
+print(cell_cycle_plot)
+  
+  # Close the PDF device
+  dev.off()
+  
+  # Also display the plot in the R session
+  print(DimPlot(Normalized_Na_va_data_clustered_for_Cell_cycle, 
+                reduction = "umap", 
+                group.by = "cell_cycle_phase"))
+  
+  cat("Plot saved as 'cell_cycle_phase_plot.pdf'\n")
+}
+
+# # You can also save the cell counts to a separate file
+# write.csv(table(Normalized_Na_va_data_clustered_for_Cell_cycle$cell_cycle_phase),
+#           "../results/seurat_outputs/cell_cycle_counts.csv")
+
+
+```
+
+

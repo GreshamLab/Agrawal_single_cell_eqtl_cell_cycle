@@ -1,0 +1,206 @@
+---
+title: "Fig5.-part-II-compare-with-ypd.2"
+output: html_document
+---
+
+---
+
+# 11. Replicate concordance — the decisive test
+
+A permutation p-value says "more spread than chance". It cannot rule out depth
+differences, ambient RNA, demuxlet misassignment, or per-strain growth-rate
+differences — the shuffle destroys all of those along with genotype.
+
+Reproducibility across an independent capture can. **If the variable genes show
+higher cross-replicate correlation than background, the effect is real. If both
+sit near zero, the hits are noise passing a permutation test.** This single
+comparison is worth more than everything upstream of it.
+
+To produce `obs2`: copy §1.1–§3 into a separate script with `ROOT` pointed at
+YPD.2, then `obs2 <- fit_by_group(Y_cc2, tvec2, gvec2, depth = depthv2)`.
+`saveRDS(obs2, ...)` so you do not refit every session.
+
+```{r replicate}
+# ROOT2 <- ".../YPD.2"
+# obs2   <- fit_by_group(Y_cc2, tvec2, gvec2, depth = depthv2)
+# offset2 <- ...   # §10 logic on replicate 2
+
+obs2    <- readRDS("/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.2/continuous_time_trajectory/results/ypd2_obs.rds")
+offset2 <- readRDS("/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.2/continuous_time_trajectory/results/ypd2_offset.rds")
+
+concordance <- function(M1, M2, min_strains = 20) {
+  genes   <- intersect(rownames(M1), rownames(M2))
+  strains <- intersect(colnames(M1), colnames(M2))
+  map_dfr(genes, function(g) {
+    a <- M1[g, strains]; b <- M2[g, strains]; ok <- !is.na(a) & !is.na(b)
+    tibble(gene = g, n = sum(ok),
+           r = if (sum(ok) >= min_strains)
+                 cor(a[ok], b[ok], method = "spearman") else NA_real_)
+  })
+}
+
+circ_conc <- function(M1, M2, min_strains = 20) {
+  genes   <- intersect(rownames(M1), rownames(M2))
+  strains <- intersect(colnames(M1), colnames(M2))
+  map_dfr(genes, function(g) {
+    d  <- ((M1[g, strains] - M2[g, strains] + WRAP/2) %% WRAP) - WRAP/2
+    ok <- !is.na(d)
+    tibble(gene = g, n = sum(ok),
+           median_abs_shift = median(abs(d[ok])),
+           R = sqrt(mean(cos(2*pi*d[ok]/WRAP))^2 + mean(sin(2*pi*d[ok]/WRAP))^2))
+  })
+}
+
+conc_r2   <- concordance(obs$r2_adj,        obs2$r2_adj)
+conc_amp  <- concordance(obs[[AMP_STAT]],   obs2[[AMP_STAT]])
+conc_peak <- circ_conc(obs$peak,            obs2$peak)
+
+# THE decisive comparison
+bind_rows(conc_r2 %>% mutate(stat = "r2_adj"),
+          conc_amp %>% mutate(stat = "amplitude")) %>%
+  mutate(is_variable = gene %in% gene_summary$gene) %>%
+  group_by(stat, is_variable) %>%
+  summarise(n = n(), median_r = round(median(r, na.rm = TRUE), 3), .groups = "drop") %>%
+  print()
+
+cat("\ncor(strain offset rep1, rep2):",
+    round(cor(offset[names(offset2)], offset2,
+              use = "complete.obs", method = "spearman"), 3), "\n")
+
+validation_targets <- gene_summary %>%
+  left_join(conc_amp  %>% select(gene, r_amp  = r), by = "gene") %>%
+  left_join(conc_r2   %>% select(gene, r_r2   = r), by = "gene") %>%
+  left_join(conc_peak %>% select(gene, R_peak = R, med_shift = median_abs_shift),
+            by = "gene") %>%
+  filter(mean_r2 > 0.3, mean_pct_expressed > 0.3)
+
+cat("\nRanked by amplitude reproducibility:\n")
+validation_targets %>% arrange(desc(r_amp)) %>%
+  select(name, gene, which_phenotype, r_amp, amp_spread, amp_excess) %>%
+  head(15) %>% print(n = 15)
+
+cat("\nRanked by timing reproducibility:\n")
+validation_targets %>% arrange(desc(R_peak)) %>%
+  select(name, gene, which_phenotype, R_peak, med_shift, sd_peak, trim_excess) %>%
+  head(15) %>% print(n = 15)
+
+print(validation_targets %>%
+        select(name, gene, which_phenotype, r_amp, r_r2, R_peak,
+               amp_spread, sd_peak, peak_diff, trim_excess) %>% head(20))
+
+top_var <- head(gene_summary$gene, 30)
+bind_rows(conc_r2 %>% mutate(stat = "r2_adj"),
+          conc_amp %>% mutate(stat = "amplitude")) %>%
+  mutate(grp = case_when(gene %in% top_var           ~ "top 30 variable",
+                         gene %in% gene_summary$gene ~ "other well-measured",
+                         TRUE                        ~ "rest")) %>%
+  group_by(stat, grp) %>%
+  summarise(n = n(), median_r = round(median(r, na.rm = TRUE), 3), .groups = "drop") %>%
+  print()
+```
+
+
+```{r}
+peak_dev_conc <- function(M1, M2, min_strains = 20) {
+  genes   <- intersect(rownames(M1), rownames(M2))
+  strains <- intersect(colnames(M1), colnames(M2))
+  map_dfr(genes, function(g) {
+    p1 <- M1[g, strains]; p2 <- M2[g, strains]
+    ok <- !is.na(p1) & !is.na(p2)
+    if (sum(ok) < min_strains) return(tibble(gene = g, n = sum(ok), r_dev = NA_real_))
+    c1 <- circ_mean_rows(matrix(p1[ok], nrow = 1))
+    c2 <- circ_mean_rows(matrix(p2[ok], nrow = 1))
+    d1 <- ((p1[ok] - c1 + WRAP/2) %% WRAP) - WRAP/2   # signed shift, rep 1
+    d2 <- ((p2[ok] - c2 + WRAP/2) %% WRAP) - WRAP/2   # signed shift, rep 2
+    tibble(gene = g, n = sum(ok), r_dev = cor(d1, d2, method = "spearman"))
+  })
+}
+conc_dev <- peak_dev_conc(obs$peak, obs2$peak)
+
+shortlist <- gene_summary %>%
+  left_join(conc_amp  %>% select(gene, r_amp = r), by = "gene") %>%
+  left_join(conc_dev  %>% select(gene, r_dev), by = "gene") %>%
+  left_join(conc_peak %>% select(gene, med_shift = median_abs_shift), by = "gene") %>%
+  mutate(snr = sd_trim / med_shift) %>%
+  filter(r_amp > 0.4 | (r_dev > 0.3 & snr > 1)) %>%
+  arrange(desc(pmax(r_amp, r_dev, na.rm = TRUE)))
+print(shortlist %>% select(name, gene, which_phenotype, r_amp, r_dev, snr,
+                           amp_spread, amp_excess) %>% print(n = 30))
+```
+
+## 11.1 Choosing strains for the bench
+
+Pick on effect size in the units you will measure. Poor-coverage strains are
+excluded because their `peak` is partly extrapolated.
+
+```{r pick_trio}
+pick_trio <- function(gene_name, phenotype = c("amp", "peak", "r2"),
+                      min_cells = 60, bench = c("AKM", "BCK", "BDP"),
+                      drop_poor_coverage = TRUE) {
+  phenotype <- match.arg(phenotype)
+  orf <- to_orf(gene_name)
+  M   <- switch(phenotype, amp = AMP, peak = obs$peak, r2 = obs$r2_adj)
+
+  d <- tibble(strain = colnames(M), value = M[orf, ], n_cells = n_by_strain) %>%
+    filter(!is.na(value), n_cells >= min_cells)
+  if (drop_poor_coverage && phenotype == "peak")
+    d <- d %>% filter(!strain %in% POOR_COVERAGE)
+
+  cat("\n===", gene_name, "(", orf, ") -", phenotype, "===\n")
+  cat("Eligible strains:", nrow(d), "\n"); print(summary(d$value))
+  cat("cor(value, n_cells) within eligible set:",
+      round(cor(d$value, d$n_cells, method = "spearman"), 3),
+      "  <- if large, the trio is picking on cell count\n")
+
+  trio <- bind_rows(
+    d %>% slice_max(value, n = 1) %>% mutate(tier = "high"),
+    d %>% slice_min(abs(value - median(d$value)), n = 1) %>% mutate(tier = "mid"),
+    d %>% slice_min(value, n = 1) %>% mutate(tier = "low"))
+  print(trio %>% select(tier, strain, value, n_cells))
+
+  cat("High-low gap:", round(diff(range(trio$value)), 3),
+      if (phenotype == "peak") "min" else "", "\n")
+  cat("\nBench strains in hand:\n"); print(d %>% filter(strain %in% bench))
+  invisible(trio)
+}
+
+pick_trio("SED1", phenotype = "peak")
+```
+
+
+---
+
+# 12. Optional — refit candidates on raw counts
+
+For the final shortlist, refit on raw counts with a depth offset under a negative
+binomial model. Gives amplitude in log-fold-change units. Slow; shortlist only.
+
+```{r nb_refit, eval=FALSE}
+library(MASS)
+
+raw     <- GetAssayData(Na_va, layer = "counts")[, cells]
+libsize <- meta$nCount
+
+nb_harmonic <- function(gene, strain, K = HARMONICS) {
+  idx <- which(gvec == strain)
+  y <- as.numeric(raw[gene, idx]); if (sum(y > 0) < 10) return(NULL)
+  X  <- harmonic_design(tvec[idx], K)[, -1, drop = FALSE]
+  df <- as.data.frame(X); df$y <- y; df$off <- log(libsize[idx])
+  m <- tryCatch(MASS::glm.nb(y ~ . - off + offset(off), data = df),
+                error = function(e) NULL)
+  if (is.null(m)) return(NULL)
+  b    <- coef(m)
+  pred <- cbind(1, harmonic_design(GRID, K)[, -1, drop = FALSE]) %*% b
+  tibble(gene = gene, strain = strain,
+         log_amp = diff(range(pred)), peak = GRID[which.max(pred)], theta = m$theta)
+}
+
+shortlist <- head(genotype_summary$gene, 5)
+nb_res <- map_dfr(shortlist, function(g)
+  map_dfr(names(n_by_strain)[n_by_strain >= 60], ~ nb_harmonic(g, .x)))
+
+nb_res %>% group_by(gene) %>%
+  summarise(n = n(), mean_log_amp = mean(log_amp), sd_log_amp = sd(log_amp),
+            sd_peak = circ_sd_rows(matrix(peak, nrow = 1)), .groups = "drop") %>%
+  print()
+```

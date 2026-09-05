@@ -1,0 +1,19 @@
+condition,clade,n_strains,n_upregulated,n_downregulated,total_DEGs
+Flu.2,3. Brazilian bioethanol,3,271,132,403
+Flu.2,2. Alpechin,3,227,65,292
+Flu.2,8. Mixed origin,4,68,18,86
+Flu.2,18. Far East Asia,8,27,50,77
+Flu.2,5. French dairy,3,26,11,37
+Flu.2,25. Sake,4,11,12,23
+Flu.2,1. Wine/European,4,4,16,20
+Flu.2,10. French Guiana human,2,6,2,8
+Flu.2,13. African palm wine,3,1,6,7
+Flu.2,9. Mexican agave,3,6,1,7
+Flu.2,4. Mediterranean oak,4,3,1,4
+Flu.2,26. Asian fermentation,5,1,2,3
+Flu.2,12. West African cocoa,3,1,1,2
+Flu.2,20. CHN V,2,1,1,2
+Flu.2,M2. Mosaic region 2,2,2,0,2
+Flu.2,7. Mosaic beer,3,1,0,1
+Flu.2,M1. Mosaic region 1,3,0,0,0
+Flu.2,M3. Mosaic region 3,3,0,0,0

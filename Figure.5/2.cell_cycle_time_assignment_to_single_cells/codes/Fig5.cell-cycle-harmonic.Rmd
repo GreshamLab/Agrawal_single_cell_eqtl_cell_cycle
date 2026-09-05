@@ -1,0 +1,1601 @@
+---
+title: "Cell-cycle expression across natural yeast isolates — harmonic model"
+author: "Akriti"
+output: html_document
+---
+
+# Overview
+
+Cell-cycle genes are **periodic with a known period** (88 min). This version
+replaces the LOESS smoother with a harmonic (Fourier) regression, which encodes
+that periodicity directly instead of rediscovering it with ~13 free parameters
+per strain.
+
+What this buys:
+
+| Problem in the LOESS version | Fix here |
+|---|---|
+| R² inflated in small strains (`cor(R², n_cells) = -0.63`) | 5–6 parameters instead of ~13, plus df-adjusted R² → measured at **+0.09** |
+| Amplitude inflated in small strains | Analytic noise-variance subtraction (`amp1_db`) |
+| Seam artifact at t = 0/88 | Harmonic basis is periodic by construction — no seam, no padding |
+| `peak`/`amp` read off a per-strain grid `min(t)..max(t)` | Fixed 0–88 grid for every strain |
+| Peak time needs circular statistics as a patch | Phase is an angle in the model itself |
+| Fit used for stats ≠ fit used for plots | One fit, used for both |
+| Depth differences invisible to the model | Optional per-cell log-depth covariate |
+
+**Three questions, kept separate:**
+
+- **Q1 (pooled, no strain split).** Does this gene cycle at all? One fit on all
+  cells, judged on **effect size** (`r2_adj`), not on a p-value — see §4 for why
+  the F-test is useless at n = 16,000.
+- **Q2 (per strain).** Among genes that cycle, which are *consistent* across
+  strains and which *vary*? Three phenotypes off one per-strain fit: `r2_adj`
+  (structure), `amp1_db` (amplitude), `peak` (timing).
+- **Q3 (replicates, §11).** Does any of it reproduce in an independent capture?
+  This is the only thing that separates biology from technical artifact.
+
+**On R².** R² is fine as a descriptive measure of how tightly cells track the
+curve — it just was not comparable across strains of unequal size under LOESS.
+The df adjustment restores that (§5). It is still not the whole story, which is
+why amplitude and phase are carried alongside: a gene can have identical R² in
+two strains while cresting 15 minutes apart.
+
+**No detection filter.** `pct_strains_detected` is reported as a phenotype
+rather than used as a cutoff.
+
+---
+
+# 1. Setup
+
+1. GRID <- seq(0, WRAP, length.out = 89)
+This creates a fixed sequence of 89 evenly spaced time points from 0 to 88 minutes: 0, 1, 2, 3, ... 88. Every strain uses this same grid when the fitted curve is evaluated.
+
+2. 
+
+```{r libraries, message=FALSE}
+library(Seurat)
+library(tidyverse)
+library(RColorBrewer)
+library(AnnotationDbi)
+library(org.Sc.sgd.db)
+library(ggrepel)
+
+select <- dplyr::select
+filter <- dplyr::filter
+
+options(future.globals.maxSize = 9 * 1024^3)
+
+# ── Analysis parameters ──────────────────────────────────────────────────────
+WRAP          <- 88     # cell cycle period (min)
+HARMONICS     <- 2      # 1 = pure sinusoid; 2 allows asymmetric peaks
+INCLUDE_DEPTH <- TRUE   # centred log(nCount) as a within-strain covariate
+GRID          <- seq(0, WRAP, length.out = 89)   # FIXED grid for every strain
+MIN_CELLS     <- 25     # per-strain minimum
+N_PERM        <- 500    # permutations for the null
+SEED          <- 1
+
+# Amplitude statistic used for all Q2 phenotypes.
+# "amp1_db" = bias-corrected first-harmonic amplitude (recommended)
+# "amp"     = peak-to-trough of the K-harmonic grid curve (size-biased)
+AMP_STAT <- "amp1_db"
+
+CC_LEVELS  <- c('M-G1', 'G1', 'S', 'G2', 'M')
+PHASE_FILL <- c('M-G1'='#a8d5a2','G1'='#ffd6a5','S'='#ffadad',
+                'G2'='#bde0fe','M'='#ffc8dd')
+
+ROOT <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.1"
+```
+
+## 1.1 Load counts and strain assignments
+
+```{r load_data}
+expression_data <- Read10X(
+  data.dir = file.path(ROOT, "alignment/output_of_alignment_YPD1_with_clean_gtf",
+                       "run_count/outs/filtered_feature_bc_matrix/")
+)
+
+Na_va_data <- CreateSeuratObject(
+  counts = expression_data, project = "natural variants",
+  min.cells = 3, min.features = 200
+)
+cat("Cells:", ncol(Na_va_data), "| Genes:", nrow(Na_va_data), "\n")
+
+demuxlet <- read.delim(file.path(ROOT, "demuxlet/merged_demuxlet_output_YPD.tsv")) %>%
+  mutate(across(c(BEST.LLK, NUM.READS, NUM.SNPS, NEXT.LLK, DIFF.LLK.BEST.NEXT,
+                  BEST.POSTERIOR, SNG.POSTERIOR, SNG.BEST.LLK, SNG.NEXT.LLK,
+                  SNG.ONLY.POSTERIOR, DBL.BEST.LLK, DIFF.LLK.SNG.DBL),
+                as.numeric)) %>%
+  na.omit()
+
+Na_va_data <- AddMetaData(
+  Na_va_data, metadata = demuxlet[match(colnames(Na_va_data), demuxlet$BARCODE), ]
+)
+cat("Strains:", n_distinct(Na_va_data@meta.data$SNG.BEST.GUESS), "\n")
+```
+
+## 1.2 Strain QC
+
+The `too_few_timepoints` category in the old code fired on the *same* strains for
+every gene — pseudotime is a per-cell property, so it was a strain filter wearing
+a per-gene costume. It is applied once, here.
+
+```{r strain_qc}
+Na_va <- subset(
+  Na_va_data,
+  subset = SNG.BEST.GUESS != "DGY3" & !(DROPLET.TYPE %in% c("AMB", "DBL"))
+)
+
+keep_strains <- Na_va@meta.data %>%
+  dplyr::count(strain = SNG.BEST.GUESS, name = "n") %>%
+  dplyr::filter(n >=MIN_CELLS) %>% pull(strain)
+
+Na_va <- subset(Na_va, subset = SNG.BEST.GUESS %in% keep_strains)
+
+cat("Strains kept:", n_distinct(Na_va@meta.data$SNG.BEST.GUESS),
+    "| cells:", ncol(Na_va), "\n")
+print(summary(as.numeric(table(Na_va@meta.data$SNG.BEST.GUESS))))
+```
+
+## 1.3 Pseudotime
+
+```{r add_pseudotime}
+cc_time <- read.csv(
+  file.path(ROOT, "continuous_time_trajectory/data/cc_time_all_genes_spellman_annotated.csv"),
+  row.names = 1
+)
+cc_time$CC <- factor(cc_time$CC, levels = CC_LEVELS)
+
+shared <- intersect(rownames(cc_time), colnames(Na_va))
+cat("Cells with cc_time:", nrow(cc_time), "| shared:", length(shared), "\n")
+
+Na_va <- AddMetaData(Na_va, cc_time[shared, c('CC', 'cc_time')])
+Na_va@meta.data$CC <- factor(Na_va@meta.data$CC, levels = CC_LEVELS)
+
+Na_va <- subset(Na_va, cells = colnames(Na_va)[!is.na(Na_va@meta.data$cc_time)])
+cat("Cells with pseudotime:", ncol(Na_va), "\n")
+
+
+# Check average time per phase for each program
+ggplot(cc_time, aes(x = cc_time)) +
+  geom_histogram(bins = 88, fill = "steelblue") +
+  facet_wrap(~CC, ncol = 1, scales = "free_y") +
+  scale_x_continuous(breaks = seq(0, 88, 11)) +
+  theme_classic()
+
+p_cc_time_by_phase <- ggplot(cc_time, aes(x = cc_time)) +
+  geom_histogram(bins = 88, fill = "steelblue") +
+  facet_wrap(~CC, ncol = 1, scales = "free_y") +
+  scale_x_continuous(breaks = seq(0, 88, 11)) +
+  labs(x = "Cell-cycle time (min)", y = "Cell count",
+       title = "Assigned pseudotime distribution by phase") +
+  theme_classic()
+
+p_cc_time_by_phase
+
+dir.create("../results", showWarnings = FALSE)
+ggsave("../results/cc_time_by_phase.png", p_cc_time_by_phase,
+       width = 6, height = 10, dpi = 300)
+```
+
+## 1.3b Pseudotime coverage per strain
+
+A harmonic fit extrapolates smoothly across gaps, so a strain whose cells all
+land in one arc will still report a confident peak somewhere it has no data.
+Cell count alone does not catch this.
+
+#basically strains with really large gap in its time extrapolation. i.e., if a strain has all its value of time in G1 phase and G2 phase but none in S phase, then it has a large gap. in this case code will give a peak in the unobserved region i.e., could be anywhere but it can't be trusted so peak time can't be trusted because its a mathematical extrapolation/ an artifact. But can trust amplitude and r2
+
+22 minutes is one quarter of the 88-minute cycle.A gap smaller than a quarter cycle means the harmonic fit is mostly reasonable
+
+```{r coverage_check}
+circ_max_gap <- function(t, period = WRAP) {
+  s <- sort(t %% period)
+  max(c(diff(s), period - max(s) + min(s)))
+}
+
+gap_by_strain <- tapply(Na_va@meta.data$cc_time,
+                        Na_va@meta.data$SNG.BEST.GUESS, circ_max_gap)
+gap_by_strain <- gap_by_strain[!is.na(gap_by_strain)]
+
+cat("Largest empty arc per strain (min):\n"); print(summary(gap_by_strain))
+cat("Strains with a gap > 22 min (quarter cycle):",
+    sum(gap_by_strain > 22), "\n")
+print(sort(gap_by_strain, decreasing = TRUE)[1:10])
+
+# flag, do not drop — used later when interpreting `peak`
+POOR_COVERAGE <- names(gap_by_strain)[gap_by_strain > 22]
+```
+
+## 1.4 Normalize (PCA/UMAP are for display only)
+
+```{r normalize}
+Na_va <- Na_va %>%
+  NormalizeData() %>%
+  FindVariableFeatures(selection.method = "vst", nfeatures = 2000)
+Na_va <- ScaleData(Na_va, features = VariableFeatures(Na_va))
+Na_va <- Na_va %>% RunPCA(features = VariableFeatures(.)) %>% RunUMAP(dims = 1:5)
+```
+
+```{r umap_plots}
+umap_df <- as.data.frame(Embeddings(Na_va, "umap"))
+colnames(umap_df) <- c("umap_1", "umap_2")
+umap_df$CC      <- Na_va@meta.data$CC
+umap_df$cc_time <- Na_va@meta.data$cc_time
+
+centroids <- umap_df %>% filter(!is.na(CC)) %>%
+  group_by(CC) %>%
+  summarise(umap_1 = median(umap_1), umap_2 = median(umap_2), .groups = "drop")
+
+# pseudotime, with phase labels on top
+p_umap_pseudotime <- ggplot(umap_df, aes(umap_1, umap_2)) +
+  geom_point(aes(colour = cc_time), size = 0.3, alpha = 0.6) +
+  scale_colour_viridis_c(option = "magma", direction = -1, name = "cc_time (min)") +
+  geom_label_repel(data = centroids,
+                   mapping = aes(x = umap_1, y = umap_2, label = CC),
+                   inherit.aes = FALSE, size = 4.5, alpha = 0.85,
+                   label.size = 0.2, box.padding = 0.5) +
+  labs(title = "Cell-cycle time with phase labels") +
+  theme_classic()
+
+p_umap_pseudotime
+
+dir.create("../results", showWarnings = FALSE)
+ggsave("../results/umap_pseudotime_phase_labels.png", p_umap_pseudotime,
+       width = 7, height = 6, dpi = 300)
+
+# discrete phase, same labels
+ggplot(umap_df %>% filter(!is.na(CC)), aes(umap_1, umap_2, colour = CC)) +
+  geom_point(size = 0.3, alpha = 0.6) +
+  scale_colour_manual(values = PHASE_FILL, name = "Phase") +
+  geom_label_repel(data = centroids,
+                   mapping = aes(x = umap_1, y = umap_2, label = CC),
+                   inherit.aes = FALSE, size = 4.5, alpha = 0.85) +
+  guides(colour = guide_legend(override.aes = list(size = 3))) +
+  labs(title = "Cell-cycle phase") +
+  theme_classic()
+```
+
+## 1.5 ORF ↔ common name lookup
+
+```{r orf_lookup}
+CUSTOM_ANNOT_CSV <- "/scratch/aa9679/SingleCell_cerevisiae/Gene_exp_analysis/yeast_custom_annotations.csv"
+
+build_orf_lookup <- function(seurat_obj, custom_csv = CUSTOM_ANNOT_CSV) {
+  custom <- read.csv(custom_csv) %>%
+    filter(!is.na(gene_id), !is.na(gene_name)) %>%
+    distinct(gene_id, gene_name) %>% deframe()
+  missing <- rownames(seurat_obj)[!rownames(seurat_obj) %in% names(custom)]
+  sgd <- tryCatch(
+    AnnotationDbi::select(org.Sc.sgd.db, keys = missing,
+                          columns = "GENENAME", keytype = "ORF"),
+    error = function(e) data.frame(ORF = character(), GENENAME = character())
+  ) %>% filter(!is.na(GENENAME)) %>% distinct(ORF, GENENAME) %>% deframe()
+  c(custom, sgd[!names(sgd) %in% names(custom)])
+}
+
+orf_lookup <- build_orf_lookup(Na_va)
+to_name <- function(x, lk = orf_lookup) ifelse(x %in% names(lk), unname(lk[x]), x)
+to_orf  <- function(x, lk = orf_lookup) {
+  hit <- names(lk)[match(x, unname(lk))]; ifelse(is.na(hit), x, hit)
+}
+cat("YBR009C ->", to_name("YBR009C"), "| HHF1 ->", to_orf("HHF1"), "\n")
+```
+
+---
+
+# 2. The harmonic engine
+
+## 2.1 What the model is
+
+For a cell at pseudotime `t`, with `K` harmonics:
+
+```
+expr ~ b0 + b1·cos(2πt/88) + b2·sin(2πt/88) + b3·cos(4πt/88) + b4·sin(4πt/88)
+```
+
+Everything is read off the coefficients:
+
+- **`amp`** — peak-to-trough of the fitted curve on the fixed 0–88 grid.
+  Descriptive and shape-aware, but a *range* is upward-biased by estimation
+  noise, so small strains report larger amplitudes.
+- **`amp1`** — first-harmonic amplitude, `2·sqrt(b1² + b2²)`. Same bias.
+- **`amp1_db`** — the bias-corrected version. Each coefficient has sampling
+  variance ≈ σ²·(XᵀX)⁻¹, so `E[b1² + b2²] = A²/4 + var(b1) + var(b2)`.
+  Subtracting the noise term removes the 1/√n inflation analytically. **This is
+  the amplitude phenotype used downstream.**
+- **`peak`** — grid time where the curve crests. Circular by construction; no
+  0/88 seam.
+- **`r2_adj`** — df-adjusted, unbiased at any n.
+- **`f_p`** — F-test of the harmonic terms. Reported, but see §4: at n = 16,000
+  it is not a useful filter.
+
+## 2.2 Design matrix - this gives us a matrix
+
+```{r design}
+harmonic_design <- function(t, K = HARMONICS, period = WRAP, depth = NULL) {
+  X <- matrix(1, nrow = length(t), ncol = 1, dimnames = list(NULL, "intercept")) #this is intercept
+  for (k in seq_len(K)) {
+    X <- cbind(X, cos(2 * pi * k * t / period), sin(2 * pi * k * t / period))
+    colnames(X)[(ncol(X) - 1):ncol(X)] <- paste0(c("cos", "sin"), k) #The term 2πt/88 is converting time into an angle in radians
+  }
+  if (!is.null(depth)) { X <- cbind(X, depth = depth) }   # centred, so grid uses 0
+  X
+}
+```
+It builds a table of predictor columns. Given t (the pseudotime of each cell), it returns a matrix X with one row per cell and one column per predictor:
+#X will have 6 columns
+
+intercept | cos1 | sin1 | cos2 | sin2 | depth
+    1     | ...  | ...  | ...  | ...  | -0.3   ← shallowly sequenced cell
+    1     | ...  | ...  | ...  | ...  |  0.1   ← average cell
+    1     | ...  | ...  | ...  | ...  |  0.8   ← deeply sequenced cell
+
+## 2.3 Block fit — all genes at once
+
+The design matrix depends only on the *cells*, not the gene. So for one strain
+we solve for every gene in a single QR decomposition. This is what makes 500
+permutations feasible.
+
+```{r block_fit}
+fit_block <- function(Y, t, depth = NULL, K = HARMONICS, grid = GRID) {
+  # Y: cells x genes (dense). Returns per-gene vectors.
+  n <- nrow(Y) #n = number of cells in this strain
+  X <- harmonic_design(t, K, WRAP, depth)
+  p <- ncol(X) #number of columns in X 
+  if (n < p + 3 || length(unique(t)) < p + 1) return(NULL) #The checks make sure you have enough cells and enough distinct pseudotime values to actually fit the model.
+
+  qrX <- qr(X)
+  if (qrX$rank < p) return(NULL)
+  B <- qr.coef(qrX, Y); B[is.na(B)] <- 0     # p x genes
+
+  resid <- Y - X %*% B
+  RSS <- colSums(resid^2)
+  TSS <- colSums(sweep(Y, 2, colMeans(Y), "-")^2)
+
+  r2     <- ifelse(TSS > 0, 1 - RSS / TSS, NA_real_)
+  r2_adj <- ifelse(TSS > 0, 1 - (RSS / (n - p)) / (TSS / (n - 1)), NA_real_)
+
+  n_harm <- 2 * K
+  Fstat  <- ((TSS - RSS) / n_harm) / (RSS / (n - p))
+  f_p    <- ifelse(TSS > 0 & RSS > 0,
+                   pf(Fstat, n_harm, n - p, lower.tail = FALSE), NA_real_)
+
+  # curve on the FIXED grid, depth held at its centre (0)
+  Gd <- harmonic_design(grid, K, WRAP,
+                        if (is.null(depth)) NULL else rep(0, length(grid)))
+  P  <- Gd %*% B                             # grid x genes
+  amp  <- apply(P, 2, max) - apply(P, 2, min)
+  peak <- grid[max.col(t(P), ties.method = "first")]
+
+  amp1   <- 2 * sqrt(B["cos1", ]^2 + B["sin1", ]^2)
+  phase1 <- (atan2(B["sin1", ], B["cos1", ]) %% (2 * pi)) / (2 * pi) * WRAP
+
+  # ── bias-corrected first-harmonic amplitude ──────────────────────────────
+  # E[b1^2 + b2^2] = A_true^2/4 + var(b1) + var(b2); subtract the noise part
+  XtXinv <- chol2inv(qr.R(qrX))
+  dimnames(XtXinv) <- list(colnames(X), colnames(X))
+  sigma2  <- RSS / (n - p)
+  v_noise <- XtXinv["cos1", "cos1"] + XtXinv["sin1", "sin1"]
+  amp1_db <- 2 * sqrt(pmax(0, B["cos1", ]^2 + B["sin1", ]^2 - sigma2 * v_noise))
+
+  bad <- is.na(TSS) | TSS == 0
+  amp[bad] <- NA; peak[bad] <- NA; amp1[bad] <- NA
+  phase1[bad] <- NA; amp1_db[bad] <- NA
+
+  list(r2 = r2, r2_adj = r2_adj, f_p = f_p, amp = amp, peak = peak,
+       amp1 = amp1, amp1_db = amp1_db, phase1 = phase1,
+       constant = bad, n = n, p = p)
+}
+```
+
+## 2.4 Fit every strain
+
+```{r fit_all_strains}
+FIT_STATS <- c("r2","r2_adj","amp","peak","amp1","amp1_db","phase1","f_p")
+
+fit_by_group <- function(Ymat, tvec, group, depth = NULL, K = HARMONICS) {
+  strains <- sort(unique(group))
+  genes   <- colnames(Ymat)
+  blank   <- matrix(NA_real_, length(genes), length(strains),
+                    dimnames = list(genes, strains))
+  out <- setNames(replicate(length(FIT_STATS), blank, simplify = FALSE), FIT_STATS)
+  out$constant <- blank
+  ncell <- setNames(integer(length(strains)), strains)
+
+  for (j in seq_along(strains)) {
+    idx <- which(group == strains[j])
+    ncell[j] <- length(idx)
+    fit <- fit_block(Ymat[idx, , drop = FALSE], tvec[idx],
+                     if (is.null(depth)) NULL else scale(depth[idx], scale = FALSE)[, 1],
+                     K = K)
+    if (is.null(fit)) next
+    for (nm in FIT_STATS) out[[nm]][, j] <- fit[[nm]]
+    out$constant[, j] <- as.numeric(fit$constant)
+  }
+  out$n_cells <- ncell
+  out
+}
+```
+
+## 2.5 Circular summaries
+
+Peak time lives on a circle of circumference 88, so minute 2 and minute 86 are
+4 minutes apart. Each peak becomes a unit vector `(cos θ, sin θ)`; the direction
+of the mean vector is the circular mean, its length `R ∈ [0,1]` the concentration.
+
+`circ_sd = sqrt(-2·log R)` is unbounded — a huge value means "no concentration at
+all", not "peaks are 60 minutes apart".
+
+Its direction is the average peak time.
+Its length measures how well the strains agree.
+
+```{r circular}
+circ_mean_rows <- function(M, period = WRAP) {
+  th <- 2 * pi * M / period
+  (atan2(rowMeans(sin(th), na.rm = TRUE),
+         rowMeans(cos(th), na.rm = TRUE)) %% (2 * pi)) / (2 * pi) * period
+}
+circ_sd_rows <- function(M, period = WRAP) {
+  th <- 2 * pi * M / period
+  R  <- sqrt(rowMeans(cos(th), na.rm = TRUE)^2 + rowMeans(sin(th), na.rm = TRUE)^2)
+  R  <- pmin(pmax(R, 1e-8), 1)
+  sqrt(-2 * log(R)) / (2 * pi) * period
+}
+row_sd   <- function(M) apply(M, 1, sd,   na.rm = TRUE)
+row_mean <- function(M) rowMeans(M, na.rm = TRUE)
+row_n    <- function(M) rowSums(!is.na(M))
+```
+
+---
+
+# 3. Build the matrices
+
+```{r build_matrices}
+norm_counts <- GetAssayData(Na_va, layer = "data")      # log-normalized
+
+meta <- Na_va@meta.data %>%
+  rownames_to_column("cell") %>%
+  transmute(cell, strain = SNG.BEST.GUESS, pseudotime = cc_time,
+            CC, nCount = nCount_RNA) %>%
+  filter(!is.na(strain), !is.na(pseudotime))
+
+spellman <- read.delim(file.path(ROOT, "cell_cycle_fastlmm/data/CellCycle_Genes.tsv")) %>%
+  distinct(Gene) %>% pull(Gene)
+spellman_in <- intersect(spellman, rownames(norm_counts))
+cat("Spellman genes present:", length(spellman_in), "of", length(spellman), "\n")
+
+cells   <- meta$cell
+tvec    <- meta$pseudotime
+gvec    <- meta$strain
+depthv  <- log1p(meta$nCount)
+
+Y_all <- t(as.matrix(norm_counts[, cells]))              # cells x all genes
+Y_cc  <- Y_all[, spellman_in, drop = FALSE]              # cells x Spellman genes
+
+cat("Matrix:", nrow(Y_cc), "cells x", ncol(Y_cc), "genes |",
+    n_distinct(gvec), "strains\n")
+cat("Pseudotime range:", round(range(tvec), 2), "\n")
+```
+
+---
+
+# 4. Q1 — which genes cycle? (pooled, no strain split) does this gene cycle at all?
+
+**The F-test is not usable here.** With ~16,000 cells and 4 harmonic terms, the
+R² needed to clear p < 0.05 is about 0.0006 — a gene explaining 0.06% of its
+variance "passes". That is why 93% of the transcriptome comes back significant.
+Rank and threshold on **effect size** (`r2_adj`) instead.
+
+Y_all is every gene = 5745 genes. One fit on all ~16000 cells
+
+```{r q1}
+pooled <- fit_block(Y_all, tvec,
+                    if (INCLUDE_DEPTH) scale(depthv, scale = FALSE)[, 1] else NULL) #all cells and all pseudotime
+
+q1 <- tibble(
+  gene        = colnames(Y_all),
+  name        = to_name(colnames(Y_all)),
+  r2_pooled   = pooled$r2,
+  r2_adj      = pooled$r2_adj,
+  amp         = pooled$amp,
+  amp1_db     = pooled$amp1_db,
+  peak        = pooled$peak,
+  p_periodic  = pooled$f_p,
+  pct_nonzero = colMeans(Y_all > 0),
+  is_spellman = colnames(Y_all) %in% spellman_in
+) %>%
+  mutate(fdr_periodic = p.adjust(p_periodic, method = "BH")) %>%
+  arrange(desc(r2_adj))
+
+n_pooled <- length(tvec)
+p_pooled <- 1 + 2*HARMONICS + as.integer(INCLUDE_DEPTH)
+r2_crit  <- (2*HARMONICS) * qf(0.95, 2*HARMONICS, n_pooled - p_pooled) /
+            (n_pooled - p_pooled)
+
+cat("Cells in pooled fit:", n_pooled, "\n")
+cat("R2 needed for p<0.05 at this n:", signif(r2_crit, 4),
+    " <- why", sum(q1$fdr_periodic < 0.05, na.rm = TRUE), "genes 'pass'\n\n")
+
+cat("Distribution of pooled adjusted R2:\n")
+print(round(quantile(q1$r2_adj, c(.5,.75,.9,.95,.99,1), na.rm = TRUE), 3))
+
+cat("\nGenes above an effect-size threshold:\n")
+for (th in c(0.02, 0.05, 0.10, 0.20, 0.30))
+  cat(sprintf("  r2_adj > %.2f : %4d total | %3d Spellman\n", th,
+              sum(q1$r2_adj > th, na.rm = TRUE),
+              sum(q1$r2_adj > th & q1$is_spellman, na.rm = TRUE))) #100% means the maximum observed R² = 0.715
+
+# main sanity check: is the Spellman set enriched?
+print(q1 %>% group_by(is_spellman) %>%
+        summarise(n = n(),
+                  median_r2adj  = round(median(r2_adj, na.rm = TRUE), 4),
+                  pct_above_0.1 = round(mean(r2_adj > 0.1, na.rm = TRUE), 3)))
+
+R2_CYCLING <- 0.1        # adjust after reading the numbers above
+cycling <- q1 %>% filter(r2_adj > R2_CYCLING)
+cat("\nCalling", nrow(cycling), "genes cycling at r2_adj >", R2_CYCLING, "\n")
+
+q1 %>% select(name, gene, r2_adj, amp1_db, peak, is_spellman) %>%
+  head(25) %>% print(n = 25)
+
+
+q1 %>% filter(r2_adj > R2_CYCLING, !is_spellman) %>%
+  select(name, gene, r2_adj, amp1_db, peak, pct_nonzero) %>%
+  head(30) %>% print(n = 30)
+```
+
+```{r q1_peak_distribution}
+q1 %>% filter(r2_adj > R2_CYCLING) %>%
+  ggplot(aes(peak)) +
+  geom_histogram(binwidth = 4, fill = "grey30") +
+  scale_x_continuous(breaks = seq(0, WRAP, 11), limits = c(0, WRAP)) +
+  labs(x = "Peak time (min)", y = "Genes",
+       title = "When cycling genes crest",
+       subtitle = "Two waves is the expected biology — a strong sanity check") +
+  theme_classic()
+```
+
+---
+
+# 5. Per gene- per strain fit
+
+Only Spellman 478 genes were fit within each 82 strains
+
+```{r q2_fits}
+set.seed(SEED)
+obs <- fit_by_group(Y_cc, tvec, gvec,
+                    depth = if (INCLUDE_DEPTH) depthv else NULL)
+cat("Fitted", nrow(obs$r2), "genes x", ncol(obs$r2), "strains\n")
+n_by_strain <- obs$n_cells
+
+range(obs$r2_adj, na.rm = TRUE)                              # true min, max
+quantile(obs$r2_adj, c(0.25, 0.5, 0.75), na.rm = TRUE)         # IQR + median
+```
+
+
+# Diagnostics - 1. size dependance 
+
+```{r size_dependence}
+#correlation per strain, can correlate anything across sytrains
+cor_with_n <- function(M) {
+  apply(M, 1, function(v) {
+    ok <- !is.na(v); if (sum(ok) < 10) return(NA_real_)
+    cor(v[ok], n_by_strain[ok], method = "spearman")
+  })
+}
+
+cat("Median per-gene correlation with cells per strain:\n")
+cat("  raw R2                   :", round(median(cor_with_n(obs$r2),      na.rm = TRUE), 3), "\n")
+cat("  adjusted R2              :", round(median(cor_with_n(obs$r2_adj),  na.rm = TRUE), 3),
+    "  <- LOESS version was -0.629\n")
+cat("  grid amplitude           :", round(median(cor_with_n(obs$amp),     na.rm = TRUE), 3), "\n")
+cat("  first-harmonic amplitude :", round(median(cor_with_n(obs$amp1),    na.rm = TRUE), 3), "\n")
+cat("  bias-corrected amplitude :", round(median(cor_with_n(obs$amp1_db), na.rm = TRUE), 3),
+    "  <- the one used downstream\n")
+cat("  peak time                :", round(median(cor_with_n(obs$peak),    na.rm = TRUE), 3), "\n")
+
+# does the correction change WHAT is measured, or only remove bias?
+cat("\ncor(grid amp, debiased amp1) over all gene x strain:",
+    round(cor(as.vector(obs$amp), as.vector(obs$amp1_db),
+              use = "complete.obs", method = "spearman"), 3),
+    "\n(high = same quantity, bias removed)\n")
+
+tibble(n_cells      = n_by_strain,
+       median_r2adj = apply(obs$r2_adj,  2, median, na.rm = TRUE),
+       median_amp   = apply(obs$amp1_db, 2, median, na.rm = TRUE)) %>%
+  pivot_longer(-n_cells) %>%
+  ggplot(aes(n_cells, value)) +
+  geom_point() + geom_smooth(method = "loess", se = TRUE, colour = "firebrick") +
+  facet_wrap(~name, scales = "free_y") +
+  scale_x_log10() +
+  labs(x = "Cells per strain (log10)", y = "Median across genes",
+       title = "Residual size dependence after correction") +
+  theme_classic()
+
+
+histones <- c("HTB2"="YBL002W","HHT2"="YNL031C","HHF1"="YBR009C","HHF2"="YNL030W")
+per_gene_agree <- sapply(rownames(obs$amp), function(g) {
+  a <- obs$amp[g, ]; b <- obs$amp1_db[g, ]; ok <- !is.na(a) & !is.na(b)
+  if (sum(ok) < 20) NA_real_ else cor(a[ok], b[ok], method = "spearman")
+})
+cat("Per-gene agreement:\n"); print(summary(per_gene_agree))
+cat("\nHistones:\n")
+print(round(per_gene_agree[intersect(histones, names(per_gene_agree))], 3))
+cat("\nWorst 10 (2nd harmonic matters most here):\n")
+print(round(sort(per_gene_agree)[1:10], 3))
+```
+
+## 5.1 Is amplitude just expression level?
+
+Measured answer: no. Mean expression is nearly free of size bias (~-0.07), and
+dividing amplitude by it does not help — the amplitude bias comes from
+estimation noise in a *range*, not from expression level. Kept as a diagnostic.
+
+```{r amp_vs_expression}
+strains   <- colnames(obs$amp1_db)
+mean_expr <- sapply(strains, function(s) colMeans(Y_cc[gvec == s, , drop = FALSE]))
+dimnames(mean_expr) <- dimnames(obs$amp1_db)
+
+cat("  mean expression vs n_cells:",
+    round(median(cor_with_n(mean_expr), na.rm = TRUE), 3), "\n")
+
+cv_amp_obs   <- row_sd(obs[[AMP_STAT]]) / row_mean(obs[[AMP_STAT]])
+cv_mean_expr <- row_sd(mean_expr) / row_mean(mean_expr)
+
+cat("cor(cv_amp, cv of mean expression):",
+    round(cor(cv_amp_obs, cv_mean_expr, use = "complete.obs",
+              method = "spearman"), 3),
+    "\n(high = amplitude spread is really expression-level spread)\n")
+```
+
+---
+
+# 6. Q2 — per-gene summaries across strains
+
+```{r pheno_summary}
+AMP <- obs[[AMP_STAT]]      # amplitude matrix used for all Q2 phenotypes
+
+pheno <- tibble(
+  gene   = rownames(obs$r2_adj),
+  name   = to_name(rownames(obs$r2_adj)),
+
+  # structure
+  n_strains_fit = row_n(obs$r2_adj),
+  mean_r2   = row_mean(obs$r2_adj),
+  median_r2 = apply(obs$r2_adj, 1, median, na.rm = TRUE),
+  sd_r2     = row_sd(obs$r2_adj),
+
+  # amplitude (bias-corrected)
+  mean_amp  = row_mean(AMP),
+  sd_amp    = row_sd(AMP),
+  cv_amp    = row_sd(AMP) / row_mean(AMP),
+  amp_range = apply(AMP, 1, function(v) diff(range(v, na.rm = TRUE))),
+
+  # timing
+  mean_peak = circ_mean_rows(obs$peak),
+  sd_peak   = circ_sd_rows(obs$peak),
+
+  # detection — reported, NOT filtered on
+  n_strains_total = ncol(obs$r2_adj),
+  n_not_detected  = rowSums(obs$constant == 1, na.rm = TRUE),
+  pct_strains_detected = 1 - rowSums(obs$constant == 1, na.rm = TRUE) /
+                             ncol(obs$constant),
+  mean_pct_expressed   = colMeans(Y_cc > 0)[rownames(obs$r2_adj)]
+)
+
+cat("Genes summarised:", nrow(pheno), "\n")
+cat("Detected in every strain:", sum(pheno$pct_strains_detected == 1), "\n")
+cat("Detected in <50% of strains:", sum(pheno$pct_strains_detected < 0.5), "\n\n")
+print(summary(pheno$pct_strains_detected))
+
+AMP_FLOOR <- quantile(pheno$mean_amp, 0.25, na.rm = TRUE)
+cat("\nAmplitude floor for cv_amp ranking:", round(AMP_FLOOR, 3),
+    "| genes below it:", sum(pheno$mean_amp < AMP_FLOOR, na.rm = TRUE), "\n")
+```
+
+```{r}
+AMP <- obs[[AMP_STAT]]
+amp_resid <- t(sapply(rownames(AMP), function(g) {
+  y <- AMP[g, ]; x <- mean_expr[g, ]; ok <- !is.na(y) & !is.na(x)
+  out <- rep(NA_real_, length(y)); names(out) <- names(y)
+  if (sum(ok) >= 20) out[ok] <- residuals(lm(y[ok] ~ x[ok]))
+  out
+}))
+resid_spread <- row_sd(amp_resid) / row_mean(AMP)
+
+cat("Median cv_amp:", round(median(cv_amp_obs, na.rm = TRUE), 3),
+    "| median after removing expression:", round(median(resid_spread, na.rm = TRUE), 3), "\n")
+
+cat("\nHistones — how much survives:\n")
+tibble(gene = intersect(histones, rownames(AMP))) %>%
+  mutate(name = to_name(gene),
+         cv_amp = cv_amp_obs[gene],
+         resid  = resid_spread[gene],
+         frac_explained = round(1 - resid / cv_amp, 2)) %>%
+  print()
+```
+
+
+
+## 6.1 Detection as a phenotype
+
+```{r detection_as_phenotype}
+# patchy <- pheno %>%
+#   filter(pct_strains_detected < 0.9, pct_strains_detected > 0.1) %>%
+#   arrange(pct_strains_detected)
+# 
+# cat("Genes with patchy detection (10-90% of strains):", nrow(patchy), "\n")
+# patchy %>% select(name, gene, pct_strains_detected, mean_pct_expressed,
+#                   mean_r2, mean_amp) %>% head(20) %>% print(n = 20)
+# 
+# if (nrow(patchy) > 0) {
+#   loss_by_strain <- colMeans(obs$constant[patchy$gene, , drop = FALSE] == 1,
+#                              na.rm = TRUE)
+#   print(head(sort(loss_by_strain, decreasing = TRUE), 10))
+#   r_drop <- cor(loss_by_strain, n_by_strain, method = "spearman")
+#   cat("cor(dropout rate, n_cells):", round(r_drop, 3), "\n")
+#   cat(if (abs(r_drop) > 0.4)
+#         "  STRONG -> dropout tracks cell count. Treat these as a sampling
+#   artifact, not presence/absence variation, unless they survive §11.\n"
+#       else
+#         "  Weak -> dropout is not explained by cell count; worth following up.\n")
+# }
+```
+
+---
+
+# 7. Permutation null
+
+Shuffling the cell → strain map preserves each strain's exact cell count and each
+cell's `(expr, pseudotime)` pair, and breaks only the genotype link.
+
+**Read the output of this section with §8.1 in mind.** With 74 strains and
+16,000 cells, "significant" mostly tracks how precisely a gene is measured, not
+how much it truly differs. Significance is a floor, not a ranking.
+
+```{r permutation, cache=TRUE}
+set.seed(SEED)
+depth_arg <- if (INCLUDE_DEPTH) depthv else NULL
+
+perm_stats <- function() {
+  gperm <- sample(gvec)                 # preserves per-strain cell counts exactly
+  f <- fit_by_group(Y_cc, tvec, gperm, depth = depth_arg)
+  A <- f[[AMP_STAT]]
+  cbind(sd_r2   = row_sd(f$r2_adj),
+        cv_amp  = row_sd(A) / row_mean(A),
+        sd_peak = circ_sd_rows(f$peak))
+}
+
+null_arr <- array(NA_real_, dim = c(ncol(Y_cc), 3, N_PERM),
+                  dimnames = list(colnames(Y_cc),
+                                  c("sd_r2","cv_amp","sd_peak"), NULL))
+
+for (i in seq_len(N_PERM)) {
+  null_arr[, , i] <- perm_stats()
+  if (i %% 25 == 0) cat("permutation", i, "/", N_PERM, "\n")
+}
+```
+
+```{r calibrate}
+emp_p <- function(obs_v, null_mat) {
+  (1 + rowSums(null_mat >= obs_v, na.rm = TRUE)) / (1 + rowSums(!is.na(null_mat)))
+}
+z_of <- function(obs_v, null_mat) {
+  (obs_v - rowMeans(null_mat, na.rm = TRUE)) / apply(null_mat, 1, sd, na.rm = TRUE)
+}
+
+obs_vec <- list(sd_r2 = pheno$sd_r2, cv_amp = pheno$cv_amp, sd_peak = pheno$sd_peak)
+for (nm in names(obs_vec)) names(obs_vec[[nm]]) <- pheno$gene
+
+cal <- pheno
+for (st in c("sd_r2", "cv_amp", "sd_peak")) {
+  nm <- null_arr[pheno$gene, st, ]
+  cal[[paste0(st, "_null_mean")]] <- rowMeans(nm, na.rm = TRUE)
+  cal[[paste0(st, "_z")]]         <- z_of(obs_vec[[st]][pheno$gene], nm)
+  cal[[paste0(st, "_p")]]         <- emp_p(obs_vec[[st]][pheno$gene], nm)
+}
+cal <- cal %>%
+  mutate(across(ends_with("_p"), ~p.adjust(.x, method = "BH"), .names = "{.col}_fdr"))
+
+cat("Significant at FDR < 0.05:\n")
+cat("  structure (sd_r2) :", sum(cal$sd_r2_p_fdr   < 0.05, na.rm = TRUE), "\n")
+cat("  amplitude (cv_amp):", sum(cal$cv_amp_p_fdr  < 0.05, na.rm = TRUE), "\n")
+cat("  timing (sd_peak)  :", sum(cal$sd_peak_p_fdr < 0.05, na.rm = TRUE), "\n")
+
+#how many distinct genes showed significant between-strain variation in any of the three phenotypes
+n_any_sig <- sum(cal$cv_amp_p_fdr < 0.05 | cal$sd_peak_p_fdr < 0.05 | cal$sd_r2_p_fdr < 0.05, na.rm = TRUE)
+cat("Genes significant in at least one phenotype:", n_any_sig, "\n")
+```
+
+
+
+---
+
+# 8. The three answers
+
+## 8.1 Why significance is not the ranking
+
+If `pct_sig` climbs monotonically with `mean_r2`, the permutation test is
+detecting *measurement precision*, not biological difference — well-measured
+genes have the power to reject, poorly-measured ones do not. That is exactly why
+the earlier `mean_r2 > 0.2` AND `not significant` filter returned zero genes:
+those two conditions are nearly mutually exclusive by construction.
+
+```{r why_significance_tracks_precision}
+cat("Genes with mean_r2 > 0.15:", sum(cal$mean_r2 > 0.15, na.rm = TRUE),
+    "of", nrow(cal), "\n\n")
+
+cal %>%
+  mutate(bin = cut(mean_r2, c(-Inf, 0.02, 0.05, 0.10, 0.20, 0.40, Inf))) %>%
+  group_by(bin) %>%
+  summarise(n = n(),
+            sig_any = sum(sd_r2_p_fdr < 0.05 | cv_amp_p_fdr < 0.05 |
+                          sd_peak_p_fdr < 0.05, na.rm = TRUE),
+            pct_sig = round(sig_any / n, 2), .groups = "drop") %>%
+  print()
+```
+```{r}
+# ── Where does pct_sig stop climbing steeply? ────────────────────────────
+inflection_check <- audit %>%
+  filter(cycles) %>%
+  mutate(sig_any = sd_r2_p_fdr < 0.05 | cv_amp_p_fdr < 0.05 | sd_peak_p_fdr < 0.05)
+
+# finer bins than before
+fine_bins <- inflection_check %>%
+  mutate(bin = cut(mean_r2, breaks = seq(0, 0.5, by = 0.025))) %>%
+  group_by(bin) %>%
+  summarise(n = n(), pct_sig = mean(sig_any, na.rm = TRUE), .groups = "drop") %>%
+  filter(n >= 5)   # drop bins too sparse to trust
+
+print(fine_bins, n = 30)
+
+# rate of change between consecutive bins — this IS the inflection
+fine_bins <- fine_bins %>%
+  mutate(bin_mid = as.numeric(str_extract(bin, "(?<=,)[0-9.]+")) - 0.0125,
+         slope = c(NA, diff(pct_sig)) / c(NA, diff(bin_mid)))
+
+print(fine_bins %>% select(bin, n, pct_sig, slope), n = 30)
+
+# alternative, smoother view: fit a loess and find where its derivative flattens
+lo <- loess(sig_any ~ mean_r2, data = inflection_check, span = 0.5)
+grid_r2 <- seq(0.02, 0.5, by = 0.005)
+pred    <- predict(lo, newdata = data.frame(mean_r2 = grid_r2))
+deriv   <- diff(pred) / diff(grid_r2)
+
+tibble(mean_r2 = grid_r2[-1], pct_sig_smoothed = pred[-1], slope = deriv) %>%
+  filter(mean_r2 >= 0.05) %>%
+  ggplot(aes(mean_r2, slope)) +
+  geom_line() + geom_hline(yintercept = 0, linetype = 2) +
+  labs(title = "Rate of change in pct_sig — inflection is where this flattens toward 0",
+       x = "mean_r2", y = "d(pct_sig)/d(mean_r2)") +
+  theme_classic()
+
+audit %>% filter(cycles) %>%
+  mutate(bin = cut(mean_r2, breaks = seq(0, 0.5, by = 0.025))) %>%
+  group_by(bin) %>%
+  summarise(n = n(),
+            median_peak_excess = median(sd_peak / sd_peak_null_mean, na.rm = TRUE),
+            median_amp_excess  = median(cv_amp / cv_amp_null_mean, na.rm = TRUE),
+            .groups = "drop") %>%
+  filter(n >= 5) %>%
+  print(n = 20)
+```
+```{r}
+n_measurable_and_sig <- sum(cal$mean_r2 > 0.15 &
+                            (cal$cv_amp_p_fdr < 0.05 | cal$sd_peak_p_fdr < 0.05 | cal$sd_r2_p_fdr < 0.05),
+                            na.rm = TRUE)
+cat("Well-measured genes (mean_r2 > 0.15) significant in at least one phenotype:",
+    n_measurable_and_sig, "of", sum(cal$mean_r2 > 0.15, na.rm = TRUE), "\n")
+
+cal %>% filter(mean_r2 > 0.15) %>%
+  summarise(sig_amp  = sum(cv_amp_p_fdr  < 0.05, na.rm = TRUE),
+            sig_time = sum(sd_peak_p_fdr < 0.05, na.rm = TRUE),
+            sig_str  = sum(sd_r2_p_fdr   < 0.05, na.rm = TRUE),
+            sig_any  = sum(cv_amp_p_fdr < 0.05 | sd_peak_p_fdr < 0.05 | sd_r2_p_fdr < 0.05, na.rm = TRUE),
+            n_total  = n())
+```
+
+
+## 8.2 Three-way accounting of every gene
+
+Every Spellman gene lands in exactly one class. The third class — genes with too
+little cell-cycle signal to say anything about — was missing from the earlier
+version, which is why the numbers did not add up.
+
+```{r audit}
+audit <- cal %>%
+  left_join(q1 %>% select(gene, r2_adj_pooled = r2_adj), by = "gene") %>%
+  mutate(
+    cycles  = r2_adj_pooled > R2_CYCLING,
+    sig_any = (sd_r2_p_fdr < 0.05 | cv_amp_p_fdr < 0.05 | sd_peak_p_fdr < 0.05),
+    class = case_when(
+      !cycles           ~ "not measurably cycling",
+      cycles &  sig_any ~ "cycling, varies between strains",
+      cycles & !sig_any ~ "cycling, consistent between strains"))
+
+#print(count(audit, class))
+str(audit)
+```
+
+desc(consistency_score) = most variable
+
+rank() gives 1 to the smallest value. So:
+
+Low sd_peak + low cv_amp → low ranks → low score → most consistent
+High sd_peak + high cv_amp → high ranks → high score → most variable
+
+```{r}
+amp_resid <- t(sapply(rownames(AMP), function(g) {
+  y <- AMP[g, ]; x <- mean_expr[g, ]; ok <- !is.na(y) & !is.na(x)
+  out <- rep(NA_real_, length(y)); names(out) <- names(y)
+  if (sum(ok) >= 20) out[ok] <- residuals(lm(y[ok] ~ x[ok]))
+  out
+}))
+
+resid_spread <- row_sd(amp_resid) / row_mean(AMP)   # spread not explained by expression
+
+audit %>%
+  mutate(resid_spread = resid_spread[gene],
+         frac_explained = 1 - resid_spread / cv_amp) %>%
+  filter(cycles, cv_amp_p_fdr < 0.05) %>%
+  arrange(desc(frac_explained)) %>%
+  select(name, gene, mean_r2, cv_amp, resid_spread, frac_explained) %>%
+  print(n = 25)
+```
+
+
+## 8.3 The variable set, ranked by effect size in real units
+
+A 10-minute peak shift is a claim you can defend at the bench. A z of 18 is not.
+Structure
+
+mean_r2 — not "spread," and not across cells. It's the average of HHF1's 74 per-strain adjusted R² values. It answers "how strongly does this gene cycle, typically, in a strain." Used as a measurability filter, not as a variation measure.
+
+sd_r2 — the standard deviation of those same 74 values. This is the structure variation.
+
+Timing
+
+sd_peak — circular SD of the 74 peak times, in minutes. How scattered the crest is across strains.
+
+sd_peak_null_mean — the average sd_peak over the 500 permutations. It is not "how much it varies from its null." It is the null itself: how much scatter this gene would show if strain labels meant nothing. HHF1's is 1.43 minutes.
+
+peak_excess = sd_peak / sd_peak_null_mean — a ratio, not minutes. HHT2's 3.18 means "3.18 times more timing scatter than chance," not 3.18 minutes and not 3.18 minutes ahead. It's unitless by design, so genes with different noise levels can be ranked together.
+
+peak_diff = sd_peak - sd_peak_null_mean — the same comparison in minutes. HHT2: 5.18 − 1.63 = 3.55 minutes of excess scatter. This is the number for a talk; peak_excess is the number for ranking.
+
+The outlier diagnostics
+
+sd_trim — recompute the spread after dropping the 10% of strains furthest from the consensus. Nothing is removed from your actual analysis; this is a check. If sd_peak is 12 but sd_trim is 3, a few strains were doing all the work.
+
+n_outlier — how many of the 74 strains sit more than 10 minutes from the circular mean. Also diagnostic only. Not trimmed anywhere.
+
+Read them together. MRH1: sd_peak 12.46, sd_trim 9.17, n_outlier 19 — broad, not outlier-driven, but noisy. HHF1: sd_peak 4.35, sd_trim 1.86, n_outlier 2 — compact and tight.
+
+Amplitude
+
+mean_amp — average of the 74 per-strain amplitudes. Typical size of the wave. Each of those 74 came from that strain's cells, but the mean is across strains.
+
+cv_amp — sd(74 amplitudes) / mean(74 amplitudes). Relative spread, unitless.
+
+cv_amp_null_mean — the average cv_amp across the 500 permutations. Again, the null itself.
+
+amp_excess = cv_amp / cv_amp_null_mean — a ratio, not a difference between extreme strains. HHF1: 0.193 / 0.0745 = 2.60.
+
+amp_spread = amp_range = max(74 amplitudes) − min(74 amplitudes) — this is the extreme-to-extreme difference you were describing, but it's amp_spread, not amp_excess. In absolute log-normalized units.
+
+cv_amp vs amp_spread
+
+Different in two ways.
+
+Scale. cv_amp divides by the mean, so it's relative. amp_spread doesn't, so it's absolute. A gene with amplitudes 1.0–1.5 and one with 10–15 have identical cv_amp but amp_spread of 0.5 versus 5.
+
+Robustness. amp_spread uses only the two most extreme strains, so one bad strain sets it. cv_amp uses all 74.
+
+```{r variable_effect_size}
+# ── Per-gene timing structure: how many strains shift, which way, to where ──
+peak_shape <- map_dfr(rownames(obs$peak), function(g) {
+  p <- obs$peak[g, ]; p <- p[!is.na(p)]
+  if (length(p) < 20)
+    return(tibble(gene = g, n_fit = NA_integer_, sd_trim = NA_real_,
+                  n_outlier = NA_integer_, n_early = NA_integer_, n_late = NA_integer_,
+                  shift_early = NA_real_, shift_late = NA_real_,
+                  peak_early = NA_real_, peak_late = NA_real_,
+                  early_strains = NA_character_, late_strains = NA_character_))
+
+  ctr <- circ_mean_rows(matrix(p, nrow = 1))     # consensus peak, minutes
+  d   <- ((p - ctr + WRAP/2) %% WRAP) - WRAP/2   # signed shift: - earlier, + later
+
+  early <- d[d < -10]
+  late  <- d[d >  10]
+
+  tibble(
+    gene        = g,
+    n_fit       = length(p),
+    sd_trim     = round(sd(d[abs(d) <= quantile(abs(d), 0.9)]), 2),
+    n_outlier   = length(early) + length(late),
+    n_early     = length(early),
+    n_late      = length(late),
+    shift_early = if (length(early)) round(median(early), 1) else NA_real_,
+    shift_late  = if (length(late))  round(median(late),  1) else NA_real_,
+    peak_early  = if (length(early)) round((ctr + median(early)) %% WRAP, 1) else NA_real_,
+    peak_late   = if (length(late))  round((ctr + median(late))  %% WRAP, 1) else NA_real_,
+    early_strains = if (length(early))
+      paste(names(sort(early))[1:min(5, length(early))], collapse = ",") else NA_character_,
+    late_strains  = if (length(late))
+      paste(names(sort(late, decreasing = TRUE))[1:min(5, length(late))], collapse = ",") else NA_character_
+  )
+})
+
+stopifnot(intersect(names(audit), names(peak_shape)) == "gene")
+
+# ── Why raw spread cannot be the ranking ────────────────────────────────────
+cat("Correlation of raw spread statistics with mean_r2 (cycling genes):\n")
+audit %>% filter(cycles) %>%
+  summarise(sd_peak   = cor(mean_r2, sd_peak,   method = "spearman", use = "complete.obs"),
+            amp_range = cor(mean_r2, amp_range, method = "spearman", use = "complete.obs"),
+            cv_amp    = cor(mean_r2, cv_amp,    method = "spearman", use = "complete.obs")) %>%
+  round(3) %>% print()
+cat("  -> all three track how strongly a gene cycles, so rank on excess over each\n",
+    "     gene's own permutation null instead.\n\n")
+```
+peak_shape, amp_shape, and str_shape are the fix for that. For each gene, they:
+
+Find the middle (the median) of the 74 values.
+Find how far each strain's value is from that middle.
+Drop the 10% of strains that are furthest away — the most extreme ones.
+Recompute the spread using only the remaining 90%.
+
+robustness: If a gene's raw spread and trimmed spread are almost the same, robustness is close to 1 (100%) — dropping the extremes barely mattered, so the variation is spread broadly across many strains, not concentrated in a few.
+
+```{r}
+# ── Trimmed spread for ALL THREE phenotypes, computed the same way ──────────
+
+trimmed_sd <- function(v, trim = 0.10) {
+  v <- v[is.finite(v)]
+  if (length(v) < 10) return(NA_real_)
+  d <- abs(v - median(v))
+  keep <- d <= quantile(d, probs = 1 - trim, na.rm = TRUE)
+  if (sum(keep) < 2) return(NA_real_)
+  sd(v[keep])
+}
+
+trimmed_cv <- function(v, trim = 0.10) {
+  v <- v[is.finite(v)]
+  if (length(v) < 10) return(NA_real_)
+  d <- abs(v - median(v))
+  keep <- d <= quantile(d, probs = 1 - trim, na.rm = TRUE)
+  v_trim <- v[keep]
+  if (length(v_trim) < 2 || mean(v_trim) <= 0) return(NA_real_)
+  sd(v_trim) / mean(v_trim)
+}
+
+amp_shape <- map_dfr(rownames(AMP), function(g) {
+  tibble(gene = g, cv_trim_amp = trimmed_cv(AMP[g, ]))
+})
+
+str_shape <- map_dfr(rownames(obs$r2_adj), function(g) {
+  tibble(gene = g, sd_trim_str = trimmed_sd(obs$r2_adj[g, ]))
+})
+
+# ── frac_explained: how much of amplitude spread is really expression level ──
+# (from your amp_resid chunk — resid_spread and cv_amp_obs are already gene-named)
+frac_explained_tbl <- tibble(
+  gene = names(resid_spread),
+  frac_explained = 1 - resid_spread / cv_amp_obs[names(resid_spread)]
+)
+
+
+
+# ── One table, three parallel trimmed-excess columns ─────────────────────────
+gene_summary <- audit %>%
+  filter(cycles, mean_r2 > 0.15) %>%
+  left_join(peak_shape,         by = "gene") %>%
+  left_join(amp_shape,          by = "gene") %>%
+  left_join(str_shape,          by = "gene") %>%
+  left_join(frac_explained_tbl, by = "gene") %>%
+  mutate(
+    n_strains_total = ncol(AMP),        # 74 — same for every gene, for reference
+    n_fit_struct    = n_strains_fit,    # already in audit/pheno
+    n_fit_amp       = n_strains_fit,    # amp and structure are fit together per strain
+    n_fit_peak      = n_fit,            # from peak_shape — can be lower (needs >=20 non-NA)
+
+    # raw excess (all strains) — kept for the outlier-diagnostic comparison
+    peak_excess  = sd_peak / sd_peak_null_mean,
+    amp_excess   = cv_amp  / cv_amp_null_mean,
+    str_excess   = sd_r2   / sd_r2_null_mean,
+
+    # trimmed excess (drop worst 10%) — THIS is what ranking uses, for all three
+    peak_trim_excess = sd_trim     / sd_peak_null_mean,
+    amp_trim_excess = cv_trim_amp / cv_amp_null_mean,   # now both sides are CV
+    str_trim_excess  = sd_trim_str / sd_r2_null_mean,
+
+    # ── inside the mutate(), after the trim_excess block, add: ──────────────────
+    peak_robustness = sd_trim     / sd_peak,
+    amp_robustness  = cv_trim_amp / cv_amp,
+    str_robustness  = sd_trim_str / sd_r2,
+
+    frac_outlier_peak = n_outlier / n_fit,
+    peak_diff  = sd_peak - sd_peak_null_mean,
+    amp_spread = amp_range,
+
+    # gate 1: exclude amplitude candidates where expression level explains
+    # most (>50%) of the between-strain amplitude spread
+    expr_gated = frac_explained > 0.5,
+
+    amp_gated = expr_gated,
+    amp_trim_excess_final = ifelse(amp_gated, NA_real_, amp_trim_excess),
+
+    # ── replace the variability line with: ───────────────────────────────────────
+    rank_peak = percent_rank(peak_trim_excess),
+    rank_str  = percent_rank(str_trim_excess),
+    rank_amp  = percent_rank(amp_trim_excess_final),
+    n_phenotypes_available = rowSums(!is.na(cbind(rank_peak, rank_str, rank_amp))),
+    variability          = rowMeans(cbind(rank_peak, rank_str, rank_amp), na.rm = TRUE),
+    variability_strict   = ifelse(n_phenotypes_available == 3, variability, NA_real_),
+
+    which_phenotype = paste0(
+      ifelse(sd_r2_p_fdr   < 0.05, "structure ", ""),
+      ifelse(cv_amp_p_fdr  < 0.05 & mean_amp >= AMP_FLOOR & !amp_gated, "amplitude ", ""),
+      ifelse(sd_peak_p_fdr < 0.05, "timing", "")) %>% str_trim()
+  ) %>%
+  arrange(desc(variability))
+```
+
+
+
+
+```{r}
+cat("Well-measured cycling genes:", nrow(gene_summary),
+    " (pooled r2_adj >", R2_CYCLING, "and mean per-strain r2 > 0.1)\n\n")
+cat("Amplitude candidates excluded as expression-driven (frac_explained > 0.5):",
+    sum(gene_summary$amp_gated, na.rm = TRUE), "of", nrow(gene_summary), "\n\n")
+
+# ── Outlier diagnostic, now for all three ────────────────────────────────────
+cat("Is the spread broad or outlier-driven? (raw excess vs trimmed excess)\n")
+cat("  A large gap = a few strains carrying the signal.\n\n")
+gene_summary %>%
+  mutate(gap_peak = round(peak_excess - peak_trim_excess, 2),
+         gap_amp  = round(amp_excess  - amp_trim_excess,  2),
+         gap_str  = round(str_excess  - str_trim_excess,  2)) %>%
+  arrange(desc(gap_peak + gap_amp + gap_str)) %>%
+  select(name, gene, peak_excess, peak_trim_excess, gap_peak,
+         amp_excess, amp_trim_excess, gap_amp,
+         str_excess, str_trim_excess, gap_str) %>%
+  head(20) %>% print(n = 20, width = Inf)
+
+# ── OVERALL: most variable (combined) and most consistent (combined) ────────
+cat("\nMOST VARIABLE — combined ranking across structure, amplitude, timing:\n")
+gene_summary %>% head(15) %>%
+  select(name, gene, which_phenotype, mean_r2,
+         str_trim_excess, amp_trim_excess_final, peak_trim_excess, variability) %>%
+  print(n = 15)
+
+cat("\nMOST CONSISTENT — combined ranking, low end:\n")
+gene_summary %>% tail(15) %>%
+  select(name, gene, mean_r2,
+         str_trim_excess, amp_trim_excess_final, peak_trim_excess, variability) %>%
+  print(n = 15)
+```
+
+## gene significant varying in each phenotype
+
+amp_gated means "NOT gated" — i.e., this gene passed that check, so its amplitude signal is trustworthy enough to report. Filtering !amp_gated is how you exclude the expression-confounded genes from sig_amplitude.
+```{r}
+# ── Canonical per-phenotype significant-gene tables ─────────────────────────
+# Each contains ONLY genes passing that phenotype's own FDR < 0.05, sorted by
+# trimmed excess (largest first). These are what all downstream figures and
+# text should reference — not raw gene_summary %>% arrange() %>% head(), which
+# does not require significance.
+
+sig_structure <- gene_summary %>%
+  filter(sd_r2_p_fdr < 0.05) %>%
+  arrange(desc(str_trim_excess)) %>%
+  select(name, gene, mean_r2, sd_r2, sd_r2_null_mean, str_trim_excess,
+         str_robustness, sd_r2_p_fdr, which_phenotype, early_strains, late_strains)
+
+sig_structure
+
+sig_amplitude <- gene_summary %>%
+  filter(cv_amp_p_fdr < 0.05, !amp_gated) %>%
+  arrange(desc(amp_trim_excess_final)) %>%
+  select(name, gene, mean_r2, cv_amp, amp_trim_excess_final,
+         amp_robustness, frac_explained, cv_amp_p_fdr, which_phenotype,
+         early_strains, late_strains)
+sig_amplitude
+
+sig_timing <- gene_summary %>%
+  filter(sd_peak_p_fdr < 0.05) %>%
+  arrange(desc(peak_trim_excess)) %>%
+  select(name, gene, mean_r2, mean_peak, sd_peak, peak_trim_excess,
+         peak_robustness, n_early, n_late, sd_peak_p_fdr, which_phenotype,
+         early_strains, late_strains)
+sig_timing
+cat("Significant genes — structure:", nrow(sig_structure),
+    "| amplitude:", nrow(sig_amplitude),
+    "| timing:", nrow(sig_timing), "\n")
+```
+
+#histone variability is the most surprising output so let's look at that:
+```{r}
+gene_summary %>%
+  filter(gene %in% c("YDR033W", "YBR067C", "YBR009C", "YNL030W", "YNL031C", "YBL002W")) %>%
+  select(name, gene, str_trim_excess, str_robustness,
+         amp_trim_excess_final, amp_robustness,
+         peak_trim_excess, peak_robustness)
+#gene summary of all top hit genes
+gene_summary %>% filter(gene %in% c("YDR033W","YBR067C","YBR009C","YNL030W","YNL031C","YBL002W")) %>%
+  select(name, early_strains, late_strains)
+#gene summary of all top histone genes
+gene_summary %>% filter(gene %in% c("YBR009C","YNL030W","YNL031C","YBL002W")) %>%
+  select(name, early_strains, late_strains)
+
+# for HHT2, was BDL/APQ actually part of the 10% trimmed out, or did they survive?
+p <- obs$peak["YNL031C", ]  # HHT2's peak times across all strains
+p <- p[!is.na(p)]
+ctr <- circ_mean_rows(matrix(p, nrow = 1))
+d <- ((p - ctr + WRAP/2) %% WRAP) - WRAP/2
+d_sorted <- sort(abs(d), decreasing = TRUE)
+
+# which strains are in the trimmed-OUT top 10%?
+n_trim <- ceiling(0.10 * length(d))
+trimmed_out <- names(sort(abs(d), decreasing = TRUE))[1:n_trim]
+cat("Strains trimmed out for HHT2:", paste(trimmed_out, collapse = ", "), "\n")
+cat("Was BDL trimmed out?", "BDL" %in% trimmed_out, "\n")
+cat("Was APQ trimmed out?", "APQ" %in% trimmed_out, "\n")
+
+# HHT2 peak spread, excluding APQ entirely (not just relative-trim)
+p_no_apq <- obs$peak["YNL031C", setdiff(colnames(obs$peak), "APQ")]
+p_no_apq <- p_no_apq[!is.na(p_no_apq)]
+ctr_no_apq <- circ_mean_rows(matrix(p_no_apq, nrow = 1))
+sd_no_apq <- circ_sd_rows(matrix(p_no_apq, nrow = 1))
+
+cat("HHT2 sd_peak with APQ:", cal$sd_peak[cal$gene == "YNL031C"], "\n")
+cat("HHT2 sd_peak without APQ:", sd_no_apq, "\n")
+
+for (g in c("YBR009C", "YBL002W", "YNL030W")) {  # HHF1, HTB2, HHF2
+  p_all <- obs$peak[g, ]; p_all <- p_all[!is.na(p_all)]
+  p_no_apq <- obs$peak[g, setdiff(colnames(obs$peak), "APQ")]
+  p_no_apq <- p_no_apq[!is.na(p_no_apq)]
+  cat(g, "| with APQ:", round(circ_sd_rows(matrix(p_all, nrow=1)), 2),
+      "| without APQ:", round(circ_sd_rows(matrix(p_no_apq, nrow=1)), 2), "\n")
+}
+```
+
+
+
+
+
+```{r phenotype_overlap}
+# ── shared axis limits so the two panels are visually comparable ──────────
+lims <- gene_summary %>%
+  summarise(x_max = max(c(amp_excess, amp_trim_excess), na.rm = TRUE),
+            y_max = max(c(peak_excess, peak_trim_excess), na.rm = TRUE))
+
+make_overlap_plot <- function(df, x, y, title) {
+  df %>%
+    mutate(sig_status = case_when(
+      gene %in% sig_amplitude$gene & gene %in% sig_timing$gene ~ "both significant",
+      gene %in% sig_amplitude$gene                              ~ "amplitude only",
+      gene %in% sig_timing$gene                                 ~ "timing only",
+      TRUE                                                      ~ "neither"
+    )) %>%
+    ggplot(aes(.data[[x]], .data[[y]])) +
+    geom_hline(yintercept = 1, linetype = 2, colour = "grey70") +
+    geom_vline(xintercept = 1, linetype = 2, colour = "grey70") +
+    geom_point(aes(size = mean_r2, colour = sig_status), alpha = 0.6) +
+    scale_colour_manual(values = c("both significant" = "firebrick",
+                                   "amplitude only"   = "darkorange",
+                                   "timing only"       = "steelblue",
+                                   "neither"           = "grey70"),
+                        name = "Significance (FDR < 0.05)") +
+    ggrepel::geom_text_repel(
+      data = . %>% filter(sig_status != "neither"),
+      aes(label = name), size = 2.5, max.overlaps = 20) +
+    coord_cartesian(xlim = c(0, lims$x_max), ylim = c(0, lims$y_max)) +
+    labs(x = "Amplitude excess over null", y = "Timing excess over null",
+         title = title) +
+    theme_classic()
+}
+
+p_overlap_raw     <- make_overlap_plot(gene_summary, "amp_excess", "peak_excess",
+                                       "Untrimmed (all strains)")
+p_overlap_trimmed <- make_overlap_plot(gene_summary, "amp_trim_excess_final", "peak_trim_excess",
+                                       "Trimmed (worst 10% dropped)")
+
+print(p_overlap_raw + p_overlap_trimmed)
+
+dir.create("../results", showWarnings = FALSE)
+ggsave("../results/phenotype_overlap_amp_vs_timing.png",
+       p_overlap_raw + p_overlap_trimmed, width = 12, height = 6, dpi = 300)
+```
+
+```{r save}
+dir.create("../results", showWarnings = FALSE)
+
+# ── the expensive objects — save as .rds so you never need to rerun ────────
+saveRDS(obs,      "../results/harmonic_obs.rds")       # per-strain fits (all 74 x 478)
+saveRDS(null_arr, "../results/harmonic_null_arr.rds")   # 500 permutations, raw
+saveRDS(pooled,   "../results/harmonic_pooled.rds")     # Q1 pooled fit
+
+cat("null_arr size:", format(object.size(null_arr), units = "MB"), "\n")
+
+# ── summary tables — .csv for readability / sharing outside R ──────────────
+write.csv(q1,            "../results/harmonic_q1_pooled.csv",           row.names = FALSE)
+write.csv(cal,            "../results/harmonic_pheno_calibrated.csv",   row.names = FALSE)
+write.csv(audit,          "../results/harmonic_gene_audit.csv",         row.names = FALSE)
+write.csv(gene_summary,   "../results/harmonic_gene_summary.csv",       row.names = FALSE)
+
+# ── the six canonical per-phenotype gene lists ──────────────────────────────
+write.csv(sig_structure,        "../results/sig_structure.csv",        row.names = FALSE)
+write.csv(sig_amplitude,        "../results/sig_amplitude.csv",        row.names = FALSE)
+write.csv(sig_timing,           "../results/sig_timing.csv",           row.names = FALSE)
+write.csv(consistent_structure, "../results/consistent_structure.csv", row.names = FALSE)
+write.csv(consistent_amplitude, "../results/consistent_amplitude.csv", row.names = FALSE)
+write.csv(consistent_timing,    "../results/consistent_timing.csv",    row.names = FALSE)
+
+long_pheno <- map_dfr(c("r2_adj","amp","amp1_db","peak","phase1"), function(st)
+  as.data.frame(obs[[st]]) %>% rownames_to_column("gene") %>%
+    pivot_longer(-gene, names_to = "strain", values_to = "value") %>%
+    mutate(stat = st))
+write.csv(long_pheno, "../results/harmonic_strain_phenotypes_long.csv",
+          row.names = FALSE)
+
+#to reload in the future:
+# obs      <- readRDS("../results/harmonic_obs.rds")
+# null_arr <- readRDS("../results/harmonic_null_arr.rds")
+# pooled   <- readRDS("../results/harmonic_pooled.rds")
+# sig_structure        <- read.csv("../results/sig_structure.csv")
+# sig_amplitude        <- read.csv("../results/sig_amplitude.csv")
+# sig_timing           <- read.csv("../results/sig_timing.csv")
+# consistent_structure <- read.csv("../results/consistent_structure.csv")
+# consistent_amplitude <- read.csv("../results/consistent_amplitude.csv")
+# consistent_timing    <- read.csv("../results/consistent_timing.csv")
+```
+
+---
+
+# 9. Plotting
+
+The curve plotted is exactly the curve that was measured — no padding, no seam
+handling, no second smoother.
+
+```{r plot_toolkit}
+PHASE_BOUNDS <- tibble(
+  xmin  = c(0, 7, 22.5, 39.5, 56.5, 77.5),
+  xmax  = c(7, 22.5, 39.5, 56.5, 77.5, WRAP),
+  phase = factor(c('M','M-G1','G1','S','G2','M'), levels = CC_LEVELS)
+)
+
+harmonic_curve <- function(gene, strain = NULL, K = HARMONICS) {
+  idx <- if (is.null(strain)) seq_along(tvec) else which(gvec == strain)
+  y <- Y_cc[idx, gene]
+  if (length(idx) < 2 * K + 4 || sd(y) == 0) return(NULL)
+  X <- harmonic_design(tvec[idx], K)
+  b <- qr.coef(qr(X), y); b[is.na(b)] <- 0
+  tibble(time = GRID, y = as.numeric(harmonic_design(GRID, K) %*% b),
+         strain = strain %||% "global")
+}
+
+cc_panel <- function(genes, per_strain = TRUE, ncol = 3, title = NULL) {
+  orfs <- to_orf(genes)
+  orfs <- orfs[orfs %in% colnames(Y_cc)]
+  if (length(orfs) == 0) { message("cc_panel: no genes to plot"); return(invisible(NULL)) }
+
+  global <- map_dfr(orfs, ~ harmonic_curve(.x) %>% mutate(gene = .x))
+  strains <- names(n_by_strain)
+  per <- if (per_strain)
+    map_dfr(orfs, function(g)
+      map_dfr(strains, ~ harmonic_curve(g, .x) %>% mutate(gene = g))) else NULL
+
+  binned <- tibble(gene = rep(orfs, each = length(tvec)),
+                   t = rep(round(tvec) %% WRAP, times = length(orfs)),
+                   y = as.vector(Y_cc[, orfs])) %>%
+    group_by(gene, t) %>% summarise(y = mean(y), .groups = "drop")
+
+  p <- ggplot() +
+    geom_rect(data = PHASE_BOUNDS,
+              aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf, fill = phase),
+              alpha = 0.20, inherit.aes = FALSE) +
+    scale_fill_manual(values = PHASE_FILL, name = "Phase")
+  if (per_strain)
+    p <- p + geom_line(data = per %>% mutate(label = to_name(gene)),
+                       aes(time, y, group = strain),
+                       colour = "grey45", alpha = 0.4, linewidth = 0.3)
+  p +
+    geom_point(data = binned %>% mutate(label = to_name(gene)),
+               aes(t, y), size = 1, alpha = 0.6, colour = "grey20") +
+    geom_line(data = global %>% mutate(label = to_name(gene)),
+              aes(time, y), colour = "black", linewidth = 1) +
+    scale_x_continuous(breaks = seq(0, WRAP, 11)) +
+    coord_cartesian(xlim = c(0, WRAP)) +
+    facet_wrap(~label, scales = "free_y", ncol = ncol) +
+    labs(x = "Time in cell cycle (min)", y = "Normalized expression", title = title) +
+    theme_classic() + theme(legend.position = "bottom")
+}
+
+```
+
+```{r}
+dir.create("../results/cc_panels", showWarnings = FALSE, recursive = TRUE)
+
+save_cc <- function(plot, filename, width = 10, height = 7) {
+  ggsave(file.path("../results/cc_panels", filename), plot,
+         width = width, height = height, dpi = 300)
+}
+
+# ── MARKERS ──────────────────────────────────────────────────────────────
+p_markers <- cc_panel(c("HHF1", "CTS1"), ncol = 2,
+                      title = "Markers — global (black) + per strain (grey)")
+print(p_markers)
+save_cc(p_markers, "markers_HHF1_CTS1.png", width = 7, height = 4)
+
+# ── STRUCTURE ─────────────────────────────────────────────────────────────
+p_structure_varies <- cc_panel(head(sig_structure$gene, 6),
+             title = "Largest SIGNIFICANT structure (R2) differences —\ncurves should differ in tightness")
+print(p_structure_varies)
+save_cc(p_structure_varies, "structure_varies.png")
+
+# p_structure_consistent <- cc_panel(head(consistent_structure$gene, 6),
+#              title = "Most consistent structure (not significant, FDR >= 0.05) —\ncurves should overlap tightly")
+# print(p_structure_consistent)
+# save_cc(p_structure_consistent, "structure_consistent.png")
+
+# ── AMPLITUDE (gated, trimmed, FDR-significant) ────────────────────────────
+p_amplitude_varies <- cc_panel(head(sig_amplitude$gene, 6),
+             title = "Largest SIGNIFICANT amplitude differences\n(outlier-trimmed, expression-gated) — same shape, different heights")
+print(p_amplitude_varies)
+save_cc(p_amplitude_varies, "amplitude_varies.png")
+
+# p_amplitude_consistent <- cc_panel(head(consistent_amplitude$gene, 6),
+#              title = "Most consistent amplitude (not significant, FDR >= 0.05) —\ncurves should reach similar heights")
+# print(p_amplitude_consistent)
+# save_cc(p_amplitude_consistent, "amplitude_consistent.png")
+
+cat("Amplitude genes excluded from these plots (expression-driven):",
+    sum(gene_summary$amp_gated, na.rm = TRUE), "\n")
+
+# ── TIMING (trimmed, FDR-significant) ──────────────────────────────────────
+p_timing_varies <- cc_panel(head(sig_timing$gene, 6),
+             title = "Largest SIGNIFICANT timing shifts (outlier-trimmed) —\ncurves should be offset sideways")
+print(p_timing_varies)
+save_cc(p_timing_varies, "timing_varies.png")
+
+# p_timing_consistent <- cc_panel(head(consistent_timing$gene, 6),
+#              title = "Most consistent timing (not significant, FDR >= 0.05) —\ncurves should crest together")
+# print(p_timing_consistent)
+# save_cc(p_timing_consistent, "timing_consistent.png")
+
+# ── SIGNIFICANT IN BOTH amplitude AND timing ───────────────────────────────
+both_sig <- intersect(sig_amplitude$gene, sig_timing$gene)
+cat("\nGenes significant in BOTH amplitude and timing:", length(both_sig), "|",
+    paste(to_name(head(both_sig, 10)), collapse = ", "), "\n")
+
+p_both_amp_timing <- cc_panel(head(both_sig, 6), title = "Significant in both timing and amplitude")
+print(p_both_amp_timing)
+save_cc(p_both_amp_timing, "both_amplitude_and_timing.png")
+```
+
+```{r}
+strain_scatter <- function(gene_ids, title, subtitle = NULL) {
+  map_dfr(gene_ids, ~ tibble(gene = .x, strain = colnames(AMP),
+                             amp = AMP[.x, ], peak = obs$peak[.x, ],
+                             n_cells = n_by_strain,
+                             poor_cov = colnames(AMP) %in% POOR_COVERAGE)) %>%
+    filter(!is.na(amp)) %>%
+    mutate(name = to_name(gene)) %>%
+    ggplot(aes(peak, amp)) +
+    geom_point(aes(size = n_cells, colour = poor_cov), alpha = 0.6) +
+    scale_colour_manual(values = c(`FALSE` = "black", `TRUE` = "firebrick"),
+                        name = "gap > 22 min") +
+    ggrepel::geom_text_repel(
+      data = . %>% group_by(name) %>%
+        mutate(ctr = circ_mean_rows(matrix(peak, nrow = 1)),
+               d   = ((peak - ctr + WRAP/2) %% WRAP) - WRAP/2) %>%
+        filter(abs(d) > 10) %>% ungroup(),
+      aes(label = strain), size = 2.5, max.overlaps = 15) +
+    facet_wrap(~name, scales = "free_y") +
+    scale_x_continuous(limits = c(0, WRAP), breaks = seq(0, WRAP, 22)) +
+    labs(x = "Peak time (min)", y = "Amplitude (bias-corrected)",
+         title = title, subtitle = subtitle) +
+    theme_classic()
+}
+
+strain_scatter_structure <- function(gene_ids, title, subtitle = NULL) {
+  map_dfr(gene_ids, ~ tibble(gene = .x, strain = colnames(obs$r2_adj),
+                             r2 = obs$r2_adj[.x, ],
+                             n_cells = n_by_strain,
+                             poor_cov = colnames(obs$r2_adj) %in% POOR_COVERAGE)) %>%
+    filter(!is.na(r2)) %>%
+    mutate(name = to_name(gene)) %>%
+    ggplot(aes(reorder(strain, r2), r2)) +
+    geom_point(aes(size = n_cells, colour = poor_cov), alpha = 0.6) +
+    scale_colour_manual(values = c(`FALSE` = "black", `TRUE` = "firebrick"),
+                        name = "gap > 22 min") +
+    facet_wrap(~name, scales = "free_x") +
+    labs(x = "Strain (sorted by R2)", y = "Adjusted R2 (fit quality)",
+         title = title, subtitle = subtitle) +
+    theme_classic() +
+    theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
+}
+
+dir.create("../results/strain_scatter", showWarnings = FALSE, recursive = TRUE)
+
+save_scatter <- function(plot, filename, width = 10, height = 7) {
+  ggsave(file.path("../results/strain_scatter", filename), plot,
+         width = width, height = height, dpi = 300)
+}
+
+# ── STRUCTURE ────────────────────────────────────────────────────────────
+p_struct_sig <- strain_scatter_structure(head(sig_structure$gene, 6),
+                                         "Significant structure variation (FDR < 0.05)")
+print(p_struct_sig)
+save_scatter(p_struct_sig, "structure_highest.png")
+
+# ── AMPLITUDE (gated genes excluded) ──────────────────────────────────────
+p_amp_sig <- strain_scatter(head(sig_amplitude$gene, 6),
+                            "Significant amplitude variation (FDR < 0.05)",
+                            "(expression-driven genes excluded)")
+print(p_amp_sig)
+save_scatter(p_amp_sig, "amplitude_highest.png")
+
+# ── TIMING ───────────────────────────────────────────────────────────────
+p_timing_sig <- strain_scatter(head(sig_timing$gene, 6),
+                               "Significant timing variation (FDR < 0.05)")
+print(p_timing_sig)
+save_scatter(p_timing_sig, "timing_highest.png")
+```
+
+
+
+---
+
+# 10. Is a strain's deviation gene-specific or global?
+
+A strain with shallow coverage looks "different" for every gene at once.
+Subtract each strain's global tendency before claiming a gene-specific effect.
+
+```{r strain_offset}
+zrow <- function(M) t(scale(t(M)))
+
+well   <- pheno$gene[pheno$mean_r2 > 0.3 & pheno$pct_strains_detected > 0.9]
+Z      <- zrow(obs$r2_adj[well, , drop = FALSE])
+offset <- colMeans(Z, na.rm = TRUE)
+
+cat("Strain offset range:", round(range(offset, na.rm = TRUE), 2), "\n")
+cat("cor(offset, n_cells):",
+    round(cor(offset, n_by_strain, method = "spearman", use = "complete.obs"), 3),
+    "  <- non-zero means part of the strain signal is cell number\n")
+
+resid_mat <- sweep(zrow(obs$r2_adj), 2, offset, "-")
+
+histones <- c("HTB2"="YBL002W","HHT2"="YNL031C","HHF1"="YBR009C","HHF2"="YNL030W")
+h <- intersect(histones, rownames(resid_mat))
+
+if (length(h) >= 2) {
+  set.seed(SEED)
+  rand <- sample(setdiff(well, histones), min(12, length(setdiff(well, histones))))
+  cm <- cor(t(resid_mat[c(h, rand), , drop = FALSE]), use = "pairwise.complete.obs")
+  cat("\nAfter removing the strain offset:\n")
+  cat("  histone-histone median r:", round(median(cm[h, h][upper.tri(cm[h, h])]), 3), "\n")
+  cat("  random-random   median r:", round(median(cm[rand, rand][upper.tri(cm[rand, rand])]), 3), "\n")
+  cat("  histone-random  median r:", round(median(cm[h, rand]), 3), "\n")
+  cat("  (histone-histone >> random-random = one shared regulatory cause)\n")
+}
+```
+```{r}
+# Q1: how many of 478 cycled at all
+sum(q1$r2_adj > R2_CYCLING & q1$is_spellman, na.rm = TRUE)
+
+# how many retained after the mean_r2 > 0.15 measurability floor
+nrow(gene_summary)   # once you've set the filter to 0.15
+
+# significant per phenotype
+sum(gene_summary$sd_r2_p_fdr < 0.05, na.rm = TRUE)      # structure
+sum(gene_summary$cv_amp_p_fdr < 0.05 & !gene_summary$amp_gated, na.rm = TRUE)  # amplitude
+sum(gene_summary$sd_peak_p_fdr < 0.05, na.rm = TRUE)     # timing
+
+# overlap
+gene_summary %>% mutate(n_sig = (sd_r2_p_fdr<0.05) + (cv_amp_p_fdr<0.05 & !amp_gated) + (sd_peak_p_fdr<0.05)) %>%
+  count(n_sig)
+```
+

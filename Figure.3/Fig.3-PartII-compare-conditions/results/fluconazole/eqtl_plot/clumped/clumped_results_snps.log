@@ -1,0 +1,32 @@
+PLINK v1.9.0-b.8 64-bit (22 Oct 2024)
+Options in effect:
+  --bfile /projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/pan_transcriptome_paper/SNPs/SNPs_no_change_name_and_no_strain_filtering_only_MAF15_filtered/full969Matrix.SNPs.Biallelic.Var.DP10.99percNonMissing.MAF15.NoSubTelo20kb.plink
+  --clump /projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Agrawal_single_cell_eqtl_cell_cycle/Figure.3/Fig.3-PartII-compare-conditions/results/fluconazole/eqtl_plot/plink_inputs/plink_snps.txt
+  --clump-kb 2
+  --clump-p1 0.05
+  --clump-r2 0.6
+  --out /projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Agrawal_single_cell_eqtl_cell_cycle/Figure.3/Fig.3-PartII-compare-conditions/results/fluconazole/eqtl_plot/clumped/clumped_results_snps
+
+Hostname: torch-login-a-1.hpc-infra.svc.cluster.local
+Working directory: /projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Agrawal_single_cell_eqtl_cell_cycle/Figure.3/Fig.3-PartII-compare-conditions/results/fluconazole/eqtl_plot/clumped
+Start time: Tue Sep  1 11:14:40 2026
+
+Random number seed: 1788275680
+128265 MB RAM detected; reserving 64132 MB for main workspace.
+47757 variants loaded from .bim file.
+969 people (0 males, 0 females, 969 ambiguous) loaded from .fam.
+Ambiguous sex IDs written to
+/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Agrawal_single_cell_eqtl_cell_cycle/Figure.3/Fig.3-PartII-compare-conditions/results/fluconazole/eqtl_plot/clumped/clumped_results_snps.nosex
+.
+Using 1 thread (no multithreaded calculations invoked).
+Before main variant filters, 969 founders and 0 nonfounders present.
+Calculating allele frequencies... done.
+Total genotyping rate is 0.999565.
+47757 variants and 969 people pass filters and QC.
+Note: No phenotypes present.
+--clump: 1247 clumps formed from 1550 top variants.
+Results written to
+/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Agrawal_single_cell_eqtl_cell_cycle/Figure.3/Fig.3-PartII-compare-conditions/results/fluconazole/eqtl_plot/clumped/clumped_results_snps.clumped
+.
+
+End time: Tue Sep  1 11:14:40 2026

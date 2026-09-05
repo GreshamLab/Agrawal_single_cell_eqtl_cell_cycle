@@ -1,0 +1,7 @@
+"Condition","Replicate","N_cells_total","N_genes_detected","Total_reads","Mean_reads_per_cell","Median_reads_per_cell","Mean_genes_per_cell","Median_genes_per_cell","N_singlets_demuxlet","N_doublets_demuxlet","N_ambiguous_demuxlet","Pct_singlets","Pct_doublets","Pct_ambiguous"
+"YPD",1,28780,5843,"526,410,195",18291,15047,9897,7624,18462,8926,1392,64.1,31,4.8
+"YPD",2,42850,5843,"333,200,844",7776,5335,9163,5673,23262,18637,951,54.3,43.5,2.2
+"Fluconazole",1,8753,5843,"40,442,952",4620,1559,1348,811,6223,2265,265,71.1,25.9,3
+"Fluconazole",2,35470,5843,"200,500,344",5653,3881,5617,2835,6154,29301,15,17.3,82.6,0
+"Synthetic-complete",1,74437,5843,"314,497,470",4225,3064,11943,6778,1691,72735,11,2.3,97.7,0
+"Synthetic-complete",2,37443,5843,"191,002,516",5101,2774,6552,4141,6003,31434,6,16,84,0

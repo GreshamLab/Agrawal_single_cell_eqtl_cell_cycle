@@ -21,6 +21,7 @@ library(Rtsne)
 library(cowplot)
 library(patchwork)
 library(ggrepel)
+library(ComplexHeatmap)
 
 select <- dplyr::select
 filter <- dplyr::filter
@@ -69,6 +70,30 @@ orf_to_name_custom <- all_custom_gene_annotations %>%
   filter(!is.na(gene_id), !is.na(gene_name)) %>%
   distinct(gene_id, gene_name) %>%
   deframe()
+
+# ── ORF -> common name, with SGD fallback (matches the main Fig.2 file) ──
+build_orf_to_name <- function(custom_map, all_orfs) {
+  missing <- all_orfs[!all_orfs %in% names(custom_map)]
+
+  sgd <- tryCatch(
+    AnnotationDbi::select(org.Sc.sgd.db, keys = missing,
+                          columns = "GENENAME", keytype = "ORF"),
+    error = function(e) data.frame(ORF = character(), GENENAME = character())
+  )
+  sgd_map <- sgd %>% filter(!is.na(GENENAME)) %>%
+    distinct(ORF, GENENAME) %>% deframe()
+
+  c(custom_map, sgd_map[!names(sgd_map) %in% names(custom_map)])
+}
+
+# All ORFs that could appear in any condition
+all_possible_orfs <- unique(c(names(orf_to_name_custom), standard_orfs))
+orf_to_name <- build_orf_to_name(orf_to_name_custom, all_possible_orfs)
+
+cat("Named ORFs — custom:", length(orf_to_name_custom),
+    "| + SGD:", length(orf_to_name), "\n")
+
+name_to_orf <- setNames(names(orf_to_name), orf_to_name)
 
 gene_location <- all_custom_gene_annotations %>%
   filter(type == "CDS", !is.na(gene_id)) %>%
@@ -135,7 +160,7 @@ run_clade_dge <- function(clade_of_interest, counts_mat, meta,
     rownames_to_column("gene") %>%
     filter(!is.na(padj)) %>%
     mutate(
-      gene_name = ifelse(gene %in% names(orf_to_name_custom), orf_to_name_custom[gene], gene),
+      gene_name = ifelse(gene %in% names(orf_to_name), orf_to_name[gene], gene),
       direction = case_when(
         padj < padj_thresh & log2FoldChange >  lfc_thresh ~ "Upregulated",
         padj < padj_thresh & log2FoldChange < -lfc_thresh ~ "Downregulated",
@@ -247,7 +272,7 @@ ncr_canonical_names   <- c("MEP1","MEP2","GAP1","DAL5","DUR1,2","DUR3","PUT1","P
 # induction under diverse stresses, Hohmann 2002, Grably et al. 2002)
 stress_canonical_names <- c("HSP12","HSP104","HSP26","CTT1","SSA3","TSL1","DDR2")
 
-name_to_orf <- setNames(names(orf_to_name_custom), orf_to_name_custom)
+#name_to_orf <- setNames(names(orf_to_name_custom), orf_to_name_custom)
 
 resolve_focus_genes <- function(ora_combined, description_pattern, canonical_names,
                                 vst_mat, regulon_label, condition_label) {
@@ -280,7 +305,7 @@ plot_focus_regulon <- function(genes, regulon_label, vst_mat, sample_meta, clade
   df <- as.data.frame(t(vst_mat[genes, , drop = FALSE])) %>%
     rownames_to_column("strain") %>%
     pivot_longer(-strain, names_to = "gene", values_to = "expr") %>%
-    mutate(gene_name = ifelse(gene %in% names(orf_to_name_custom), orf_to_name_custom[gene], gene)) %>%
+    mutate(gene_name = ifelse(gene %in% names(orf_to_name), orf_to_name[gene], gene)) %>%
     left_join(sample_meta %>% rownames_to_column("strain"), by = "strain") %>%
     filter(!is.na(clade))
 
@@ -295,7 +320,7 @@ plot_focus_regulon <- function(genes, regulon_label, vst_mat, sample_meta, clade
 ```
 
 ```{r}
-# ── Panel C2 helpers: per-clade volcano + GO dotplot (re-added, generalized) ──
+# ── Panel C2 helpers: per-clade volcano + GO dotplot ───────────────────
 plot_volcano <- function(res_df, clade_label, padj_thresh = 0.05,
                          lfc_thresh = 0.3, top_n_labels = 15) {
   sig <- res_df %>% filter(direction != "NS")
@@ -353,6 +378,105 @@ plot_go_dotplot <- function(ora_up, ora_down, clade_label, top_n = 8) {
   }
   g
 }
+
+# ── Faceted volcano grid: all clades, 4 per row, SHARED axes ───────────
+# scales = "fixed" so panels are directly comparable across clades.
+plot_volcano_grid <- function(dge_combined, condition_label,
+                              padj_thresh = 0.05, lfc_thresh = 0.3,
+                              top_n_labels = 6, ncol = 4) {
+  if (nrow(dge_combined) == 0) return(NULL)
+
+  keep <- dge_combined %>% filter(direction != "NS") %>%
+    dplyr::count(clade) %>% filter(n >= 5) %>% pull(clade)
+  if (length(keep) == 0) return(NULL)
+
+  df <- dge_combined %>%
+    filter(clade %in% keep, !is.na(padj)) %>%
+    mutate(direction = factor(direction,
+                              levels = c("Upregulated", "Downregulated", "NS")))
+
+  counts <- df %>% filter(direction != "NS") %>%
+    dplyr::count(clade, n_focal, direction) %>%
+    pivot_wider(names_from = direction, values_from = n, values_fill = 0) %>%
+    { if (!"Upregulated"   %in% names(.)) mutate(., Upregulated   = 0L) else . } %>%
+    { if (!"Downregulated" %in% names(.)) mutate(., Downregulated = 0L) else . } %>%
+    mutate(panel = sprintf("%s\n(n=%d | %d up, %d down)",
+                           clade, n_focal, Upregulated, Downregulated))
+
+  df <- left_join(df, select(counts, clade, panel), by = "clade")
+
+  labs_df <- df %>% filter(direction != "NS") %>%
+    group_by(clade) %>% slice_min(padj, n = top_n_labels) %>% ungroup()
+
+  ggplot(df, aes(log2FoldChange, -log10(padj))) +
+    geom_point(data = filter(df, direction == "NS"),
+               color = "grey85", size = 0.5, alpha = 0.4) +
+    geom_point(data = filter(df, direction != "NS"),
+               aes(color = direction), size = 0.9, alpha = 0.75) +
+    geom_hline(yintercept = -log10(padj_thresh), linetype = "dashed",
+               color = "grey50", linewidth = 0.25) +
+    geom_vline(xintercept = c(-lfc_thresh, lfc_thresh), linetype = "dashed",
+               color = "grey50", linewidth = 0.25) +
+    ggrepel::geom_text_repel(data = labs_df, aes(label = gene_name),
+                             size = 1.9, fontface = "italic", color = "black",
+                             max.overlaps = 12, segment.size = 0.2,
+                             box.padding = 0.25, min.segment.length = 0.1) +
+    scale_color_manual(values = c(Upregulated = "#C0392B",
+                                  Downregulated = "#2471A3"), name = NULL) +
+    facet_wrap(~ panel, ncol = ncol, scales = "free_y") +
+    labs(title = paste0("Clade-vs-rest differential expression — ", condition_label),
+         x = expression(log[2]~"fold change"),
+         y = expression(-log[10]~"(adjusted"~italic(p)~")")) +
+    theme_bw(base_size = 8) +
+    theme(strip.text       = element_text(size = 6.5, face = "bold", lineheight = 0.9),
+          strip.background = element_rect(fill = "grey92", color = NA),
+          panel.grid       = element_blank(),
+          legend.position  = "bottom",
+          plot.title       = element_text(face = "bold", size = 10))
+}
+
+# ── Faceted GO dot-plot grid: all clades, 4 per row ────────────────────
+# y stays free_y — each clade has different GO terms, so a shared y axis
+# would list every term in every panel with most rows empty.
+plot_go_grid <- function(ora_combined, condition_label, top_n = 5, ncol = 4) {
+  if (nrow(ora_combined) == 0 || !"Description" %in% names(ora_combined)) return(NULL)
+
+  df <- ora_combined %>%
+    filter(!is.na(Description)) %>%
+    group_by(clade, direction) %>%
+    slice_min(p.adjust, n = top_n, with_ties = FALSE) %>%
+    ungroup()
+  if (nrow(df) == 0) return(NULL)
+
+  df <- df %>%
+    mutate(
+      GeneRatio_num = sapply(GeneRatio, function(x) {
+        p <- strsplit(x, "/")[[1]]; as.numeric(p[1]) / as.numeric(p[2])
+      }),
+      Description = str_wrap(Description, width = 30),
+      direction   = factor(direction, levels = c("Upregulated", "Downregulated")),
+      term_id     = paste(clade, Description, sep = "___")
+    ) %>%
+    arrange(clade, GeneRatio_num) %>%
+    mutate(term_id = factor(term_id, levels = unique(term_id)))
+
+  ggplot(df, aes(GeneRatio_num, term_id, color = direction, size = Count)) +
+    geom_point(alpha = 0.85) +
+    scale_y_discrete(labels = function(x) sub("^.*___", "", x)) +
+    scale_color_manual(values = c(Upregulated = "#C0392B",
+                                  Downregulated = "#2471A3"), name = NULL) +
+    scale_size_continuous(name = "Genes", range = c(1, 4)) +
+    facet_wrap(~ clade, ncol = ncol, scales = "free_y") +
+    labs(title = paste0("GO Biological Process enrichment — ", condition_label),
+         x = "Gene ratio", y = NULL) +
+    theme_bw(base_size = 8) +
+    theme(axis.text.y        = element_text(size = 5.5, lineheight = 0.8),
+          strip.text         = element_text(size = 6.5, face = "bold"),
+          strip.background   = element_rect(fill = "grey92", color = NA),
+          panel.grid.major.y = element_blank(),
+          legend.position    = "bottom",
+          plot.title         = element_text(face = "bold", size = 10))
+}
 ```
 
 
@@ -393,11 +517,51 @@ safe_ggsave <- function(filename, plot, ...) {
 }
 ```
 
+```{r}
+# ── Clade summary table: strains, up, down ────────────────────────────
+make_clade_summary <- function(dge_combined, condition_label) {
+  if (nrow(dge_combined) == 0) return(NULL)
+
+  dge_combined %>%
+    filter(direction != "NS") %>%
+    dplyr::count(clade, n_focal, direction) %>%
+    pivot_wider(names_from = direction, values_from = n, values_fill = 0) %>%
+    # guarantee both columns exist even if a direction never occurs
+    { if (!"Upregulated"   %in% names(.)) mutate(., Upregulated   = 0L) else . } %>%
+    { if (!"Downregulated" %in% names(.)) mutate(., Downregulated = 0L) else . } %>%
+    # keep clades that were tested but had zero DEGs
+    right_join(distinct(dge_combined, clade, n_focal), by = c("clade", "n_focal")) %>%
+    mutate(across(c(Upregulated, Downregulated), ~ replace_na(.x, 0L)),
+           total_DEGs = Upregulated + Downregulated,
+           condition  = condition_label) %>%
+    select(condition, clade,
+           n_strains       = n_focal,
+           n_upregulated   = Upregulated,
+           n_downregulated = Downregulated,
+           total_DEGs) %>%
+    arrange(desc(total_DEGs))
+}
+```
+
 
 ```{r}
 # ── Master per-condition analysis: Panels A, B, C (GAL/NCR/Stress) ─────
 analyze_condition <- function(condition_label, path, sep) {
   cat("\n==== Condition:", condition_label, "====\n")
+
+  # ---- Per-condition output directories ────────────────────────────────
+  COND_DIR    <- file.path(OUT_DIR, condition_label)
+  DIR_HEATMAP <- file.path(COND_DIR, "heatmap")
+  DIR_TSNE    <- file.path(COND_DIR, "tsne")
+  DIR_REGULON <- file.path(COND_DIR, "regulon")
+  DIR_VOLCANO <- file.path(COND_DIR, "volcano")
+  DIR_GOTERM  <- file.path(COND_DIR, "GOterm")
+  DIR_TABLES  <- file.path(COND_DIR, "ora_tables")
+
+  for (d in c(DIR_HEATMAP, DIR_TSNE, DIR_REGULON, DIR_VOLCANO, DIR_GOTERM, DIR_TABLES)) {
+    dir.create(d, showWarnings = FALSE, recursive = TRUE)
+  }
+  cat("Output directory:", COND_DIR, "\n")
 
   raw_counts_mat <- load_condition_counts(path, sep)
   sample_meta    <- build_sample_meta(raw_counts_mat)
@@ -406,27 +570,35 @@ analyze_condition <- function(condition_label, path, sep) {
   cat(nrow(raw_counts_mat), "genes x", ncol(raw_counts_mat), "strains |",
       nrow(sample_meta), "with clade annotation\n")
 
-  all_clade_levels <- sort(unique(sample_meta$clade)); all_clade_levels <- all_clade_levels[!is.na(all_clade_levels)]
-  clade_colors <- setNames(colorRampPalette(brewer.pal(12, "Paired"))(length(all_clade_levels)), all_clade_levels)
+  all_clade_levels <- sort(unique(sample_meta$clade))
+  all_clade_levels <- all_clade_levels[!is.na(all_clade_levels)]
+  clade_colors <- setNames(
+    colorRampPalette(brewer.pal(12, "Paired"))(length(all_clade_levels)),
+    all_clade_levels
+  )
 
-  dds_full <- DESeqDataSetFromMatrix(countData = raw_counts_mat, colData = sample_meta, design = ~ 1)
+  dds_full <- DESeqDataSetFromMatrix(countData = raw_counts_mat,
+                                     colData = sample_meta, design = ~ 1)
   vst_mat  <- SummarizedExperiment::assay(DESeq2::vst(dds_full, blind = TRUE))
 
   all_clades <- sort(unique(sample_meta$clade)); all_clades <- all_clades[!is.na(all_clades)]
-  dge_results <- lapply(all_clades, run_clade_dge, counts_mat = raw_counts_mat, meta = sample_meta)
+  dge_results <- lapply(all_clades, run_clade_dge,
+                        counts_mat = raw_counts_mat, meta = sample_meta)
   names(dge_results) <- all_clades
-  dge_results <- Filter(Negate(is.null), dge_results)
+  dge_results  <- Filter(Negate(is.null), dge_results)
   dge_combined <- bind_rows(dge_results)
 
-  sig_degs <- if (nrow(dge_combined) > 0) dge_combined %>% filter(direction != "NS") %>% pull(gene) %>% unique() else character(0)
+  sig_degs <- if (nrow(dge_combined) > 0) {
+    dge_combined %>% filter(direction != "NS") %>% pull(gene) %>% unique()
+  } else character(0)
   degs_in_matrix <- intersect(sig_degs, rownames(vst_mat))
   cat("Clades tested:", length(dge_results), "| unique DEGs:", length(degs_in_matrix), "\n")
 
-  # GO ORA per clade (feeds GAL/NCR/Stress gene selection)
+  # ---- GO ORA per clade (feeds GAL/NCR/Stress gene selection) ──────────
   universe_genes <- if (nrow(dge_combined) > 0) unique(dge_combined$gene) else rownames(raw_counts_mat)
   ora_results <- lapply(names(dge_results), function(cl) {
     list(up   = run_ora(dge_results[[cl]]$gene[dge_results[[cl]]$direction == "Upregulated"],   universe_genes),
-        down = run_ora(dge_results[[cl]]$gene[dge_results[[cl]]$direction == "Downregulated"], universe_genes))
+         down = run_ora(dge_results[[cl]]$gene[dge_results[[cl]]$direction == "Downregulated"], universe_genes))
   })
   names(ora_results) <- names(dge_results)
 
@@ -438,33 +610,113 @@ analyze_condition <- function(condition_label, path, sep) {
   }) %>% bind_rows()
   if (nrow(ora_combined) == 0) ora_combined <- data.frame(Description = character(), geneID = character())
 
-  write_csv(ora_combined, file.path(OUT_DIR, paste0("FigS_Fig2_GO_ORA_", condition_label, ".csv")))
+  write_csv(ora_combined, file.path(DIR_TABLES, paste0("GO_ORA_", condition_label, ".csv")))
 
-  
-    # ---- Panel A: strain-level DEG heatmap, now WITH column dendrogram ───
+  # ---- Clade summary: strains, up, down ────────────────────────────────
+  clade_summary <- make_clade_summary(dge_combined, condition_label)
+  if (!is.null(clade_summary)) {
+    cat("\nClade summary —", condition_label, "\n")
+    print(clade_summary, n = Inf)
+    write_csv(clade_summary,
+              file.path(DIR_TABLES, paste0("clade_summary_", condition_label, ".csv")))
+  }
+
+  # ---- Panel A: strain-level DEG heatmap (ComplexHeatmap) ──────────────
   fig2A <- NULL
   if (length(degs_in_matrix) >= 2) {
     scaled_A <- t(scale(t(vst_mat[degs_in_matrix, , drop = FALSE])))
     scaled_A[scaled_A >  3] <-  3
     scaled_A[scaled_A < -3] <- -3
 
-    hm_A   <- plot_heatmap_gg(scaled_A, xlab = "Strain", ylab = "Gene",
-                              show_colnames = TRUE, show_rownames = FALSE,
-                              limits = c(-3, 3), x_font_size = 6)
-    dend_A  <- make_col_dendrogram(hm_A$col_hc, length(hm_A$col_order))
-    strip_A <- make_clade_strip(hm_A$col_order, sample_meta, clade_colors)
+    # Drop singleton clades — never had their own contrast
+    tested_clades <- dge_combined %>%
+      distinct(clade, n_focal) %>%
+      filter(n_focal > 1) %>%
+      pull(clade)
 
-    fig2A <- (dend_A / strip_A / hm_A$plot) +
-      plot_layout(heights = c(0.18, 0.05, 1), guides = "collect") &
-      theme(legend.position = "right")
+    excluded_clades <- setdiff(unique(sample_meta$clade), tested_clades)
 
-    safe_ggsave(file.path(OUT_DIR, paste0("FigS_Fig2A_heatmap_", condition_label, ".tiff")), fig2A, width = 10, height = 7.5, units = "in", dpi = 600, device = "tiff", compression = "lzw")
+    cat("\n--- Panel A:", condition_label, "---\n")
+    cat("Tested clades (n_focal > 1):", length(tested_clades), "\n")
+    cat("  included:", paste(sort(tested_clades), collapse = ", "), "\n")
+    cat("Excluded singleton clades:", length(excluded_clades), "\n")
+    cat("  excluded:", paste(sort(excluded_clades), collapse = ", "), "\n")
+
+    strains_in_matrix <- intersect(
+      rownames(sample_meta)[sample_meta$clade %in% tested_clades],
+      colnames(scaled_A)
+    )
+
+    cat("Strains before filtering:", ncol(scaled_A),
+        "| after:", length(strains_in_matrix),
+        "| removed:", ncol(scaled_A) - length(strains_in_matrix), "\n")
+
+    scaled_A_filtered <- scaled_A[, strains_in_matrix, drop = FALSE]
+    cat("Final matrix:", nrow(scaled_A_filtered), "genes x",
+        ncol(scaled_A_filtered), "strains\n")
+
+    col_ann_A <- HeatmapAnnotation(
+      clade = sample_meta[colnames(scaled_A_filtered), "clade"],
+      col   = list(clade = clade_colors),
+      show_annotation_name = FALSE,
+      annotation_legend_param = list(
+        clade = list(
+          title     = "Clade",
+          title_gp  = gpar(fontsize = 10, fontface = "bold"),
+          labels_gp = gpar(fontsize = 8),
+          ncol      = 1
+        )
+      ),
+      which = "column"
+    )
+
+    col_fun_A <- colorRamp2(
+      c(-3, -1.5, 0, 1.5, 3),
+      c("#2166AC", "#92C5DE", "white", "#F4A582", "#B2182B")
+    )
+
+    fig2A <- Heatmap(
+      scaled_A_filtered,
+      col  = col_fun_A,
+      name = "z-score",
+      cluster_rows              = TRUE,
+      cluster_columns           = TRUE,
+      clustering_method_rows    = "ward.D2",
+      clustering_method_columns = "ward.D2",
+      top_annotation    = col_ann_A,
+      show_row_names    = FALSE,
+      show_column_names = TRUE,
+      column_names_rot  = 90,
+      column_names_gp   = gpar(fontsize = 8),
+      heatmap_legend_param = list(
+        title         = "DEG expression",
+        title_gp      = gpar(fontsize = 10, fontface = "bold"),
+        labels_gp     = gpar(fontsize = 8),
+        at            = c(-3, -1.5, 0, 1.5, 3),
+        labels        = c("-3 (low)", "-1.5", "0 (mean)", "1.5", "+3 (high)"),
+        legend_height = unit(4, "cm")
+      ),
+      column_title = paste0("Strain-level DEG expression (", condition_label, ")\n",
+                            nrow(scaled_A_filtered), " genes × ",
+                            ncol(scaled_A_filtered), " strains"),
+      column_title_gp = gpar(fontsize = 12, fontface = "bold"),
+      border = FALSE
+    )
+
+    # Draw to file only. An inline draw() can throw "Viewport has zero
+    # dimension(s)" when the plot pane is too small for the clade legend;
+    # the TIFF device has fixed dimensions so it always succeeds.
+    tiff(file.path(DIR_HEATMAP, paste0("heatmap_", condition_label, ".tiff")),
+         width = 10, height = 7, units = "in", res = 600, compression = "lzw")
+    draw(fig2A, heatmap_legend_side = "right",
+         annotation_legend_side = "right", merge_legend = TRUE)
+    dev.off()
+
   } else {
     cat("Skipping Panel A for", condition_label, "- fewer than 2 DEGs\n")
   }
 
-  # ---- Panel B: t-SNE on DEGs ----
-    # ---- Panel B: t-SNE, WITH clade color legend on the right ────────────
+  # ---- Panel B: t-SNE on DEGs ──────────────────────────────────────────
   fig2B <- NULL
   if (length(degs_in_matrix) >= 3 && ncol(vst_mat) >= 5) {
     tsne_input <- t(vst_mat[degs_in_matrix, , drop = FALSE])
@@ -478,100 +730,159 @@ analyze_condition <- function(condition_label, path, sep) {
       left_join(sample_meta %>% rownames_to_column("strain"), by = "strain")
 
     centroids_B <- tsne_df %>% filter(!is.na(clade)) %>%
-      group_by(clade) %>% summarise(tSNE1 = mean(tSNE1), tSNE2 = mean(tSNE2), n = n(), .groups = "drop") %>%
+      group_by(clade) %>%
+      summarise(tSNE1 = mean(tSNE1), tSNE2 = mean(tSNE2), n = n(), .groups = "drop") %>%
       filter(n >= 2)
 
     fig2B <- ggplot() +
       geom_point(data = filter(tsne_df, is.na(clade)), aes(tSNE1, tSNE2),
-                shape = 1, size = 2, color = "grey50") +
+                 shape = 1, size = 2, color = "grey50") +
       geom_point(data = filter(tsne_df, !is.na(clade)), aes(tSNE1, tSNE2, color = clade),
-                size = 2.3, alpha = 0.85) +
+                 size = 2.3, alpha = 0.85) +
       geom_text_repel(data = centroids_B, aes(tSNE1, tSNE2, label = clade),
                       size = 2.4, fontface = "bold", color = "black",
                       max.overlaps = 20, segment.size = 0.3) +
-            scale_color_manual(values = clade_colors, na.value = "white", name = "Clade") +
-      guides(color = guide_legend(nrow = 1, byrow = TRUE,
+      scale_color_manual(values = clade_colors, na.value = "white", name = "Clade") +
+      guides(color = guide_legend(ncol = 1,
                                   override.aes = list(size = 3, alpha = 1))) +
       labs(x = "t-SNE 1", y = "t-SNE 2") +
       pub_theme +
-      theme(legend.position = "bottom",
-            legend.box = "horizontal",
+      theme(legend.position = "right",
             legend.key.size = unit(0.3, "cm"),
-            legend.text  = element_text(size = 7),
-            legend.title = element_text(size = 8, face = "bold"))
+            legend.text     = element_text(size = 7),
+            legend.title    = element_text(size = 8, face = "bold"))
 
-        safe_ggsave(file.path(OUT_DIR, paste0("FigS_Fig2B_tsne_", condition_label, ".tiff")), fig2B, width = 8, height = 4.5, units = "in", dpi = 600, device = "tiff", compression = "lzw")
+    print(fig2B)
+    safe_ggsave(file.path(DIR_TSNE, paste0("tsne_", condition_label, ".tiff")),
+                fig2B, width = 8, height = 4.5, units = "in", dpi = 600,
+                device = "tiff", compression = "lzw")
   } else {
     cat("Skipping Panel B for", condition_label, "- too few DEGs or strains\n")
   }
 
-    # ---- Panel C: GAL, NCR, Stress ----
-  gal_sel    <- resolve_focus_genes(ora_combined, "galactose", gal_canonical_names, vst_mat, "GAL", condition_label)
-  ncr_sel    <- resolve_focus_genes(ora_combined, "nitrogen catabolite|allantoin|urea catabolic|nitrogen compound catabolic", ncr_canonical_names, vst_mat, "NCR", condition_label)
-  stress_sel <- resolve_focus_genes(ora_combined, "response to heat|response to oxidative stress|response to desiccation|cellular response to stress|response to stress", stress_canonical_names, vst_mat, "Stress", condition_label)
+  # ---- Panel C: GAL, NCR, Stress ───────────────────────────────────────
+  gal_sel    <- resolve_focus_genes(ora_combined, "galactose",
+                                    gal_canonical_names, vst_mat, "GAL", condition_label)
+  ncr_sel    <- resolve_focus_genes(ora_combined,
+                                    "nitrogen catabolite|allantoin|urea catabolic|nitrogen compound catabolic",
+                                    ncr_canonical_names, vst_mat, "NCR", condition_label)
+  stress_sel <- resolve_focus_genes(ora_combined,
+                                    "response to heat|response to oxidative stress|response to desiccation|cellular response to stress|response to stress",
+                                    stress_canonical_names, vst_mat, "Stress", condition_label)
 
   selection_log <- bind_rows(gal_sel$log_row, ncr_sel$log_row, stress_sel$log_row)
+  cat("\nRegulon gene selection —", condition_label, "\n")
+  print(selection_log)
+  write_csv(selection_log, file.path(DIR_TABLES, paste0("regulon_selection_", condition_label, ".csv")))
 
   # cap gene count so plot height can never blow past ggsave's 50in limit
   gal_sel$genes    <- cap_focus_genes(gal_sel$genes,    dge_combined)
   ncr_sel$genes    <- cap_focus_genes(ncr_sel$genes,    dge_combined)
   stress_sel$genes <- cap_focus_genes(stress_sel$genes, dge_combined)
 
-  fig2C_GAL    <- plot_focus_regulon(gal_sel$genes,    "GAL regulon",  vst_mat, sample_meta, clade_colors, condition_label)
-  fig2C_NCR    <- plot_focus_regulon(ncr_sel$genes,    "NCR regulon",  vst_mat, sample_meta, clade_colors, condition_label)
-  fig2C_Stress <- plot_focus_regulon(stress_sel$genes, "Stress (ESR) regulon", vst_mat, sample_meta, clade_colors, condition_label)
+  fig2C_GAL    <- plot_focus_regulon(gal_sel$genes,    "GAL regulon",
+                                     vst_mat, sample_meta, clade_colors, condition_label)
+  fig2C_NCR    <- plot_focus_regulon(ncr_sel$genes,    "NCR regulon",
+                                     vst_mat, sample_meta, clade_colors, condition_label)
+  fig2C_Stress <- plot_focus_regulon(stress_sel$genes, "Stress (ESR) regulon",
+                                     vst_mat, sample_meta, clade_colors, condition_label)
 
-  if (!is.null(fig2C_GAL))    safe_ggsave(file.path(OUT_DIR, paste0("FigS_Fig2C_GAL_",    condition_label, ".tiff")), fig2C_GAL,    width = 7.5, height = 2.6 * ceiling(length(gal_sel$genes)/3), units = "in", dpi = 600, device = "tiff", compression = "lzw")
-  if (!is.null(fig2C_NCR))    safe_ggsave(file.path(OUT_DIR, paste0("FigS_Fig2C_NCR_",    condition_label, ".tiff")), fig2C_NCR,    width = 7.5, height = 2.6 * ceiling(length(ncr_sel$genes)/3), units = "in", dpi = 600, device = "tiff", compression = "lzw")
-  if (!is.null(fig2C_Stress)) safe_ggsave(file.path(OUT_DIR, paste0("FigS_Fig2C_Stress_", condition_label, ".tiff")), fig2C_Stress, width = 7.5, height = 2.6 * ceiling(length(stress_sel$genes)/3), units = "in", dpi = 600, device = "tiff", compression = "lzw")
+  if (!is.null(fig2C_GAL)) {
+    print(fig2C_GAL)
+    safe_ggsave(file.path(DIR_REGULON, paste0("GAL_", condition_label, ".tiff")),
+                fig2C_GAL, width = 7.5, height = 2.6 * ceiling(length(gal_sel$genes) / 3),
+                units = "in", dpi = 600, device = "tiff", compression = "lzw")
+  }
+  if (!is.null(fig2C_NCR)) {
+    print(fig2C_NCR)
+    safe_ggsave(file.path(DIR_REGULON, paste0("NCR_", condition_label, ".tiff")),
+                fig2C_NCR, width = 7.5, height = 2.6 * ceiling(length(ncr_sel$genes) / 3),
+                units = "in", dpi = 600, device = "tiff", compression = "lzw")
+  }
+  if (!is.null(fig2C_Stress)) {
+    print(fig2C_Stress)
+    safe_ggsave(file.path(DIR_REGULON, paste0("Stress_", condition_label, ".tiff")),
+                fig2C_Stress, width = 7.5, height = 2.6 * ceiling(length(stress_sel$genes) / 3),
+                units = "in", dpi = 600, device = "tiff", compression = "lzw")
+  }
 
+  # ---- Panel C2: per-clade volcano + GO dotplot ────────────────────────
+  # Clade names contain spaces, dots and slashes — sanitize for filenames.
+  clean_filename <- function(x) {
+    x %>% str_replace_all("[^A-Za-z0-9_]", "_") %>%
+      str_replace_all("_+", "_") %>% str_remove("^_|_$")
+  }
 
-  # ---- Panel C2: per-clade volcano + GO dotplot, ALL conditions ────────
   clade_deg_counts <- if (nrow(dge_combined) > 0) {
-    dge_combined %>% filter(direction != "NS") %>% dplyr::count(clade, name = "n_deg") %>% arrange(desc(n_deg))
+    dge_combined %>% filter(direction != "NS") %>%
+      dplyr::count(clade, name = "n_deg") %>% arrange(desc(n_deg))
   } else data.frame(clade = character(), n_deg = integer())
 
   clades_with_degs <- clade_deg_counts %>% filter(n_deg >= 5) %>% pull(clade)
 
   if (length(clades_with_degs) > 0) {
-    # tiff() cannot hold multiple pages, so %02d writes one numbered TIFF per clade
-    tiff(file.path(OUT_DIR, paste0("FigS_Fig2C2_volcano_ALL_", condition_label, "_%02d.tiff")), width = 6, height = 5, units = "in", res = 600, compression = "lzw")
-    for (cl in clades_with_degs) print(plot_volcano(dge_results[[cl]], clade_label = cl))
-    dev.off()
 
-    tiff(file.path(OUT_DIR, paste0("FigS_Fig2C2_GO_dotplot_ALL_", condition_label, "_%02d.tiff")), width = 6, height = 5, units = "in", res = 600, compression = "lzw")
+    # One file per clade, named by clade
     for (cl in clades_with_degs) {
-      g <- plot_go_dotplot(ora_results[[cl]]$up, ora_results[[cl]]$down, clade_label = cl)
-      if (!is.null(g)) grid::grid.draw(g)
-    }
-    dev.off()
+      fn <- clean_filename(cl)
 
-        top_clades <- head(clade_deg_counts$clade, 3)
-    for (cl in top_clades) {
       v <- plot_volcano(dge_results[[cl]], clade_label = cl)
-      print(v)
-      safe_ggsave(file.path(OUT_DIR, paste0("FigS_Fig2C2_volcano_", cl, "_", condition_label, ".tiff")), v, width = 6, height = 5, units = "in", dpi = 600, device = "tiff", compression = "lzw")
+      safe_ggsave(file.path(DIR_VOLCANO, paste0("volcano_", fn, "_", condition_label, ".tiff")),
+                  v, width = 6, height = 5, units = "in", dpi = 600,
+                  device = "tiff", compression = "lzw")
 
+      g <- plot_go_dotplot(ora_results[[cl]]$up, ora_results[[cl]]$down, clade_label = cl)
+      if (!is.null(g)) {
+        safe_ggsave(file.path(DIR_GOTERM, paste0("GOterm_", fn, "_", condition_label, ".tiff")),
+                    g, width = 6, height = 5, units = "in", dpi = 600,
+                    device = "tiff", compression = "lzw")
+      }
+    }
+
+    # Top 3 clades by DEG count -> also printed inline
+    top_clades <- head(clade_deg_counts$clade, 3)
+    for (cl in top_clades) {
+      print(plot_volcano(dge_results[[cl]], clade_label = cl))
       g <- plot_go_dotplot(ora_results[[cl]]$up, ora_results[[cl]]$down, clade_label = cl)
       if (!is.null(g)) {
         grid::grid.newpage()
         grid::grid.draw(g)
-        safe_ggsave(file.path(OUT_DIR, paste0("FigS_Fig2C2_GO_", cl, "_", condition_label, ".tiff")), g, width = 6, height = 5, units = "in", dpi = 600, device = "tiff", compression = "lzw")
       }
     }
-  } else {
-    cat("Skipping Panel C2 for", condition_label, "- no clade has >=5 DEGs\n")
-  }
 
+    # ---- Combined grids: all clades in one figure, 4 per row ───────────
+        # ---- Combined grids: all clades in one figure, 4 per row ───────────
+    n_panels <- length(clades_with_degs)
+    grid_h   <- 2.6 * ceiling(n_panels / 4)
+
+    v_grid <- plot_volcano_grid(dge_combined, condition_label, ncol = 4)
+    if (!is.null(v_grid)) {
+      print(v_grid)
+      safe_ggsave(file.path(DIR_VOLCANO,
+                            paste0("volcano_GRID_", condition_label, ".png")),
+                  v_grid, width = 11, height = grid_h, units = "in",
+                  dpi = 600, device = "png", limitsize = FALSE)
+    }
+
+    g_grid <- plot_go_grid(ora_combined, condition_label, ncol = 4)
+    if (!is.null(g_grid)) {
+      print(g_grid)
+      safe_ggsave(file.path(DIR_GOTERM,
+                            paste0("GOterm_GRID_", condition_label, ".png")),
+                  g_grid, width = 12, height = grid_h * 1.2, units = "in",
+                  dpi = 600, device = "png", limitsize = FALSE)
+    }
+}
   # ---- return value MUST be the last expression in the function ────────
   list(
-    condition = condition_label,
-    n_strains = ncol(raw_counts_mat),
+    condition        = condition_label,
+    n_strains        = ncol(raw_counts_mat),
     n_genes_detected = nrow(raw_counts_mat),
-    n_clades_tested = length(dge_results),
-    n_degs = length(degs_in_matrix),
-    dge_combined = dge_combined,
-    selection_log = selection_log
+    n_clades_tested  = length(dge_results),
+    n_degs           = length(degs_in_matrix),
+    dge_combined     = dge_combined,
+    selection_log    = selection_log,
+    clade_summary    = clade_summary
   )
 }
 ```
@@ -587,6 +898,8 @@ condition_results <- imap(CONDITIONS, function(cfg, label) {
 selection_log_all <- bind_rows(lapply(condition_results, `[[`, "selection_log"))
 write_csv(selection_log_all, file.path(OUT_DIR, "FigS_Fig2_regulon_selection_log.csv"))
 print(selection_log_all)
+
+getwd()
 ```
 
 ```{r}

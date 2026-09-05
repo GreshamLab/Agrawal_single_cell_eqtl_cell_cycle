@@ -1,0 +1,1042 @@
+---
+title: "1. new_try_for_cell_cycle_assignment"
+output: html_document
+author: Akriti
+---
+
+
+# Cell cycle time assignment
+
+M-G1: 7 to 22.5 minutes
+G1:   22.5 to 39.5 minutes
+S:    39.5 to 56.5 minutes
+G2:   56.5 to 77.5 minutes
+M:    77.5 to 95 minutes
+
+
+
+#How does program 1 and program 0 differs. 
+Program captures gene in the same transcriptional landscape - in our case genes that are cyclic. Each program captures cells into the different transcriptional landscape. This is useful if we have multiple factors to impact cellular transcriptional. This is different from cell cycle phase assignment. So phase assignment uses all the genes assigned as cell cycle phase but transcriptional program assignment looks at every gene and does an unsupervised co-expression clustering to cluster the cells with same transcriptional signature. 
+```{r load_csv}
+# ── Step 1: Load CSV ───────────────────────────────────────────────────────────
+obs <- read.csv(
+    '/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.1/continuous_time_trajectory/data/cc_time_all_genes_spellman_annotated.csv',
+    row.names=1
+)
+obs$CC <- factor(obs$CC, levels=c('M-G1', 'G1', 'S', 'G2', 'M'))
+
+# Check average time per phase for each program - since 
+obs %>%
+  group_by(CC) %>%
+  summarise(
+    mean_prog = mean(cc_time),
+    n_cells = n()
+  )
+
+library(ggplot2)
+ggplot(obs, aes(x = cc_time)) +
+  geom_histogram(bins = 88, fill = "steelblue") +
+  facet_wrap(~CC, ncol = 1, scales = "free_y") +
+  scale_x_continuous(breaks = seq(0, 88, 11)) +
+  theme_classic()
+```
+
+```{r}
+library(Seurat)
+library(tidyverse)
+library(broom)
+
+select <- dplyr::select
+filter <- dplyr::filter
+```
+
+
+```{r}
+# ── Load raw 10X counts ────────────────────────────────────────────────────
+expression_data <- Read10X(
+  data.dir = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.1/alignment/output_of_alignment_YPD1_with_clean_gtf/run_count/outs/filtered_feature_bc_matrix/"
+)
+
+Na_va_data <- CreateSeuratObject(
+  counts = expression_data, 
+  project = "natural variants",
+  min.cells = 3, min.features = 200
+)
+
+cat("Initial Seurat object:\n")
+print(dim(Na_va_data))
+cat("Cells:", ncol(Na_va_data), "\n")
+cat("Genes:", nrow(Na_va_data), "\n")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STRAIN ASSIGNMENT: Load demuxlet, add to metadata
+# ══════════════════════════════════════════════════════════════════════════════
+
+demuxlet <- read.delim(
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.1/demuxlet/merged_demuxlet_output_YPD.tsv"
+)
+
+# Convert columns to numeric
+demuxlet <- demuxlet %>%
+  mutate(
+    BEST.LLK = as.numeric(BEST.LLK),
+    NUM.READS = as.numeric(NUM.READS),
+    NUM.SNPS = as.numeric(NUM.SNPS),
+    NEXT.LLK = as.numeric(NEXT.LLK),
+    DIFF.LLK.BEST.NEXT = as.numeric(DIFF.LLK.BEST.NEXT),
+    BEST.POSTERIOR = as.numeric(BEST.POSTERIOR),
+    SNG.POSTERIOR = as.numeric(SNG.POSTERIOR),
+    SNG.BEST.LLK = as.numeric(SNG.BEST.LLK),
+    SNG.NEXT.LLK = as.numeric(SNG.NEXT.LLK),
+    SNG.ONLY.POSTERIOR = as.numeric(SNG.ONLY.POSTERIOR),
+    DBL.BEST.LLK = as.numeric(DBL.BEST.LLK),
+    DIFF.LLK.SNG.DBL = as.numeric(DIFF.LLK.SNG.DBL)
+  ) %>%
+  na.omit()
+
+# Add to Seurat metadata
+metadata_to_add <- demuxlet[match(colnames(Na_va_data), demuxlet$BARCODE), ]
+Na_va_data <- AddMetaData(Na_va_data, metadata = metadata_to_add)
+
+cat("Demuxlet added to metadata\n")
+cat("Head of metadata:\n")
+print(head(Na_va_data@meta.data))
+```
+#Important to add filtering strains that have less than 20 cells because they were confounding the r2 and loess curve. too sparse and curve won't fit at all resulting in na values for r2 happened with strains with less than 10 cells and if it is more than 10 cells it is fitting too well with the data/overfitting but too little cells is essentially noise? 
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# STRAIN QC: Remove DGY3, problematic droplets (AMB, DBL), and low-cell strains
+# ══════════════════════════════════════════════════════════════════════════════
+
+cat("BEFORE FILTERING:\n")
+cat("  Strains:", length(unique(Na_va_data@meta.data$SNG.BEST.GUESS)), "\n")
+cat("  Cells:", ncol(Na_va_data), "\n\n")
+
+# ── Remove DGY3 and AMB/DBL droplets ────────────────────────────────────────
+Na_va_data_filtered <- subset(
+  Na_va_data,
+  subset = SNG.BEST.GUESS != "DGY3" & !(DROPLET.TYPE %in% c("AMB", "DBL"))
+)
+
+cat("AFTER removing DGY3 + AMB + DBL:\n")
+cat("  Strains:", length(unique(Na_va_data_filtered@meta.data$SNG.BEST.GUESS)), "\n")
+cat("  Cells:", ncol(Na_va_data_filtered), "\n\n")
+```
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# CELL CYCLE TIME: Load precomputed pseudotime and phase assignments
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Load cell cycle time assignments from inferelator
+cc_time <- read.csv(
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.1/continuous_time_trajectory/data/cc_time_all_genes_spellman_annotated.csv",
+  row.names = 1
+)
+
+# Factor the CC column with correct biological order
+cc_time$CC <- factor(cc_time$CC, levels = c('M-G1', 'G1', 'S', 'G2', 'M'))
+
+cat("Cell cycle time loaded\n")
+cat("Cells with cc_time:", nrow(cc_time), "\n")
+cat("CC factor levels:", levels(cc_time$CC), "\n")
+
+# Find common cells between cc_time and Seurat
+common_cells <- intersect(rownames(cc_time), colnames(Na_va_data_filtered))
+cat("Common cells:", length(common_cells), "\n")
+
+# Add to Seurat metadata
+Na_va_data_filtered <- AddMetaData(
+  Na_va_data_filtered,
+  cc_time[common_cells, c('CC', 'cc_time')]
+)
+
+# Ensure CC is a factor with correct levels in the Seurat object
+Na_va_data_filtered@meta.data$CC <- factor(
+  Na_va_data_filtered@meta.data$CC,
+  levels = c('M-G1', 'G1', 'S', 'G2', 'M')
+)
+
+cat("Cell cycle time added to metadata\n")
+cat("CC levels in Seurat:", levels(Na_va_data_filtered@meta.data$CC), "\n")
+cat("Cells with cc_time in Seurat:", sum(!is.na(Na_va_data_filtered@meta.data$cc_time)), "\n")
+```
+
+
+```{r}
+# Increase the future package memory limit to 3 GiB
+options(future.globals.maxSize = 9 * 1024^3)
+###Normalization using log normalization and scaling of the data
+Na_va_data_processed <- NormalizeData(Na_va_data_filtered)
+Na_va_data_processed <- FindVariableFeatures(Na_va_data_processed, selection.method = "vst", nfeatures = 2000)
+# Scale the data
+all.genes <- rownames(Na_va_data_processed)
+Na_va_data_processed <- ScaleData(Na_va_data_processed, features = all.genes)
+
+# Perform linear dimensional reduction (PCA)
+Na_va_data_processed <- RunPCA(Na_va_data_processed, features = VariableFeatures(object = Na_va_data_processed))
+
+
+#normalize
+Na_va_data_processed_clustered_for_Cell_cycle <- FindNeighbors(Na_va_data_processed, dims = 1:5)
+Na_va_data_processed_clustered_for_Cell_cycle  <- FindClusters(Na_va_data_processed_clustered_for_Cell_cycle , resolution = 0.5)
+
+#run umap
+Na_va_data_processed_clustered_for_Cell_cycle  <- RunUMAP(Na_va_data_processed_clustered_for_Cell_cycle, dims = 1:5)
+```
+
+```{r}
+# ── AFTER FILTERING plots ──────────────────────────────────────────────────────
+
+# Panel A: cell cycle phase
+DimPlot(Na_va_data_processed_clustered_for_Cell_cycle, 
+        reduction="umap", 
+        group.by="CC",
+        label=TRUE, label.size=5, repel=TRUE) +
+  scale_color_manual(values=brewer.pal(5, "Set2")) +
+  ggtitle("After filtering: Cell cycle phase")
+
+# DimPlot(Na_va_data_processed_clustered_for_Cell_cycle, 
+#         reduction="pca", 
+#         group.by="CC",
+#         label=TRUE, label.size=5, repel=TRUE) +
+#   scale_color_manual(values=brewer.pal(5, "Set2")) +
+#   ggtitle("After filtering PCA: Cell cycle phase")
+
+# Panel B: continuous time
+# Panel B with phase labels overlaid
+centroids <- Na_va_data_processed_clustered_for_Cell_cycle@reductions$umap@cell.embeddings %>%
+  as.data.frame() %>%
+  mutate(CC = Na_va_data_processed_clustered_for_Cell_cycle@meta.data$CC) %>%
+  group_by(CC) %>%
+  summarise(umap_1=mean(umap_1), umap_2=mean(umap_2))
+
+FeaturePlot(Na_va_data_processed_clustered_for_Cell_cycle,
+            features="cc_time",
+            reduction="umap") +
+  scale_color_viridis_c(option="magma", direction=-1) +
+  ggtitle("After filtering: Cell cycle time with phase labels") +
+  geom_label(data=centroids,
+             aes(x=umap_1, y=umap_2, label=CC),
+             size=5, alpha=0.8, inherit.aes=FALSE)
+```
+# Step 2. 
+
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# LOAD SPELLMAN CELL CYCLE GENES (800 genes from the original paper)
+# ══════════════════════════════════════════════════════════════════════════════
+
+cell_cycle_genes <- read.delim(
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.1/cell_cycle_fastlmm/data/CellCycle_Genes.tsv"
+)
+
+spellman_genes <- cell_cycle_genes %>%
+  distinct(Gene) %>%
+  pull(Gene)
+
+cat("Spellman genes loaded:", length(spellman_genes), "\n")
+```
+
+1. Subset to keep the 800 cell cycle genes as assigned in the Spellman paper
+
+```{r}
+# ── Extract normalized counts and metadata ──────────────────────────────────
+norm_counts <- GetAssayData(Na_va_data_processed_clustered_for_Cell_cycle, layer = "data")  # log-normalized
+
+# Build metadata dataframe
+meta_slim <- Na_va_data_processed_clustered_for_Cell_cycle@meta.data %>%
+  select(SNG.BEST.GUESS, cc_time, CC) %>%
+  rownames_to_column("cell") %>%
+  rename(strain = SNG.BEST.GUESS, pseudotime = cc_time) %>%
+  filter(!is.na(strain), !is.na(pseudotime))
+
+cat("Cells with strain and pseudotime info:", nrow(meta_slim), "\n")
+
+# ── Subset to Spellman genes present in data ────────────────────────────────
+spellman_in_data <- spellman_genes[spellman_genes %in% rownames(norm_counts)]
+cat("Spellman genes in dataset:", length(spellman_in_data), "out of", length(spellman_genes), "\n")
+
+norm_counts_spellman <- norm_counts[spellman_in_data, ]
+
+# ── Build long format dataframe ─────────────────────────────────────────────
+counts_long <- as.data.frame(t(as.matrix(norm_counts_spellman))) %>%
+  rownames_to_column("cell") %>%
+  pivot_longer(-cell, names_to = "gene", values_to = "expr") %>%
+  left_join(meta_slim, by = "cell") %>%
+  filter(!is.na(pseudotime), !is.na(strain))
+
+cat("\nLong format data prepared:\n")
+cat("Rows:", nrow(counts_long), "\n")
+cat("Unique genes:", n_distinct(counts_long$gene), "\n")
+cat("Unique strains:", n_distinct(counts_long$strain), "\n")
+cat("Pseudotime range:", round(min(counts_long$pseudotime), 2), "to", 
+    round(max(counts_long$pseudotime), 2), "minutes\n")
+```
+
+
+2. For each gene per strain, fit a Loess curve across pseudotime to smooth noisy single cell expression into a clean continuous curve
+
+#create function for loess fit
+```{r}
+fit_loess_r2 <- function(expr, pseudotime, span = 0.3) {
+  n <- length(expr)
+  # Not enough distinct timepoints to fit anything
+  if (length(unique(pseudotime)) < 10) return(c(r2 = NA_real_, reason = 1))
+  # Gene is constant (usually all-zero) in this strain — R² undefined, not a fit failure
+  if (sd(expr) == 0) return(c(r2 = NA_real_, reason = 2))
+
+  # Widen span so each local fit has >= 6 points for degree = 2
+  span_use <- max(span, 6 / n)
+
+  fit <- tryCatch(
+    suppressWarnings(loess(expr ~ pseudotime, span = span_use, degree = 2)),
+    error = function(e) NULL
+  )
+  if (is.null(fit)) return(c(r2 = NA_real_, reason = 3))
+
+  ss_res <- sum(fit$residuals^2)
+  ss_tot <- sum((expr - mean(expr))^2)
+  c(r2 = 1 - ss_res / ss_tot, reason = 0)
+}
+
+total_combos  <- counts_long %>% distinct(gene, strain) %>% nrow()
+combo_counter <- 0L
+
+fit_tracked <- function(expr, pseudotime, span = 0.3) {
+  combo_counter <<- combo_counter + 1L
+  if (combo_counter %% 500 == 0)
+    cat("Progress:", combo_counter, "/", total_combos, "\n")
+  fit_loess_r2(expr, pseudotime, span)
+}
+
+cat("Fitting loess for", total_combos, "gene-strain combinations...\n")
+```
+
+Question:  Which genes have structured expression along pseudotime - No need to split per strain, can be done on pooled
+```{r}
+r2_global <- counts_long %>%
+  group_by(gene) %>%
+  summarise(r2_pooled = fit_loess_r2(expr, pseudotime)["r2"],
+            n_cells   = n(), .groups = "drop") %>%
+  arrange(desc(r2_pooled))
+
+print(head(r2_global %>% mutate(name = to_name(gene)), 20))
+```
+
+
+
+Question: Does that structure differ by genotype? 
+
+Steps:
+1. Calculate r2 per strain
+
+2. then compute sd_z because sd of r2 is not directly comparable as the no. of cells per strain vary and r2 is really big for strains with less number of cells
+
+
+3. Calculate R² for each Loess fit relative to mean expression per gene per strain. This tells us whether a gene has consistent structured expression across pseudotime or is flat and noisy within a strain
+
+
+#Please note
+
+R2 is NA when very few cells per strain i.e., less than 10 cells per strain
+annd 
+R2 is NA when no cells are expressing that gene, i.e., that gene has 0 expression in all cells
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# FIT LOESS PER GENE × STRAIN COMBINATION
+# ══════════════════════════════════════════════════════════════════════════════
+
+combo_counter <- 0L          # reset every time this chunk runs
+total_combos  <- counts_long %>% distinct(gene, strain) %>% nrow()
+
+strain_r2 <- counts_long %>%
+  group_by(gene, strain) %>%
+  summarise(
+    res           = list(fit_tracked(expr, pseudotime)),
+    n_cells       = n(),
+    pct_expressed = mean(expr > 0), # a proportion measure, is this gene expressed or not 
+    mean_expr     = mean(expr), #abudance, how much is this gene present
+    .groups = "drop"
+  ) %>%
+  mutate(
+    r2_strain  = map_dbl(res, "r2"),
+    fit_status = factor(map_dbl(res, "reason"),
+                        levels = 0:3,
+                        labels = c("ok", "too_few_timepoints",
+                                   "constant_expression", "loess_error"))
+  ) %>%
+  select(-res)
+
+cat("Done.\n\n")
+
+# ── Checks ───────────────────────────────────────────────────────────────────
+cat("Fit outcomes:\n")
+print(table(strain_r2$fit_status))
+
+cat("\nCell counts by outcome:\n")
+print(strain_r2 %>%
+        group_by(fit_status) %>%
+        summarise(n = n(),
+                  median_cells = median(n_cells),
+                  median_pct_expressed = round(median(pct_expressed), 3),
+                  .groups = "drop"))
+
+cat("\nR² distribution (successful fits):\n")
+print(summary(strain_r2$r2_strain[strain_r2$fit_status == "ok"]))
+```
+
+4. Calculate mean and SD of R² per gene across strains. High mean R² means the gene has consistent structured expression across strains. High SD of R² means the gene has structured expression in some strains but not others
+
+# Yes — na.rm = TRUE means "remove NAs before computing.
+
+
+meanR²	SD	    what strains agree/disagree about
+high	  low	      all strains have strong structure
+low	    low	      no strain has structure
+high	  high	    most have strong structure, some don't
+low	    high	    mostly flat, a few strains show structure
+
+
+
+Important for me :
+meanR²	SD	    what strains agree/disagree about
+high	  low	      all strains have strong structure
+high	  high	    most have strong structure, some don't
+
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# CALCULATE MEAN AND SD OF R² PER GENE ACROSS STRAINS
+# ══════════════════════════════════════════════════════════════════════════════
+
+gene_summary <- strain_r2 %>%
+  group_by(gene) %>%
+  summarise(
+    # what is mean, sd, median of r2 for this gene among all strains
+    n_strains_fit    = sum(!is.na(r2_strain)),
+    mean_r2_strain   = mean(r2_strain,   na.rm = TRUE),
+    sd_r2_strain     = sd(r2_strain,     na.rm = TRUE),
+    median_r2_strain = median(r2_strain, na.rm = TRUE),
+
+    # is r2 na for some strains for this gene
+    n_strains_total   = n(),
+    n_not_detected    = sum(fit_status == "constant_expression"), #gene is not expressed in number of strains
+    n_too_few_cells   = sum(fit_status == "too_few_timepoints"), 
+    pct_strains_detected = 1 - n_not_detected / n_strains_total,
+
+    # how many cells per strain show expression of this gene
+    mean_pct_expressed = mean(pct_expressed),
+    sd_pct_expressed   = sd(pct_expressed),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(sd_r2_strain))
+
+# ── Checks: do the two NA types behave differently? ──────────────────────────
+cat("Genes never detected in >=1 strain:", sum(gene_summary$n_not_detected > 0), "\n")
+cat("Genes losing >=1 strain to low cells:", sum(gene_summary$n_too_few_cells > 0), "\n\n")
+
+cat("Detection across strains:\n")
+print(summary(gene_summary$pct_strains_detected))
+
+cat("\nGenes with the most on/off variation between strains:\n")
+print(gene_summary %>%
+        arrange(pct_strains_detected) %>%
+        select(gene, pct_strains_detected, n_not_detected,
+               n_strains_fit, mean_r2_strain, sd_r2_strain) %>%
+        head(15))
+```
+A gene has to be detetcted in more than 90% of strains for it to be consideered in subsequent steps
+
+The reference set ref is the top 50 genes by SD when you require detection in ≥90% of strains. Each row then re-applies a different cutoff, re-ranks, takes the new top 50, and counts how many appear in ref.
+
+Moving the cutoff from 50% to 95% changes the gene pool by 57 genes, and changes the top 50 by one gene.
+```{r}
+cutoffs <- c(0.5, 0.6, 0.7, 0.8, 0.9, 0.95)
+
+ref <- gene_summary %>% filter(pct_strains_detected >= 0.9) %>%
+  arrange(desc(sd_r2_strain)) %>% head(50) %>% pull(gene)
+
+map_dfr(cutoffs, function(cut) {
+  g <- gene_summary %>% filter(pct_strains_detected >= cut)
+  top <- g %>% arrange(desc(sd_r2_strain)) %>% head(50) %>% pull(gene)
+  tibble(cutoff = cut,
+         n_genes = nrow(g),
+         overlap_top50 = length(intersect(top, ref)))
+}) %>% print()
+```
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# FILTER: genes detected in >= 90% of strains
+#   Not to change the ranking — the sweep above showed the top 50 shifts by at
+#   most one gene between cutoffs of 0.5 and 0.95. The point is to drop genes
+#   whose SD rests on a handful of strains and isn't estimable either way.
+# ══════════════════════════════════════════════════════════════════════════════
+DETECT_CUTOFF <- 0.90
+
+gene_summary_filt <- gene_summary %>%
+  filter(pct_strains_detected >= DETECT_CUTOFF)
+
+cat("Genes before filter:", nrow(gene_summary), "\n")
+cat("Genes after  filter:", nrow(gene_summary_filt), "\n")
+cat("Removed:", nrow(gene_summary) - nrow(gene_summary_filt), "\n\n")
+
+# What got removed — should be the thinly-detected subtelomeric set
+cat("Strains contributing, before vs after:\n")
+print(bind_rows(
+  gene_summary      %>% summarise(set = "before", min = min(n_strains_fit),
+                                  median = median(n_strains_fit)),
+  gene_summary_filt %>% summarise(set = "after",  min = min(n_strains_fit),
+                                  median = median(n_strains_fit))
+))
+
+# Confirm the floor from the subsampling check is cleared
+cat("\nGenes still below n_strains_fit = 30:",
+    sum(gene_summary_filt$n_strains_fit < 30), "\n")
+```
+Plotting
+# ══════════════════════════════════════════════════════════════════════════════
+# Cell-cycle expression panels — works for named genes or a gene category
+#   Needs: counts_long (cell, gene, expr, strain, pseudotime, CC)
+#   Optional: orf_to_name_combined for common-name input/labels
+# ══════════════════════════════════════════════════════════════════════════════
+```{r}
+#Default setup
+library(dplyr); library(tidyr); library(ggplot2)
+
+WRAP <- 88; PAD <- 12
+CC_LEVELS  <- c('M-G1','G1','S','G2','M')
+PHASE_FILL <- c('M-G1'='#a8d5a2','G1'='#ffd6a5','S'='#ffadad',
+                'G2'='#bde0fe','M'='#ffc8dd')
+
+# Fixed boundaries — M wraps the 0/88 seam, so it appears as two rects
+PHASE_BOUNDS <- tibble(
+  xmin  = c(0,   7,    22.5, 39.5, 56.5, 77.5),
+  xmax  = c(7,   22.5, 39.5, 56.5, 77.5, WRAP),
+  phase = factor(c('M','M-G1','G1','S','G2','M'), levels = CC_LEVELS)
+)
+PHASE_LABS <- tibble(
+  x     = c(14.75, 31, 48, 67, 83),
+  phase = factor(CC_LEVELS[c(1,2,3,4,5)][c(1,2,3,4,5)], levels = CC_LEVELS)
+) %>% mutate(phase = factor(c('M-G1','G1','S','G2','M'), levels = CC_LEVELS))
+
+# ── Common name <-> ORF, tolerant of either being passed in ──────────────────
+to_orf <- function(x, lookup = orf_to_name_combined) {
+  hit <- names(lookup)[match(x, unname(lookup))]
+  ifelse(is.na(hit), x, hit)          # already an ORF, or unmatched: pass through
+}
+to_name <- function(x, lookup = orf_to_name_combined) {
+  ifelse(x %in% names(lookup), unname(lookup[x]), x)
+}
+
+# ── Wrap-aware LOESS: pad both ends so the curve is continuous at 0/88 ───────
+fit_wrapped <- function(df, keys = NULL, span = 0.3, min_n = 20, verbose = FALSE) {
+  empty <- data.frame(time = numeric(0), y = numeric(0))
+  if (nrow(df) < min_n || sd(df$y) == 0) {
+    if (verbose) cat(sprintf("  SKIP %-28s n=%d\n",
+                             paste(unlist(keys), collapse = "/"), nrow(df)))
+    return(empty)
+  }
+  dw <- bind_rows(
+    df %>% filter(t > WRAP - PAD) %>% mutate(t = t - WRAP),
+    df,
+    df %>% filter(t < PAD)        %>% mutate(t = t + WRAP)
+  )
+  m <- tryCatch(suppressWarnings(
+         loess(y ~ t, data = dw, span = max(span, 6/nrow(df)), degree = 2)),
+       error = function(e) NULL)
+  if (is.null(m)) return(empty)
+  grid <- seq(0, WRAP, by = 0.5)
+  data.frame(time = grid, y = as.numeric(predict(m, data.frame(t = grid))))
+}
+
+#create function
+
+# ══════════════════════════════════════════════════════════════════════════════
+# cc_panel() — one gene or many, global curve and/or per-strain curves
+#   genes : common names ("HHF1") or ORFs ("YBR009C"), any mix
+#   mode  : "global" | "per_strain" | "both"  (both = strains in grey + global black)
+# ══════════════════════════════════════════════════════════════════════════════
+cc_panel <- function(genes,
+                     data   = counts_long,
+                     mode   = c("both", "global", "per_strain"),
+                     min_n  = 20,
+                     span   = 0.3,
+                     ncol   = 3,
+                     title  = NULL,
+                     verbose = TRUE) {
+
+  mode <- match.arg(mode)
+  orfs <- to_orf(genes)
+
+  d <- data %>% filter(gene %in% orfs) %>% mutate(label = to_name(gene))
+  if (nrow(d) == 0) stop("None of those genes are in the data.")
+
+  missing <- setdiff(to_name(orfs), unique(d$label))
+  if (length(missing)) warning("Not found: ", paste(missing, collapse = ", "))
+  if (verbose) cat("Plotting", n_distinct(d$gene), "gene(s),",
+                   n_distinct(d$strain), "strains\n")
+
+  # Keep facet order as the user supplied it
+  d$label <- factor(d$label, levels = to_name(orfs)[to_name(orfs) %in% d$label])
+
+  # Fits use CELLS, not bin means, so sparse minutes aren't over-weighted
+  smooth_global <- d %>%
+    transmute(label, t = pseudotime, y = expr) %>%
+    group_by(label) %>%
+    group_modify(~ fit_wrapped(.x, .y, span = span, min_n = min_n)) %>%
+    ungroup()
+
+  smooth_strain <- if (mode != "global") {
+    d %>%
+      transmute(label, strain, t = pseudotime, y = expr) %>%
+      group_by(label, strain) %>%
+      group_modify(~ fit_wrapped(.x, .y, span = 0.5, min_n = min_n,
+                                 verbose = verbose)) %>%
+      ungroup()
+  } else NULL
+
+  if (!is.null(smooth_strain) && verbose)
+    cat("Strains fit:", n_distinct(smooth_strain$strain),
+        "of", n_distinct(d$strain), "\n")
+
+  # Display-only points, coloured by dominant phase in that minute
+  binned <- d %>%
+    mutate(t = round(pseudotime) %% WRAP) %>%
+    group_by(label, t) %>%
+    summarise(y  = mean(expr),
+              CC = names(sort(table(CC), decreasing = TRUE))[1],
+              .groups = "drop") %>%
+    mutate(CC = factor(CC, levels = CC_LEVELS))
+
+  p <- ggplot() +
+    geom_rect(data = PHASE_BOUNDS,
+              aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf, fill = phase),
+              alpha = 0.20, inherit.aes = FALSE) +
+    scale_fill_manual(values = PHASE_FILL, name = "Phase") +
+    geom_text(data = PHASE_LABS, aes(x = x, y = Inf, label = phase),
+              vjust = 1.6, size = 3, inherit.aes = FALSE)
+
+  if (mode != "global")
+    p <- p + geom_line(data = smooth_strain,
+                       aes(time, y, group = strain),
+                       colour = "grey45", alpha = 0.45, linewidth = 0.35)
+
+  if (mode != "per_strain")
+    p <- p + geom_point(data = binned, aes(t, y, colour = CC), size = 1.1, alpha = 0.8) +
+             scale_colour_manual(values = PHASE_FILL, guide = "none")
+
+  p + geom_line(data = smooth_global, aes(time, y),
+                colour = "black", linewidth = 1) +
+    scale_x_continuous(breaks = seq(0, WRAP, 12)) +
+    coord_cartesian(xlim = c(0, WRAP)) +
+    facet_wrap(~label, scales = "free_y", ncol = ncol) +
+    labs(x = "Time in cell cycle (min)", y = "Normalized expression", title = title) +
+    theme_classic() +
+    theme(strip.text = element_text(size = 9), legend.position = "bottom")
+}
+
+library(AnnotationDbi); library(org.Sc.sgd.db); library(tibble)
+
+CUSTOM_ANNOT_CSV <- "/scratch/aa9679/SingleCell_cerevisiae/Gene_exp_analysis/yeast_custom_annotations.csv"
+
+build_orf_lookup <- function(seurat_obj, custom_csv = CUSTOM_ANNOT_CSV) {
+  custom <- read.csv(custom_csv) %>%
+    filter(!is.na(gene_id), !is.na(gene_name)) %>%
+    distinct(gene_id, gene_name) %>%
+    deframe()
+
+  missing <- rownames(seurat_obj)[!rownames(seurat_obj) %in% names(custom)]
+  cat("Genes missing from custom annotation:", length(missing), "\n")
+
+  sgd <- tryCatch(
+    AnnotationDbi::select(org.Sc.sgd.db, keys = missing,
+                          columns = "GENENAME", keytype = "ORF"),
+    error = function(e) data.frame(ORF = character(), GENENAME = character())
+  ) %>%
+    filter(!is.na(GENENAME)) %>% distinct(ORF, GENENAME) %>% deframe()
+
+  combined <- c(custom, sgd[!names(sgd) %in% names(custom)])
+  cat("Total ORFs with common name:", length(combined), "\n")
+  combined
+}
+
+orf_to_name_combined <- build_orf_lookup(Na_va_data_processed_clustered_for_Cell_cycle)
+
+# ORF -> common name; passes through unchanged if no match
+to_name <- function(x, lookup = orf_to_name_combined) {
+  ifelse(x %in% names(lookup), unname(lookup[x]), x)
+}
+
+# Common name -> ORF, for looking genes up by name later
+to_orf <- function(x, lookup = orf_to_name_combined) {
+  hit <- names(lookup)[match(x, unname(lookup))]
+  ifelse(is.na(hit), x, hit)
+}
+
+# Check both directions
+cat("\nYBR009C ->", to_name("YBR009C"), "| HHF1 ->", to_orf("HHF1"), "\n")
+```
+#Run the function - 
+```{r}
+#Run1
+if (!exists("orf_to_name_combined"))
+  orf_to_name_combined <- build_orf_lookup(Na_va_data_processed_clustered_for_Cell_cycle)
+
+#Run2 ── Individual genes, by common name ───────────────────────────────────────
+cc_panel(c("HHF1", "CTS1"), ncol = 2,
+         title = "Cell-cycle marker genes — global (black) + per strain (grey)")
+
+#Run3 ── Category: highly structured, consistent across strains ─────────────────
+# high mean R² = cycles strongly | low SD = all strains agree
+mean_cut <- quantile(gene_summary_filt$mean_r2_strain, 0.90, na.rm = TRUE)
+sd_cut   <- quantile(gene_summary_filt$sd_r2_strain,   0.50, na.rm = TRUE)
+cat(sprintf("Cutoffs: mean R2 > %.3f, SD R2 < %.3f\n", mean_cut, sd_cut))
+
+structured <- gene_summary_filt %>%
+  filter(mean_r2_strain > mean_cut, sd_r2_strain < sd_cut) %>%
+  arrange(desc(mean_r2_strain))
+
+cat("Genes passing:", nrow(structured), "\n")
+print(structured %>%
+        mutate(name = to_name(gene)) %>%
+        select(name, gene, mean_r2_strain, sd_r2_strain, n_strains_fit) %>%
+        head(12))
+
+cc_panel(head(structured$gene, 6), ncol = 3,
+         title = "Highly structured, strain-consistent cycling genes")
+```
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 3: Per-gene correlation of R² with technical covariates
+#   One correlation per gene, computed ACROSS that gene's strains.
+# ══════════════════════════════════════════════════════════════════════════════
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 3: Distinguish biological signal from technical noise
+#   For each gene, correlate its per-strain R² against three strain properties.
+#   Near-zero correlation = R² is not explained by coverage or dropout.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Per-strain sequencing depth (a strain property — same for every gene)
+depth_by_strain <- Na_va_data_processed_clustered_for_Cell_cycle@meta.data %>%
+  rownames_to_column("cell") %>%
+  select(strain = SNG.BEST.GUESS, nCount_RNA, nFeature_RNA) %>%
+  filter(!is.na(strain)) %>%
+  group_by(strain) %>%
+  summarise(mean_nCount   = mean(nCount_RNA),
+            mean_nFeature = mean(nFeature_RNA),
+            .groups = "drop")
+
+# Restrict to the retained gene set, successful fits only
+r2_with_tech <- strain_r2 %>%
+  filter(fit_status == "ok",
+         gene %in% gene_summary_filt$gene) %>%
+  left_join(depth_by_strain, by = "strain")
+
+cat("Genes entering technical check:", n_distinct(r2_with_tech$gene), "\n")
+cat("Min strains per gene:", min(table(r2_with_tech$gene)), "\n")
+
+# Are cell count and depth measuring the same thing?
+strain_level <- r2_with_tech %>% distinct(strain, n_cells, mean_nCount)
+cat("cor(n_cells, mean_nCount) across strains:",
+    round(cor(strain_level$n_cells, strain_level$mean_nCount), 3), "\n")
+```
+```{r}
+simple_cor <- function(x, y) {
+  ct <- cor.test(x, y)
+  c(r = unname(ct$estimate), p = ct$p.value)
+}
+
+technical_check <- r2_with_tech %>%
+  group_by(gene) %>%
+  summarise(
+    n_strains = n(),
+    c_cells = list(simple_cor(r2_strain, n_cells)),
+    c_pct   = list(simple_cor(r2_strain, pct_expressed)),
+    c_depth = list(simple_cor(r2_strain, mean_nCount)),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    cor_ncells  = map_dbl(c_cells, "r"),  p_ncells  = map_dbl(c_cells, "p"),
+    cor_pctexpr = map_dbl(c_pct,   "r"),  p_pctexpr = map_dbl(c_pct,   "p"),
+    cor_depth   = map_dbl(c_depth, "r"),  p_depth   = map_dbl(c_depth, "p")
+  ) %>%
+  select(-c_cells, -c_pct, -c_depth) %>%
+  mutate(
+    fdr_ncells  = p.adjust(p_ncells,  method = "BH"),
+    fdr_pctexpr = p.adjust(p_pctexpr, method = "BH"),
+    fdr_depth   = p.adjust(p_depth,   method = "BH")
+  )
+
+# ── Checks: is each correlation centred on zero? ─────────────────────────────
+cat("Median correlation per covariate (near 0 = not technically driven):\n")
+cat("  R2 vs n_cells:      ", round(median(technical_check$cor_ncells),  3), "\n")
+cat("  R2 vs pct_expressed:", round(median(technical_check$cor_pctexpr), 3), "\n")
+cat("  R2 vs depth:        ", round(median(technical_check$cor_depth),   3), "\n\n")
+
+cat("Genes with FDR < 0.05:\n")
+cat("  n_cells:      ", sum(technical_check$fdr_ncells  < 0.05), "\n")
+cat("  pct_expressed:", sum(technical_check$fdr_pctexpr < 0.05), "\n")
+cat("  depth:        ", sum(technical_check$fdr_depth   < 0.05), "\n")
+```
+```{r}
+r2_with_tech %>%
+  ggplot(aes(n_cells, r2_strain)) +
+  geom_point(alpha = 0.05, size = 0.4) +
+  geom_smooth(method = "loess", color = "firebrick", se = TRUE) +
+  scale_x_log10() +
+  labs(x = "Cells per strain (log10)", y = "R²",
+       title = "Where does R² stop depending on cell count?") +
+  theme_classic()
+
+r2_with_tech %>%
+  mutate(bin = cut(n_cells, c(0, 30, 50, 75, 100, 150, 250, 400, Inf), right = FALSE)) %>%
+  group_by(bin) %>%
+  summarise(n_fits = n(), median_r2 = round(median(r2_strain), 3), .groups = "drop") %>%
+  print()
+```
+LOESS R² is not comparable across strains of unequal size in this dataset.
+
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 3: Technical assessment (diagnostic, not a filter)
+#   The confound is systematic, not gene-specific — 408/416 genes show it.
+#   So this motivates the permutation calibration rather than an exclusion list.
+# ══════════════════════════════════════════════════════════════════════════════
+
+cat("Median per-gene correlation of R² with:\n")
+cat("  cells per strain :", round(median(technical_check$cor_ncells),  3), "\n")
+cat("  detection rate   :", round(median(technical_check$cor_pctexpr), 3), "\n")
+cat("  sequencing depth :", round(median(technical_check$cor_depth),   3), "\n")
+cat("\nGenes affected (FDR < 0.05):",
+    sum(technical_check$fdr_ncells < 0.05), "of", nrow(technical_check), "\n")
+cat("→ Systematic, not gene-specific. Raw SD of R² is not interpretable;\n")
+cat("  ranking uses sd_z from the strain-label permutation, which preserves\n")
+cat("  per-strain cell counts and therefore absorbs this effect.\n")
+```
+
+
+## R2 it looks like it is heavily biased based on cell count. Low cell count gives high r2. This tells me that LOESS R² is not comparable across strains of unequal size in this dataset. so to rectify using direct raw sd of r2 
+
+
+Idea: if genotype had no effect at all, but the strains still had exactly those cell counts, what SD would I get?
+
+One null SD per gene per permutation. Repeat 20 times → 20 null SDs per gene.
+
+This is constructed to know what is the null spread/ null sd per gene i.e.,:
+
+
+Per gene. The null distribution is over genes, not over gene × strain.
+
+Follow one permutation for one gene, PCL9:
+
+Shuffle the cell→strain map. Each fake strain has the same size as the real one it replaced.
+Fit loess separately in each fake strain → ~79 R² values. (This is per gene per strain — but it's an intermediate, not the thing you keep.)
+Collapse those 79 into one number: sd(r2) = the spread. Say 0.148.
+
+That single number is one draw from PCL9's null distribution. Repeat 20 times and PCL9 has 20 null SDs: 0.148, 0.155, 0.151, 0.149, …
+
+Those 20 numbers are the distribution. Their mean becomes sd_null_mean (0.152), their spread becomes sd_null_sd.
+
+For PCL9: observed 0.189, null mean 0.152, so 0.152 is the part explained by strain sizes and noise. The excess is 0.037. Divided by how much the null itself wobbles, that's z = 3.99 — the excess is four times larger than the run-to-run variability of the null, so it's not chance.
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PERMUTATION NULL
+#   LOESS R² is inflated in small strains (median cor(R², n_cells) = -0.63), so
+#   raw SD of R² across strains is not interpretable on its own. Shuffling the
+#   cell -> strain labels breaks the genotype link while preserving each strain's
+#   cell count exactly, so the same inflation appears in the null and cancels out.
+#
+#   sd_z = (observed SD - null mean SD) / SD of the null across permutations
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+```{r}
+set.seed(1)
+n_perm <- 30
+
+perm_sd <- map_dfr(seq_len(n_perm), function(i) {
+  cat("Permutation", i, "/", n_perm, "\n")
+  counts_long %>%
+    # shuffle the cell -> strain map once, apply to every gene
+    mutate(strain_perm = {
+      map <- distinct(., cell, strain)
+      map$strain <- sample(map$strain)
+      map$strain[match(cell, map$cell)]
+    }) %>%
+    group_by(gene, strain_perm) %>%
+    summarise(r2 = fit_loess_r2(expr, pseudotime)["r2"], .groups = "drop") %>%
+    group_by(gene) %>%
+    summarise(sd_null = sd(r2, na.rm = TRUE), .groups = "drop") %>%
+    mutate(perm = i)
+})
+
+null_summary <- perm_sd %>%
+  group_by(gene) %>%
+  summarise(sd_null_mean = mean(sd_null, na.rm = TRUE),   # baseline spread
+            sd_null_sd   = sd(sd_null,   na.rm = TRUE),   # run-to-run wobble
+            .groups = "drop")
+
+gene_summary_cal <- gene_summary %>%
+  left_join(null_summary, by = "gene") %>%
+  mutate(sd_excess = sd_r2_strain - sd_null_mean,
+         sd_z      = sd_excess / sd_null_sd) %>%
+  arrange(desc(sd_z))
+
+# ── Sanity check: did every gene get a null? ────────────────────────────────
+cat("\nGenes with no null (join failed):", sum(is.na(gene_summary_cal$sd_null_mean)), "\n")
+cat("Strains in counts_long:", n_distinct(counts_long$strain),
+    "| in strain_r2:", n_distinct(strain_r2$strain), "\n")
+
+# ── Candidates: exclude genes with too few strains to estimate a null ───────
+#   HXT10 (n=4) and HOP1 (n=38) otherwise pass on a tiny, poorly estimated
+#   denominator rather than on a real excess.
+candidates <- gene_summary_cal %>%
+  filter(sd_z > 2, n_strains_fit >= 70) %>%
+  arrange(desc(sd_z))
+
+cat("\nGenes with z > 2 (all):",
+    sum(gene_summary_cal$sd_z > 2, na.rm = TRUE), "\n")
+cat("Genes with z > 2 and >= 70 strains:", nrow(candidates), "\n\n")
+
+candidates %>%
+  mutate(name = to_name(gene)) %>%
+  select(name, gene, mean_r2_strain, sd_r2_strain,
+         sd_null_mean, sd_z, n_strains_fit) %>%
+  print(n = Inf)
+
+# ── How much did calibration reorder things vs raw SD? ──────────────────────
+gene_summary_cal %>%
+  mutate(rank_raw = rank(-sd_r2_strain), rank_cal = rank(-sd_z)) %>%
+  summarise(cor_rank = cor(rank_raw, rank_cal, use = "complete.obs")) %>%
+  print()
+
+write.csv(gene_summary_cal, "../data/spellman_gene_summary_calibrated.csv", row.names = FALSE)
+write.csv(candidates,       "../data/spellman_candidates_sdz.csv",          row.names = FALSE)
+```
+
+
+
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# One LOESS per gene × strain → three phenotypes
+#   r2   : how tightly expression tracks pseudotime (structure)
+#   amp  : trough-to-crest of the fitted curve      (amplitude)
+#   peak : time at which the curve crests           (timing)
+# Fit on ALL genes — no pre-screen, so a gene with consistent R² but a shifted
+# peak isn't dropped before its timing is ever measured.
+# ══════════════════════════════════════════════════════════════════════════════
+strain_pheno_fit <- function(expr, pseudotime, span = 0.3) {
+  na_out <- tibble(r2 = NA_real_, amp = NA_real_, peak = NA_real_, reason = 1)
+  if (length(unique(pseudotime)) < 10) return(na_out)
+  if (sd(expr) == 0)                   return(mutate(na_out, reason = 2))
+
+  fit <- tryCatch(suppressWarnings(
+           loess(expr ~ pseudotime, span = max(span, 6/length(expr)), degree = 2)),
+         error = function(e) NULL)
+  if (is.null(fit)) return(mutate(na_out, reason = 3))
+
+  grid <- seq(min(pseudotime), max(pseudotime), length.out = 89)
+  pred <- predict(fit, data.frame(pseudotime = grid))
+  if (all(is.na(pred))) return(mutate(na_out, reason = 3))
+
+  tibble(r2     = 1 - sum(fit$residuals^2) / sum((expr - mean(expr))^2),
+         amp    = diff(range(pred, na.rm = TRUE)),
+         peak   = grid[which.max(pred)],
+         reason = 0)
+}
+
+strain_pheno <- counts_long %>%
+  group_by(gene, strain) %>%
+  group_modify(~ bind_cols(
+    strain_pheno_fit(.x$expr, .x$pseudotime),
+    tibble(n_cells = nrow(.x), pct_expressed = mean(.x$expr > 0)))) %>%
+  ungroup() %>%
+  mutate(fit_status = factor(reason, levels = 0:3,
+                             labels = c("ok", "too_few_timepoints",
+                                        "constant_expression", "loess_error")))
+
+cat("Fits:", sum(strain_pheno$reason == 0), "/", nrow(strain_pheno), "\n")
+print(table(strain_pheno$fit_status))
+
+# R² here should match strain_r2 from earlier — same fit, same span rule
+strain_pheno %>%
+  select(gene, strain, r2_new = r2) %>%
+  inner_join(strain_r2 %>% select(gene, strain, r2_old = r2_strain),
+             by = c("gene", "strain")) %>%
+  filter(!is.na(r2_new), !is.na(r2_old)) %>%
+  summarise(max_diff = max(abs(r2_new - r2_old))) %>%
+  print()
+```
+
+```{r}
+circ_sd <- function(t, period = 88) {
+  th <- 2 * pi * t / period
+  R  <- sqrt(mean(cos(th), na.rm = TRUE)^2 + mean(sin(th), na.rm = TRUE)^2)
+  sqrt(-2 * log(R)) / (2 * pi) * period
+}
+circ_mean <- function(t, period = 88) {
+  th <- 2 * pi * t / period
+  (atan2(mean(sin(th)), mean(cos(th))) %% (2 * pi)) / (2 * pi) * period
+}
+
+summarise_pheno <- function(d) {
+  d %>%
+    filter(reason == 0) %>%
+    group_by(gene) %>%
+    summarise(n_strains = n(),
+              mean_r2   = mean(r2),        sd_r2   = sd(r2),
+              mean_amp  = mean(amp),       cv_amp  = sd(amp) / mean(amp),
+              mean_peak = circ_mean(peak), sd_peak = circ_sd(peak),
+              .groups = "drop")
+}
+
+# ── (a) All genes ────────────────────────────────────────────────────────────
+pheno_all <- summarise_pheno(strain_pheno)
+
+# ── (b) Detection-filtered set (>= 90% of strains) ──────────────────────────
+pheno_filt <- summarise_pheno(
+  strain_pheno %>% filter(gene %in% gene_summary_filt$gene))
+
+cat("Genes — all:", nrow(pheno_all), "| filtered:", nrow(pheno_filt), "\n\n")
+
+cat("Correlation between the three spreads (filtered set, n_strains >= 70):\n")
+print(pheno_filt %>% filter(n_strains >= 70) %>%
+        select(sd_r2, cv_amp, sd_peak) %>% cor(use = "complete.obs") %>% round(3))
+```
+
+```{r}
+# The question the screen would have missed: genes with consistent R² but a
+# shifted peak sit in the TOP-LEFT here.
+pheno_all %>%
+  filter(n_strains >= 70, mean_r2 > 0.3) %>%     # only genes with a real peak
+  mutate(name = to_name(gene),
+         in_filt = gene %in% pheno_filt$gene) %>%
+  ggplot(aes(sd_r2, sd_peak)) +
+  geom_point(aes(size = mean_r2, colour = in_filt), alpha = 0.6) +
+  ggrepel::geom_text_repel(
+    data = . %>% filter(sd_peak > quantile(sd_peak, 0.90, na.rm = TRUE)),
+    aes(label = name), size = 2.8, max.overlaps = Inf) +
+  scale_colour_manual(values = c(`TRUE` = "black", `FALSE` = "firebrick"),
+                      name = "passes detection filter") +
+  labs(x = "SD of R² across strains (structure variation)",
+       y = "Circular SD of peak time, min (timing variation)",
+       title = "Timing variation vs structure variation",
+       subtitle = "Top-left = consistent structure but shifting peak — invisible to an sd_r2 screen") +
+  theme_classic()
+
+cat("Genes with high timing but low structure variation:\n")
+pheno_all %>%
+  filter(n_strains >= 70, mean_r2 > 0.3,
+         sd_peak > quantile(sd_peak, 0.90, na.rm = TRUE),
+         sd_r2   < quantile(sd_r2,   0.50, na.rm = TRUE)) %>%
+  mutate(name = to_name(gene)) %>%
+  select(name, gene, mean_r2, sd_r2, sd_peak, mean_peak, n_strains) %>%
+  print(n = Inf)
+```
+

@@ -1,0 +1,5 @@
+Genetic_variants	n_variants	mean_traits	median_traits	max_traits
+CNVs	135	5.13	3	35
+SVs	166	4.25	2	60
+InDels	573	1.75	1	83
+SNPs	1150	1.14	1	7

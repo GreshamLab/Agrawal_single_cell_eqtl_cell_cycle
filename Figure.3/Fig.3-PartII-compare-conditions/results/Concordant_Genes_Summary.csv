@@ -1,0 +1,5 @@
+"Comparison","Category","N_Genes","Mean_Effect_Size_Corr"
+"Flu vs YPD.1","High Concordance",767,0.628649863530977
+"Flu vs YPD.1","Low Concordance",65,0.0944970567501992
+"Flu vs sc2glu","High Concordance",648,0.482995843014075
+"Flu vs sc2glu","Low Concordance",41,0.0717737497787554

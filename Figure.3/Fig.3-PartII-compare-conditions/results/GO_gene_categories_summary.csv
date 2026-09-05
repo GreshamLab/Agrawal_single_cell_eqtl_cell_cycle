@@ -1,0 +1,7 @@
+"Comparison","Category","N_Genes","Interpretation"
+"Flu vs YPD.1","YPD.1-only",1546,"Condition-specific"
+"Flu vs YPD.1","High Concordance",597,"Shared across conditions"
+"Flu vs YPD.1","Fluconazole-only",892,"Condition-specific"
+"Flu vs sc2glu","sc2glu-only",1189,"Condition-specific"
+"Flu vs sc2glu","High Concordance",437,"Shared across conditions"
+"Flu vs sc2glu","Fluconazole-only",1269,"Condition-specific"

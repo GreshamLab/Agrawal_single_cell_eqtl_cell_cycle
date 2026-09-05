@@ -30,7 +30,7 @@ filter <- dplyr::filter
 
 #Load the demuxlet output
 ```{r}
-data <- read.delim("/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Flu.1/demuxlet/merged_demuxlet_output_flu_1.tsv")
+data <- read.delim("/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.1/demuxlet/merged_demuxlet_output_YPD.tsv")
 head(data)
 str(data)
 
@@ -109,6 +109,33 @@ print(dim(Na_va_data_subsetted))
 # Optionally, check the first few rows of the metadata to confirm the filtering
 head(Na_va_data_subsetted@meta.data)
 
+
+```
+From figure1 and low correlation between replicates, remove the strains with less than 10 count
+```{r}
+#look at the current cell count for all strains
+Na_va_data_subsetted@meta.data %>%
+  dplyr::count(strain = SNG.BEST.GUESS, name = "n_cells") %>%
+  dplyr::arrange(n_cells) %>%
+  knitr::kable(caption = "Cells per strain after QC filtering")
+
+
+# First, identify strains with >= 10 cells
+strains_to_keep <- Na_va_data_subsetted@meta.data %>%
+  dplyr::count(strain = SNG.BEST.GUESS, name = "n_cells") %>%
+  dplyr::filter(n_cells >= 10) %>%
+  dplyr::pull(strain)
+
+# Subset the Seurat object
+Na_va_data_subsetted <- subset(Na_va_data_subsetted, 
+                               subset = SNG.BEST.GUESS %in% strains_to_keep)
+
+# Verify the filtering
+Na_va_data_subsetted@meta.data %>%
+  dplyr::count(strain = SNG.BEST.GUESS, name = "n_cells") %>%
+  dplyr::arrange(n_cells) %>%
+  knitr::kable(caption = "Cells per strain after removing strains with <10 cells")
+
 saveRDS(Na_va_data_subsetted, file = "./output_from_pseudobulk_fastlmm/Na_va_data_subsetted.rds")
 ```
 
@@ -179,7 +206,11 @@ pseudobulk_sum_df <- as.data.frame(do.call(cbind, pseudobulk_sum_counts))
 colnames(pseudobulk_sum_df) <- names(pseudobulk_sum_counts)
 
 pseudobulk_sum_df
+str(pseudobulk_sum_df)
 ```
+#counts cells per strain
+
+
 #Selection of expressed transcripts (atleast 5 counts across 8 strains)
 ```{r}
 #keep only the commonly expressed transcripts

@@ -5,8 +5,8 @@ output: html_document
 ---
 
 Phylogenetic tree of the 1011 *S. cerevisiae* collection (Peter et al. 2018),
-with the 96 strains used in this study marked as red tip points. Branches are
-coloured by clade assignment.
+with the 96 strains used in this study highlighted as red tip points. Branches are
+coloured by clade assignment. Blue text indicates the 96 sequenced strains.
 
 ```{r setup, include = FALSE}
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
@@ -17,6 +17,7 @@ library(ggplot2)
 library(ggtree)
 library(viridis)
 library(dplyr)
+library(grid)  # for additional text annotation options
 ```
 
 ```{r load}
@@ -38,12 +39,9 @@ strains_96 <- c(
   "AVI", "ANH", "ANG", "SACE_YCU", "CCV", "SACE_YCM", "SACE_YDE", "CLI", "CLN", "CMI",
   "CLP", "CGL", "CGN", "BHQ", "BEF", "SACE_YCK"
 )
-
 stopifnot(length(strains_96) == 96)
-
 cladesdf <- cladesdf %>%
   mutate(highlight = ifelse(STD_name %in% strains_96, "In subset", "Not in subset"))
-
 # sanity check: all 96 present in the tree metadata
 setdiff(strains_96, cladesdf$STD_name)
 ```
@@ -56,7 +54,23 @@ cols <- c(viridis(length(unique(cladesdf$clades))),
 names(cols) <- c(unique(cladesdf$clades), "In subset", "Not in subset")
 ```
 
-```{r figure, fig.width = 14, fig.height = 8}
+```{r}
+fig1A <- ggtree(tree1011,
+                layout     = "ape",
+                open.angle = 10,
+                size       = 0.25,
+                aes(color = clades)) %<+% cladesdf +
+  geom_tippoint(aes(color = highlight), size = 2) +
+  scale_color_manual(values = cols) +
+  theme_void() +
+  theme(legend.position = "none",
+        plot.background = element_rect(fill = "transparent", colour = NA))
+
+fig1A
+```
+
+
+```{r figure, fig.width = 14, fig.height = 9}
 fig1A <- ggtree(tree1011,
                 layout      = "ape",
                 open.angle  = 10,
@@ -65,30 +79,200 @@ fig1A <- ggtree(tree1011,
   geom_tippoint(aes(color = highlight), size = 2) +
   scale_color_manual(
     values = cols,
-    breaks = unique(cladesdf$clades),   # legend shows clades only
+    breaks = unique(cladesdf$clades),
     name   = "Clade"
   ) +
   guides(color = guide_legend(
-    override.aes = list(size = 3, linewidth = 1),
-    ncol = 2
+    override.aes = list(
+      size = 3,
+      linewidth = 1
+    ),
+    ncol = 1
   )) +
   theme(
-    legend.position   = "right",
-    legend.text       = element_text(size = 14),
-    legend.title      = element_text(size = 14, face = "bold"),
-    legend.background = element_blank(),
-    panel.grid.major  = element_blank(),
-    panel.grid.minor  = element_blank(),
-    panel.background  = element_rect(fill = "transparent", colour = NA),
-    plot.background   = element_rect(fill = "transparent", colour = NA)
+    legend.position      = "right",
+    legend.text          = element_text(size = 18),
+    legend.title         = element_text(size = 18, face = "bold"),
+    legend.background    = element_rect(fill = "white", color = "black", linewidth = 0.3),
+    legend.key           = element_rect(fill = "white", color = NA),
+    legend.key.height    = unit(0.6, "cm"),
+    legend.key.width     = unit(0.6, "cm"),
+    legend.margin        = margin(8, 8, 8, 8),
+    legend.spacing.y     = unit(0.3, "cm"),
+    panel.grid.major     = element_blank(),
+    panel.grid.minor     = element_blank(),
+    panel.background     = element_rect(fill = "transparent", colour = NA),
+    plot.background      = element_rect(fill = "transparent", colour = NA)
   )
 
 fig1A
+
+```
+Figure 1A. The 96 sequenced strains are broadly distributed across major phylogenetic clades of S. cerevisiae.
+
+Phylogenetic tree of the 1011 S. cerevisiae collection (Peter et al. 2018), with branches colored by clade assignment. Red dots indicate the 96 strains selected for this study. The distribution of red dots across all 26 major clades demonstrates that strain selection encompasses the phylogenetic diversity of the species rather than being biased toward any single clade. This broad representation ensures that eQTL analyses capture genetic variation across diverse genetic backgrounds and evolutionary history of S. cerevisiae.
+```{r save}
+ggsave("../results/tree_with_96_strain.pdf", plot = fig1A,
+       width = 14, height = 9, dpi = 300,
+       device = "pdf", useDingbats = FALSE)
+
+ggsave("../results/tree_with_96_strain.tiff", plot = fig1A,
+       width = 14, height = 9, dpi = 300,
+       device = "tiff", compression = "lzw")
+
+ggsave("../results/tree_with_96_strain.png", plot = fig1A,
+       width = 14, height = 9, dpi = 300,
+       device = "png", bg = "white")
 ```
 
-```{r save}
-ggsave("../results/tree_with_96_strain.tiff", plot = fig1A,
-       width = 14, height = 8, dpi = 300,
-       device = "tiff", compression = "lzw")
+
+```{r}
+library(ggtree); library(ape); library(dplyr); library(viridis)
+
+# For each clade: MRCA node, and what fraction of its descendants actually belong
+clade_nodes <- cladesdf %>%
+  filter(!is.na(clades)) %>%
+  group_by(clades) %>%
+  filter(n() >= 3) %>%                      # 1-2 tips can't form a useful blob
+  summarise(tips = list(STD_name), n_tips = n(), .groups = "drop") %>%
+  rowwise() %>%
+  mutate(
+    node = tryCatch(getMRCA(tree1011, match(tips, tree1011$tip.label)),
+                    error = function(e) NA_integer_),
+    n_desc = if (!is.na(node))
+      length(geiger::tips(tree1011, node)) else NA_integer_,
+    purity = n_tips / n_desc
+  ) %>%
+  ungroup()
+
+clade_nodes %>%
+  select(clades, n_tips, n_desc, purity) %>%
+  arrange(purity) %>%
+  print(n = Inf)
 ```
+
+```{r}
+library(ggtree); library(ape); library(dplyr); library(viridis)
+
+# ── Which clades are monophyletic enough to encircle? ───────────────────────
+clade_nodes <- cladesdf %>%
+  filter(!is.na(clades)) %>%
+  group_by(clades) %>%
+  filter(n() >= 3) %>%
+  summarise(tips = list(STD_name), n_tips = n(), .groups = "drop") %>%
+  rowwise() %>%
+  mutate(
+    node   = tryCatch(getMRCA(tree1011, match(tips, tree1011$tip.label)),
+                      error = function(e) NA_integer_),
+    n_desc = if (!is.na(node))
+               length(phangorn::Descendants(tree1011, node, "tips")[[1]])
+             else NA_integer_,
+    purity = n_tips / n_desc
+  ) %>%
+  ungroup()
+
+PURITY_MIN <- 0.5
+keep <- clade_nodes %>%
+  filter(!is.na(node), purity >= PURITY_MIN) %>%
+  arrange(desc(n_desc))          # largest first so smaller blobs draw on top
+
+cat("Highlighting", nrow(keep), "of", nrow(clade_nodes), "clades\n")
+cat("Dropped (not monophyletic):",
+    paste(setdiff(clade_nodes$clades, keep$clades), collapse = ", "), "\n")
+
+# ── Draw ────────────────────────────────────────────────────────────────────
+clade_cols <- setNames(viridis(nrow(keep), option = "turbo"), keep$clades)
+
+p <- ggtree(tree1011, layout = "ape", open.angle = 10,
+            size = 0.15, colour = "grey30") %<+% cladesdf
+
+for (i in seq_len(nrow(keep))) {
+  p <- p + geom_hilight(node = keep$node[i], type = "encircle",
+                        fill = clade_cols[keep$clades[i]],
+                        alpha = 0.25, expand = 0.01)
+}
+
+fig1A <- p +
+  geom_tippoint(aes(subset = label %in% strains_96),
+                colour = "red", size = 1.8) +
+  theme_void() +
+  theme(legend.position = "none",
+        plot.background = element_rect(fill = "white", colour = NA))
+
+fig1A
+```
+```{r}
+library(phangorn)
+
+# All internal nodes and their descendant tips, computed once
+int_nodes <- (Ntip(tree1011) + 1):(Ntip(tree1011) + Nnode(tree1011))
+desc_list <- Descendants(tree1011, int_nodes, "tips")
+desc_labs <- lapply(desc_list, function(i) tree1011$tip.label[i])
+
+# For one clade: the largest node that is >= purity_min pure for that clade
+core_node <- function(clade_tips, purity_min = 0.75, min_tips = 3) {
+  n_in  <- vapply(desc_labs, function(d) sum(d %in% clade_tips), integer(1))
+  n_tot <- lengths(desc_labs)
+  ok    <- n_in >= min_tips & (n_in / n_tot) >= purity_min
+  if (!any(ok)) return(tibble(node = NA_integer_, n_in = 0L,
+                              n_tot = 0L, purity = NA_real_))
+  best <- which(ok)[which.max(n_in[ok])]          # most clade tips captured
+  tibble(node   = int_nodes[best],
+         n_in   = n_in[best],
+         n_tot  = n_tot[best],
+         purity = n_in[best] / n_tot[best])
+}
+
+clade_cores <- cladesdf %>%
+  filter(!is.na(clades)) %>%
+  group_by(clades) %>%
+  filter(n() >= 3) %>%
+  summarise(tips = list(STD_name), n_clade = n(), .groups = "drop") %>%
+  rowwise() %>%
+  mutate(core_node(tips)) %>%
+  ungroup() %>%
+  mutate(coverage = n_in / n_clade)               # fraction of the clade shaded
+
+clade_cores %>%
+  select(clades, n_clade, n_in, n_tot, purity, coverage) %>%
+  arrange(coverage) %>%
+  print(n = Inf)
+
+COVERAGE_MIN <- 0.4     # don't shade a clade if the core is a small fraction of it
+
+keep <- clade_cores %>%
+  filter(!is.na(node), coverage >= COVERAGE_MIN) %>%
+  arrange(desc(n_tot))                    # big blobs first, small on top
+
+cat("Shading", nrow(keep), "clades\n")
+cat("Median coverage:", round(median(keep$coverage), 2), "\n")
+cat("Not shaded:", paste(setdiff(clade_cores$clades, keep$clades),
+                         collapse = ", "), "\n")
+
+clade_cols <- setNames(viridis(nrow(keep), option = "turbo"), keep$clades)
+
+p <- ggtree(tree1011, layout = "ape", open.angle = 10,
+            size = 0.15, colour = "grey30") %<+% cladesdf
+
+for (i in seq_len(nrow(keep))) {
+  p <- p + geom_hilight(node = keep$node[i], type = "encircle",
+                        fill = clade_cols[keep$clades[i]],
+                        alpha = 0.25, expand = 0.01)
+}
+
+fig1A <- p +
+  geom_tippoint(aes(subset = label %in% strains_96),
+                colour = "red", size = 1.8) +
+  theme_void() +
+  theme(legend.position = "none",
+        plot.background = element_rect(fill = "white", colour = NA))
+
+fig1A
+
+ggsave("../results/tree_with_96_strain_with_clade_blob.tiff", plot = fig1A,
+       width = 14, height = 9, dpi = 300,
+       device = "tiff", compression = "lzw")
+
+```
+
 

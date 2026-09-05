@@ -1,5 +1,0 @@
-"SNP_ID","Gene_ID","Gene_Common_Name","Resolved_Gene_ID","Status","N_Cells","Verification_Beta","Verification_P","FastLMM_Beta","FastLMM_P","Effect_Agreement","R_Squared"
-"3085_DEL_chromosome8_193546_len_-532","YHR043C","","","Gene not found",0,0,0,-0.547844008353331,6.80920942502738e-08,FALSE,0
-"531_DEL_chromosome2_429115_len_-389","YBR092C","","","Gene not found",0,0,0,-0.48924076652322,1.39624584337747e-06,FALSE,0
-"3559_DUP_chromosome9_300429_len_255","YIL029C","","YIL029C","Success",16065,1.41842272498577,0,0.423494733855415,1.4254989922386e-06,TRUE,0.141744214059586
-"1071_DEL_chromosome4_127638_len_-1360","YDL185W","","","Gene not found",0,0,0,0.704212858759534,1.79753592930476e-06,FALSE,0

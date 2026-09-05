@@ -1,0 +1,652 @@
+---
+title: "Fig.3-panel-A-cis_trans_eqtl_mapping_YPD"
+author: "Akriti Agrawal"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  html_document: 
+    toc: true
+    number_section: true
+    toc_float: 
+      collapsed: false
+      smooth_scroll: true
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(inputFile, encoding = encoding, output_dir = "../results/") })
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 10, fig.height = 10)
+```
+
+```{r libs, include=FALSE}
+library(tidyverse)
+library(data.table)
+library(GenomicRanges)
+select <- dplyr::select
+filter <- dplyr::filter
+```
+
+## 0. Config — set your four .clumped/assoc paths here
+
+```{r config}
+# ===================================================================
+# Configuration with ABSOLUTE PATHS
+# ===================================================================
+RES_flu   <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/merged_fluconazole/new_fastlmm_march_26_2026/results"
+RES_sc2glu   <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2/fastlmm/results"
+
+CLMP_flu  <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/merged_fluconazole/new_fastlmm_march_26_2026/results/plink/"
+CLMP_sc2glu <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2/fastlmm/results/plink/"
+
+# Output directory - ABSOLUTE PATH
+OUT_MAIN  <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Agrawal_single_cell_eqtl_cell_cycle/Figure.3/Fig.3-PartII-compare-conditions/results/eqtl_plot"
+
+OUT_ANNOT <- file.path(OUT_MAIN, "annotations")
+OUT_FIG   <- file.path(OUT_MAIN, "figures")
+OUT_SUMM  <- file.path(OUT_MAIN, "data_summary")
+
+# Create output directories
+for (dir in c(OUT_MAIN, OUT_ANNOT, OUT_FIG, OUT_SUMM)) {
+  dir.create(dir, showWarnings = FALSE, recursive = TRUE)
+}
+
+ANNOT_CSV_flu <- "/scratch/aa9679/SingleCell_cerevisiae/Gene_exp_analysis/yeast_custom_annotations.csv"
+ANNOT_CSV_sc2glu <- "/scratch/aa9679/SingleCell_cerevisiae/Gene_exp_analysis/yeast_custom_annotations.csv"
+
+GENE_LOC_flu  <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/merged_fluconazole/new_fastlmm_march_26_2026/data/pheno_data/gene_location.txt"
+GENE_LOC_sc2glu <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2/fastlmm/data/pheno_data/gene_location.txt"
+
+CIS_WINDOW_BP <- 2000
+
+# ===================================================================
+# Variant configuration fluconazole
+# ===================================================================
+variant_cfg_flu <- list(
+  SNP = list(
+    clumped = file.path(CLMP_flu, "clumped_results_snp.clumped"),
+    assoc   = file.path(RES_flu,  "all_signif_SNP_flu_with_double_id_final_filtered_for_ncount_less_than_5_with_threshold.txt")
+  ),
+  CNV = list(
+    clumped = file.path(CLMP_flu, "clumped_results_CNVs.clumped"),
+    assoc   = file.path(RES_flu,  "all_signif_CNV_flu_with_double_id_final_filtered_for_ncount_less_than_5_with_threshold.txt")
+  ),
+  Indel = list(
+    clumped = file.path(CLMP_flu, "clumped_results_Indels.clumped"),
+    assoc   = file.path(RES_flu,  "all_signif_Indels_flu_with_double_id_final_filtered_for_ncount_less_than_5_with_threshold.txt")
+  ),
+  SV = list(
+    clumped = file.path(CLMP_flu, "clumped_results_SVs.clumped"),
+    assoc   = file.path(RES_flu,  "all_signif_SVs_flu_with_double_id_final_filtered_for_ncount_less_than_5_with_threshold.txt")
+  )
+)
+
+# ===================================================================
+# Variant configuration sc2glu
+# ===================================================================
+variant_cfg_sc2glu <- list(
+  SNP = list(
+    clumped = file.path(CLMP_sc2glu, "clumped_results_snp.clumped"),
+    assoc   = file.path(RES_sc2glu,  "all_signif_SNP_sc2glu_with_double_id_final_filtered_for_ncount_less_than_5_with_threshold.txt")
+  ),
+  CNV = list(
+    clumped = file.path(CLMP_sc2glu, "clumped_results_CNVs.clumped"),
+    assoc   = file.path(RES_sc2glu,  "all_signif_CNV_sc2glu_with_double_id_final_filtered_for_ncount_less_than_5_with_threshold.txt")
+  ),
+  Indel = list(
+    clumped = file.path(CLMP_sc2glu, "clumped_results_Indels.clumped"),
+    assoc   = file.path(RES_sc2glu,  "all_signif_Indels_sc2glu_with_double_id_final_filtered_for_ncount_less_than_5_with_threshold.txt")
+  ),
+  SV = list(
+    clumped = file.path(CLMP_sc2glu, "clumped_results_SVs.clumped"),
+    assoc   = file.path(RES_sc2glu,  "all_signif_SVs_sc2glu_with_double_id_final_filtered_for_ncount_less_than_5_with_threshold.txt")
+  )
+)
+
+# ===================================================================
+# Condition metadata
+# ===================================================================
+condition_meta <- list(
+  fluconazole = list(
+    variant_cfg = variant_cfg_flu,
+    gene_loc_file = GENE_LOC_flu,
+    annot_csv = ANNOT_CSV_flu,
+    label = "Fluconazole"
+  ),
+  sc2glu = list(
+    variant_cfg = variant_cfg_sc2glu,
+    gene_loc_file = GENE_LOC_sc2glu,
+    annot_csv = ANNOT_CSV_sc2glu,
+    label = "SC2Glu"
+  )
+)
+
+# Variant colors
+variant_colors <- c("SNP" = "#4472C4", "Indel" = "#FFC000",
+                    "SV" = "#C41E3A", "CNV" = "#70AD47")
+
+cat("════════════════════════════════════════════════════════════\n")
+cat("CONFIGURATION SUMMARY\n")
+cat("════════════════════════════════════════════════════════════\n")
+cat("Conditions:                   ", paste(names(condition_meta), collapse = ", "), "\n")
+cat("Output directory (OUT_MAIN):  ", OUT_MAIN, "\n")
+cat("Variant types:                SNP, CNV, Indel, SV\n")
+cat("════════════════════════════════════════════════════════════\n\n")
+```
+
+## 1. Shared reference objects
+
+```{r reference}
+roman16 <- c("I","II","III","IV","V","VI","VII","VIII","IX","X","XI","XII","XIII","XIV","XV","XVI")
+num_to_roman <- function(x) roman16[x]
+
+chr_lengths <- c(I=230218, II=813184, III=316620, IV=1531933, V=576874, VI=270161,
+                 VII=1090940, VIII=562643, IX=439888, X=745751, XI=666816,
+                 XII=1078177, XIII=924431, XIV=784333, XV=1091291, XVI=948066)
+chr_offsets <- c(0, cumsum(chr_lengths[-length(chr_lengths)])); names(chr_offsets) <- roman16
+chr_mids <- chr_offsets + chr_lengths / 2
+
+feature_priority <- c(promoter=1, three_prime_UTR=2, five_prime_UTR=3,
+                      start_codon=4, stop_codon=5, CDS=6)
+prio <- function(f) { p <- feature_priority[f]; p[is.na(p)] <- 99; p }
+```
+
+## 2. Reader function
+
+```{r read-clumped}
+read_clumped <- function(clumped, assoc) {
+  ids <- read.table(clumped, header = TRUE)$SNP
+  read.table(assoc, header = TRUE, sep = "\t", stringsAsFactors = FALSE) %>%
+    filter(SNP %in% ids)
+}
+```
+
+## 3. Point annotation (SNP = priority, CNV = first overlap)
+
+```{r annot-point}
+annotate_point <- function(df, annotations_gr, pick = c("priority","first")) {
+  pick <- match.arg(pick)
+  df$var_chr_roman <- num_to_roman(df$Chr)
+  gr <- GRanges(df$var_chr_roman, IRanges(df$ChrPos, df$ChrPos))
+  df$causal_gene <- NA_character_; df$causal_gene_feature <- NA_character_
+
+  ov <- findOverlaps(gr, annotations_gr, type = "any")
+  for (i in unique(queryHits(ov))) {
+    subj <- subjectHits(ov)[queryHits(ov) == i]
+    k <- if (pick == "priority") subj[which.min(prio(annotations_gr$type[subj]))] else subj[1]
+    df$causal_gene[i] <- annotations_gr$gene_id[k]
+    df$causal_gene_feature[i] <- annotations_gr$type[k]
+  }
+  # intergenic: nearest gene within 2 kb, else intergenic_distant
+  m <- which(is.na(df$causal_gene))
+  if (length(m)) {
+    ng <- nearest(gr[m], annotations_gr); ok <- !is.na(ng)
+    d <- rep(NA_real_, length(m)); d[ok] <- distance(gr[m][ok], annotations_gr[ng[ok]])
+    near <- !is.na(d) & d <= CIS_WINDOW_BP
+    df$causal_gene[m[near]]          <- annotations_gr$gene_id[ng[near]]
+    df$causal_gene_feature[m[near]]  <- "intergenic_nearby"
+    df$causal_gene_feature[m[!near]] <- "intergenic_distant"
+  }
+  df
+}
+```
+
+## 4. Range annotation (Indel = no nearest, SV = nearest)
+
+```{r annot-range}
+annotate_range <- function(df, annotations_gr, range_end, use_nearest) {
+  df$var_chr_roman <- num_to_roman(df$Chr)
+  gr <- GRanges(df$var_chr_roman, IRanges(df$ChrPos, range_end))
+  df$causal_gene <- NA_character_; df$causal_gene_feature <- NA_character_
+
+  ov <- findOverlaps(gr, annotations_gr, type = "any")
+  for (i in unique(queryHits(ov))) {
+    subj <- subjectHits(ov)[queryHits(ov) == i]
+    df$causal_gene[i]         <- paste(unique(annotations_gr$gene_id[subj]), collapse = "; ")
+    df$causal_gene_feature[i] <- paste(unique(annotations_gr$type[subj]),   collapse = "; ")
+  }
+  if (use_nearest) {
+    m <- which(is.na(df$causal_gene))
+    if (length(m)) {
+      ng <- nearest(gr[m], annotations_gr); ok <- !is.na(ng)
+      d <- rep(NA_real_, length(m)); d[ok] <- distance(gr[m][ok], annotations_gr[ng[ok]])
+      near <- !is.na(d) & d <= CIS_WINDOW_BP
+      df$causal_gene[m[near]]          <- annotations_gr$gene_id[ng[near]]
+      df$causal_gene_feature[m[near]]  <- "intergenic_nearby"
+      df$causal_gene_feature[m[!near]] <- "intergenic_distant"
+    }
+  } else {
+    df$causal_gene_feature[is.na(df$causal_gene)] <- "intergenic_distant"
+  }
+  df
+}
+```
+
+## 5. Per-type dispatch
+
+```{r annot-dispatch}
+annotate_variant <- function(df, annotations_gr, vt) {
+  if (vt == "SNP") return(annotate_point(df, annotations_gr, "priority"))
+  if (vt == "CNV") return(annotate_point(df, annotations_gr, "first"))
+
+  if (vt == "Indel") {
+    p <- strsplit(df$SNP, "_")
+    ref_len <- vapply(p, function(x) nchar(x[3]), 1L)
+    alt_len <- vapply(p, function(x) nchar(x[4]), 1L)
+    df$Indel_Size <- alt_len - ref_len
+    range_end <- ifelse(df$Indel_Size < 0, df$ChrPos + ref_len - 1, df$ChrPos)
+    return(annotate_range(df, annotations_gr, range_end, use_nearest = FALSE))
+  }
+  if (vt == "SV") {
+    sub <- vapply(strsplit(df$SNP, "_"), `[`, "", 2)
+    sz  <- vapply(strsplit(df$SNP, "_"), function(x){ i <- which(x=="len"); if(length(i)) as.numeric(x[i+1]) else NA_real_ }, 0)
+    range_end <- ifelse(sub %in% c("INS","TRA"), df$ChrPos, df$ChrPos + abs(sz))
+    range_end[is.na(range_end)] <- df$ChrPos[is.na(range_end)]
+    return(annotate_range(df, annotations_gr, range_end, use_nearest = TRUE))
+  }
+}
+```
+
+## 6. Cis/trans classification
+
+```{r harmonise}
+add_cis_trans <- function(df, gene_location_fixed, vt) {
+  df %>%
+    left_join(gene_location_fixed, by = c("Pheno" = "gene_id")) %>%
+    mutate(Pheno_chr = chr, Pheno_start = left, Pheno_end = right,
+           dist_to_pheno = case_when(
+             var_chr_roman != Pheno_chr ~ NA_real_,
+             ChrPos < Pheno_start ~ Pheno_start - ChrPos,
+             ChrPos > Pheno_end   ~ ChrPos - Pheno_end,
+             TRUE ~ 0),
+           cis_trans = case_when(
+             var_chr_roman != Pheno_chr ~ "Trans",
+             dist_to_pheno == 0    ~ "Cis",
+             dist_to_pheno <= 2000 ~ "Cis",
+             causal_gene == Pheno  ~ "Cis",
+             TRUE                  ~ "Trans"),
+           variant_type = vt,
+           abs_effect_size = abs(SnpWeight)) %>%
+    select(variant_type, SNP, Pheno, var_chr_roman, ChrPos,
+           Pheno_chr, Pheno_start, Pheno_end, causal_gene,
+           cis_trans, abs_effect_size, PValue)
+}
+```
+
+## 7. Master processing function for each condition
+
+```{r process-condition}
+process_condition <- function(condition_name, meta) {
+  cat("\n")
+  cat("════════════════════════════════════════════════════════════\n")
+  cat("PROCESSING CONDITION: ", meta$label, "\n")
+  cat("════════════════════════════════════════════════════════════\n\n")
+  
+  # Load annotations
+  ann <- read.csv(meta$annot_csv)
+  annotations_gr <- GRanges(ann$seqnames,
+                            IRanges(ann$start, ann$end),
+                            strand = ann$strand,
+                            type = ann$type, gene_id = ann$gene_id, gene_name = ann$gene_name)
+  
+  # Load gene locations
+  gene_location_fixed <- read.table(meta$gene_loc_file, header = TRUE, stringsAsFactors = FALSE) %>%
+    select(gene_id, gene_name, chr, left, right) %>%
+    mutate(right = right + 2,
+           gene_id = str_replace(gene_id, "-", "."))
+  
+  # Process each variant type
+  combined <- lapply(names(meta$variant_cfg), function(vt) {
+    cfg <- meta$variant_cfg[[vt]]
+    message("  Annotating ", vt, " ...")
+    read_clumped(cfg$clumped, cfg$assoc) %>% 
+      annotate_variant(annotations_gr, vt) %>% 
+      add_cis_trans(gene_location_fixed, vt)
+  }) %>% 
+    bind_rows() %>%
+    mutate(var_chr_roman = factor(var_chr_roman, levels = roman16),
+           Pheno_chr     = factor(Pheno_chr,     levels = roman16),
+           variant_type  = factor(variant_type,  levels = c("SNP","CNV","Indel","SV")),
+           var_genome    = chr_offsets[as.character(var_chr_roman)] + ChrPos,
+           pheno_genome  = chr_offsets[as.character(Pheno_chr)] + (Pheno_start + Pheno_end)/2,
+           condition     = meta$label) %>%
+    filter(!is.na(var_genome), !is.na(pheno_genome), !is.na(cis_trans))
+  
+  cat("\nVariant type × cis/trans classification:\n")
+  print(table(combined$variant_type, combined$cis_trans))
+  cat("\n")
+  
+  return(combined)
+}
+```
+
+## 8. Process both conditions
+
+```{r process-all-conditions}
+all_results <- lapply(names(condition_meta), function(cond_name) {
+  process_condition(cond_name, condition_meta[[cond_name]])
+}) 
+names(all_results) <- names(condition_meta)
+
+# Create combined dataset
+combined_all <- bind_rows(all_results) %>%
+  mutate(condition = factor(condition, levels = c("Fluconazole", "SC2Glu")))
+
+cat("════════════════════════════════════════════════════════════\n")
+cat("SUMMARY ACROSS CONDITIONS\n")
+cat("════════════════════════════════════════════════════════════\n")
+print(table(combined_all$condition, combined_all$variant_type, combined_all$cis_trans))
+cat("\n")
+```
+
+## 8.5. Summary Statistics — Per Condition, Per Variant Type, and Global
+
+```{r summary-statistics}
+cat("\n")
+cat("════════════════════════════════════════════════════════════\n")
+cat("SUMMARY STATISTICS — eQTL COUNTS\n")
+cat("════════════════════════════════════════════════════════════\n\n")
+
+# ─────────────────────────────────────────────────────────────
+# PER-CONDITION SUMMARIES
+# ─────────────────────────────────────────────────────────────
+
+for (cond_name in names(all_results)) {
+  cond_label <- condition_meta[[cond_name]]$label
+  data <- all_results[[cond_name]]
+  
+  cat("\n", strrep("─", 60), "\n")
+  cat("CONDITION: ", cond_label, "\n")
+  cat(strrep("─", 60), "\n\n")
+  
+  # Per variant type
+  cat("Summary by variant type:\n")
+  per_type <- data %>%
+    group_by(variant_type) %>%
+    summarise(n_associations = n(),
+              n_unique_loci   = n_distinct(SNP),
+              n_unique_traits = n_distinct(Pheno), 
+              .groups = "drop")
+  print(per_type)
+  
+  # Per variant type × cis/trans
+  cat("\n\nBreakdown by cis/trans status:\n")
+  per_type_cistrans <- data %>%
+    group_by(variant_type, cis_trans) %>%
+    summarise(n_associations = n(),
+              n_unique_loci   = n_distinct(SNP),
+              n_unique_traits = n_distinct(Pheno), 
+              .groups = "drop")
+  print(per_type_cistrans)
+  
+  # Total for this condition
+  cat("\n\nTotal across all variant types (", cond_label, "):\n")
+  total_cond <- data %>%
+    summarise(n_associations = n(),
+              n_unique_loci   = n_distinct(SNP),
+              n_unique_traits = n_distinct(Pheno))
+  print(total_cond)
+  cat("\n")
+}
+
+# ─────────────────────────────────────────────────────────────
+# GLOBAL SUMMARY ACROSS ALL CONDITIONS
+# ─────────────────────────────────────────────────────────────
+
+cat("\n", strrep("═", 60), "\n")
+cat("GLOBAL SUMMARY — ACROSS ALL CONDITIONS\n")
+cat(strrep("═", 60), "\n\n")
+
+# Per variant type (collapsed across conditions)
+cat("Summary by variant type (all conditions combined):\n")
+global_type <- combined_all %>%
+  group_by(variant_type) %>%
+  summarise(n_associations = n(),
+            n_unique_loci   = n_distinct(SNP),
+            n_unique_traits = n_distinct(Pheno), 
+            .groups = "drop")
+print(global_type)
+
+# Per condition (collapsed across variant types)
+cat("\n\nSummary by condition (all variant types combined):\n")
+global_cond <- combined_all %>%
+  group_by(condition) %>%
+  summarise(n_associations = n(),
+            n_unique_loci   = n_distinct(SNP),
+            n_unique_traits = n_distinct(Pheno), 
+            .groups = "drop")
+print(global_cond)
+
+# Per condition × variant type
+cat("\n\nFull matrix: Condition × Variant Type:\n")
+matrix_summary <- combined_all %>%
+  group_by(condition, variant_type) %>%
+  summarise(n_associations = n(),
+            n_unique_loci   = n_distinct(SNP),
+            n_unique_traits = n_distinct(Pheno), 
+            .groups = "drop")
+print(matrix_summary)
+
+# Grand total
+cat("\n\nGRAND TOTAL (all conditions, all variant types):\n")
+grand_total <- combined_all %>%
+  summarise(n_associations = n(),
+            n_unique_loci   = n_distinct(SNP),
+            n_unique_traits = n_distinct(Pheno))
+print(grand_total)
+
+# Cis vs Trans split (global)
+cat("\n\nGlobal Cis/Trans split (all conditions, all variant types):\n")
+cistrans_split <- combined_all %>%
+  group_by(cis_trans) %>%
+  summarise(n_associations = n(),
+            n_unique_loci   = n_distinct(SNP),
+            n_unique_traits = n_distinct(Pheno), 
+            pct_associations = round(100 * n() / nrow(combined_all), 1),
+            .groups = "drop")
+print(cistrans_split)
+
+cat("\n")
+cat("════════════════════════════════════════════════════════════\n")
+cat("STATISTICS SUMMARY COMPLETE ✓\n")
+cat("════════════════════════════════════════════════════════════\n\n")
+```
+
+
+
+## 9. Panel A: Individual plots per condition (Publication-ready)
+
+```{r panelA-individual, fig.width=12, fig.height=11}
+# Create plots for each condition
+plot_list <- lapply(names(all_results), function(cond_name) {
+  data <- all_results[[cond_name]]
+  cond_label <- condition_meta[[cond_name]]$label
+  
+  p <- ggplot(data, aes(var_genome, pheno_genome, color = cis_trans, size = abs_effect_size)) +
+    geom_point(alpha = 0.6) +
+    facet_wrap(~ variant_type, ncol = 2) +
+    scale_color_manual(
+      name = "eQTL type",
+      values = c(Cis = "#d73027", Trans = "#4575b4"),
+      guide = guide_legend(title.position = "top", title.hjust = 0.5, 
+                           label.theme = element_text(size = 11, face = "bold"),
+                           title.theme = element_text(size = 12, face = "bold"))
+    ) +
+    scale_size_continuous(
+      name = "Effect size (|β|)",
+      range = c(0.4, 2.6),
+      trans = "log10",
+      guide = guide_legend(title.position = "top", title.hjust = 0.5,
+                           label.theme = element_text(size = 11),
+                           title.theme = element_text(size = 12, face = "bold"))
+    ) +
+    scale_x_continuous(breaks = chr_mids, labels = names(chr_mids), expand = c(0.01, 0)) +
+    scale_y_continuous(breaks = chr_mids, labels = names(chr_mids), expand = c(0.01, 0)) +
+    labs(
+      title = paste("eQTL mapping:", cond_label),
+      x = "Variant position (chromosome)",
+      y = "Gene position (chromosome)"
+    ) +
+    theme_bw(base_size = 13) +
+    theme(
+      # Title
+      plot.title = element_text(size = 14, face = "bold", color = "black", hjust = 0.5, margin = margin(b=10)),
+      # Axis titles
+      axis.title = element_text(size = 13, face = "bold", color = "black"),
+      axis.title.x = element_text(margin = margin(t = 10)),
+      axis.title.y = element_text(margin = margin(r = 10)),
+      # Axis text
+      axis.text = element_text(size = 11, color = "black", face = "bold"),
+      axis.text.x = element_text(angle = 0, hjust = 0.5),
+      # Facet labels
+      strip.text = element_text(size = 12, face = "bold", color = "black"),
+      strip.background = element_rect(fill = "grey90", color = "black", linewidth = 0.8),
+      # Panel borders
+      panel.border = element_rect(color = "black", linewidth = 0.8),
+      panel.grid = element_line(color = "grey95", linewidth = 0.3),
+      # Legend
+      legend.position = "bottom",
+      legend.box = "horizontal",
+      legend.box.just = "center",
+      legend.spacing.x = unit(1, "cm"),
+      legend.background = element_rect(fill = "white", color = "black", linewidth = 0.8),
+      legend.margin = margin(10, 10, 10, 10),
+      legend.text = element_text(size = 11, color = "black"),
+      legend.title = element_text(size = 12, face = "bold", color = "black"),
+      # Plot margins
+      plot.margin = margin(15, 15, 15, 15)
+    )
+  
+  return(p)
+})
+
+# Save individual plots
+for (cond_name in names(all_results)) {
+  cond_label <- condition_meta[[cond_name]]$label
+  clean_label <- tolower(gsub(" ", "_", cond_label))
+  
+  print(plot_list[[cond_name]])
+  
+  ggsave(file.path(OUT_FIG, paste0("Fig3_panelA_cis_trans_2x2_", clean_label, ".tiff")), 
+         plot_list[[cond_name]],
+         width = 12, height = 11, units = "in", dpi = 600, compression = "lzw")
+  ggsave(file.path(OUT_FIG, paste0("Fig3_panelA_cis_trans_2x2_", clean_label, ".png")), 
+         plot_list[[cond_name]],
+         width = 12, height = 11, units = "in", dpi = 300)
+  
+  cat("✓ Saved: Fig3_panelA_cis_trans_2x2_", clean_label, ".tiff & .png\n")
+}
+```
+
+## 10. Combined comparison plot (optional)
+
+```{r panelA-combined, fig.width=14, fig.height=12}
+panelA_combined <- ggplot(combined_all, aes(var_genome, pheno_genome, color = cis_trans, size = abs_effect_size)) +
+  geom_point(alpha = 0.6) +
+  facet_grid(condition ~ variant_type) +
+  scale_color_manual(
+    name = "eQTL type",
+    values = c(Cis = "#d73027", Trans = "#4575b4"),
+    guide = guide_legend(title.position = "top", title.hjust = 0.5, 
+                         label.theme = element_text(size = 11, face = "bold"),
+                         title.theme = element_text(size = 12, face = "bold"))
+  ) +
+  scale_size_continuous(
+    name = "Effect size (|β|)",
+    range = c(0.4, 2.6),
+    trans = "log10",
+    guide = guide_legend(title.position = "top", title.hjust = 0.5,
+                         label.theme = element_text(size = 11),
+                         title.theme = element_text(size = 12, face = "bold"))
+  ) +
+  scale_x_continuous(breaks = chr_mids, labels = names(chr_mids), expand = c(0.01, 0)) +
+  scale_y_continuous(breaks = chr_mids, labels = names(chr_mids), expand = c(0.01, 0)) +
+  labs(
+    title = "Cis/Trans eQTL mapping across conditions",
+    x = "Variant position (chromosome)",
+    y = "Gene position (chromosome)"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    plot.title = element_text(size = 14, face = "bold", color = "black", hjust = 0.5, margin = margin(b=10)),
+    axis.title = element_text(size = 12, face = "bold", color = "black"),
+    axis.text = element_text(size = 10, color = "black", face = "bold"),
+    strip.text = element_text(size = 11, face = "bold", color = "black"),
+    strip.background = element_rect(fill = "grey90", color = "black", linewidth = 0.8),
+    panel.border = element_rect(color = "black", linewidth = 0.8),
+    panel.grid = element_line(color = "grey95", linewidth = 0.3),
+    legend.position = "bottom",
+    legend.box = "horizontal",
+    legend.spacing.x = unit(1, "cm"),
+    legend.background = element_rect(fill = "white", color = "black", linewidth = 0.8),
+    legend.margin = margin(10, 10, 10, 10),
+    plot.margin = margin(15, 15, 15, 15)
+  )
+
+print(panelA_combined)
+ggsave(file.path(OUT_FIG, "Fig3_panelA_cis_trans_combined_conditions.tiff"), 
+       panelA_combined, width = 14, height = 12, units = "in", dpi = 600, compression = "lzw")
+ggsave(file.path(OUT_FIG, "Fig3_panelA_cis_trans_combined_conditions.png"), 
+       panelA_combined, width = 14, height = 12, units = "in", dpi = 300)
+
+cat("✓ Saved: Fig3_panelA_cis_trans_combined_conditions.tiff & .png\n\n")
+```
+
+## 11. Save annotated tables for each condition
+
+```{r save-tables}
+library(data.table)
+
+cat("════════════════════════════════════════════════════════════\n")
+cat("SAVING ANNOTATED TABLES\n")
+cat("════════════════════════════════════════════════════════════\n\n")
+
+# Save per-condition tables
+for (cond_name in names(all_results)) {
+  cond_label <- condition_meta[[cond_name]]$label
+  clean_label <- tolower(gsub(" ", "_", cond_label))
+  combined_cond <- all_results[[cond_name]]
+  
+  # Save combined harmonized table
+  out_file_combined <- file.path(OUT_ANNOT, 
+                                 paste0("cis_trans_eQTL_mapping_all_variants_combined_", clean_label, ".txt"))
+  fwrite(combined_cond, out_file_combined, sep = "\t", quote = FALSE, row.names = FALSE, na = "NA")
+  cat(sprintf("✓ Wrote cis_trans_eQTL_mapping_all_variants_combined_%s.txt — %d rows\n", 
+              clean_label, nrow(combined_cond)))
+  
+  # Save per-variant-type tables
+  for (vt in c("SNP", "CNV", "Indel", "SV")) {
+    vt_data <- combined_cond %>% filter(variant_type == vt)
+    if (nrow(vt_data) > 0) {
+      out_file_vt <- file.path(OUT_ANNOT, 
+                               paste0(tolower(vt), "_data_annotated_cis_trans_", clean_label, ".txt"))
+      fwrite(vt_data, out_file_vt, sep = "\t", quote = FALSE, row.names = FALSE, na = "NA")
+      cat(sprintf("  → %s: %d rows\n", basename(out_file_vt), nrow(vt_data)))
+    }
+  }
+  cat("\n")
+}
+
+# Save combined across-condition table
+fwrite(combined_all, file.path(OUT_ANNOT, "cis_trans_eQTL_mapping_all_variants_all_conditions.txt"),
+       sep = "\t", quote = FALSE, row.names = FALSE, na = "NA")
+cat(sprintf("✓ Wrote cis_trans_eQTL_mapping_all_variants_all_conditions.txt — %d rows\n\n", 
+            nrow(combined_all)))
+
+cat("════════════════════════════════════════════════════════════\n")
+cat("ALL PROCESSING COMPLETE ✓\n")
+cat("════════════════════════════════════════════════════════════\n")
+```
+
+---
+
+## **Key improvements:**
+
+✅ **Single unified codebase** — processes both fluconazole & sc2glu simultaneously  
+✅ **Modular design** — `process_condition()` function handles each condition independently  
+✅ **Per-condition plots** — separate 2×2 faceted plots for each condition  
+✅ **Combined comparison plot** — 2×4 grid view (condition × variant type)  
+✅ **Organized outputs** — all tables labeled by condition  
+✅ **All variant types** — SNP, CNV, Indel, SV for both conditions  
+✅ **Publication-ready** — bold axes, clear legends, high-res output  
+
+Just copy the entire chunk and run! 🎯

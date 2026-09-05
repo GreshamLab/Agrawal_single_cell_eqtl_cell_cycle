@@ -35,15 +35,15 @@ from the single combined file (split by `Genetic_variants`); to use per-type fil
 instead, set `annot` per entry and set `USE_COMBINED <- FALSE`.
 
 ```{r config}
-RES <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Agrawal_single_cell_eqtl_cell_cycle/Figure.3/Fig.3-Panel-A-C-D-cis-and-trans-eqtl-YPD-variant-type/results/"
-OUT <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Agrawal_single_cell_eqtl_cell_cycle/Figure.3/Fig.3-Panel-A-C-D-cis-and-trans-eqtl-YPD-variant-type/results/"
+RES <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Agrawal_single_cell_eqtl_cell_cycle/Figure.3/Fig.3-Panel-A-C-D-cis-and-trans-eqtl-YPD-variant-type/results/YPD.1/eqtl_plot/annotations/"
+OUT <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Agrawal_single_cell_eqtl_cell_cycle/Figure.3/Fig.3-Panel-A-C-D-cis-and-trans-eqtl-YPD-variant-type/results/raw_single_cell_plots"
 dir.create(OUT, showWarnings = FALSE, recursive = TRUE)
 
 # shared single-cell object (cells -> strain via $SNG.BEST.GUESS)
 SEURAT_FILE <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.1/gene_expression_analysis/output_from_pseudobulk_fastlmm/Na_va_data_subsetted.rds"
 
 # single combined annotation file (has Genetic_variants + cis_trans columns)
-USE_COMBINED <- TRUE
+USE_COMBINED <- FALSE
 COMBINED_ANNOT <- file.path(OUT, "all_clumped_eqtl_annotated_YPD.1.txt")
 
 # how many cis eQTLs to VERIFY per type (ranked by FastLMM P), and how many to PLOT
@@ -74,6 +74,43 @@ variant_order  <- c("SNPs", "InDels", "SVs", "CNVs")
 variant_colors <- c(SNPs = "#4472C4", InDels = "#FFC000", SVs = "#C41E3A", CNVs = "#70AD47")
 ```
 
+```{r}
+# Add this diagnostic code BEFORE the loop that fails
+
+# 1. Check your annotation file
+snp_annot <- fread(file.path(RES, "snp_data_annotated_cis_trans.txt"))
+cat("Total SNPs in annotation file:", nrow(snp_annot), "\n")
+cat("Columns in annotation file:\n")
+print(names(snp_annot))
+cat("\n")
+
+# 2. Filter to cis only
+cis_snps <- snp_annot[cis_trans == "Cis"]
+cat("Cis eQTLs in annotation:", nrow(cis_snps), "\n\n")
+
+# 3. Show first few SNPs
+cat("First 5 cis SNPs:\n")
+print(cis_snps[1:5, .(SNP, Pheno, cis_trans)])
+cat("\n")
+
+# 4. Check PLINK file structure
+cat("Checking PLINK SNPs...\n")
+# Show what PLINK SNPs look like
+cat("PLINK .bim sample lines:\n")
+system("head -5 /projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/pan_transcriptome_paper/SNPs/SNPs_no_change_name_and_no_strain_filtering_only_MAF15_filtered/full969Matrix.SNPs.Biallelic.Var.DP10.99percNonMissing.MAF15.NoSubTelo20kb.plink.bim")
+cat("\n")
+
+# 5. Check if SNP column exists and has data
+cat("SNP column in annotation - any missing?\n")
+cat("Non-null SNPs:", sum(!is.na(cis_snps$SNP)), "of", nrow(cis_snps), "\n")
+cat("Sample SNP values:\n")
+print(head(cis_snps$SNP, 10))
+```
+
+
+
+
+
 # 2. Load the single-cell object (once)
 
 ```{r load-seurat}
@@ -81,11 +118,14 @@ seurat_object <- readRDS(SEURAT_FILE)
 cat("Seurat object:", ncol(seurat_object), "cells,", nrow(seurat_object), "genes\n")
 
 # combined annotation, split by variant type; keep CIS only
-if (USE_COMBINED) {
-  all_annot <- fread(COMBINED_ANNOT)
-  stopifnot("Genetic_variants" %in% names(all_annot), "cis_trans" %in% names(all_annot))
+if (!USE_COMBINED) {
+  all_annot <- lapply(names(variant_cfg), function(vt) {
+    cat("Loading", vt, "annotations...\n")
+    fread(variant_cfg[[vt]]$annot)
+  }) %>% bind_rows()
+  
   cat("Combined annotation rows:", nrow(all_annot), "\n")
-  print(all_annot[, .N, by = .(Genetic_variants, cis_trans)])
+  print(all_annot[, .N, by = .(variant_type, cis_trans)])
 }
 ```
 
@@ -115,26 +155,45 @@ detect_gene_common_name_column <- function(data) {
 # verified = how many cis-eQTLs entered the verification loop. 
 #Successful = of those, how many actually completed the negative-binomial GLM and produced a verification β (i.e. Status == "Success").
 A common reason for eQTL to not be successful will be insufficient data per strain
+
+# function design
+FastLMM results (predicted eQTLs) 
+        ↓
+Extract raw single-cell counts
+        ↓
+Fit negative-binomial GLM per cell
+        ↓
+Compare: Does the effect hold in raw data?
+
+
 ```{r verify-fn}
-# Verify a set of eQTLs against raw single-cell counts (negative-binomial GLM).
 verify_eqtls_all <- function(fastlmm_results, seurat_object, bim_data, fam_data,
                              bed_matrix, n_eqtls = NULL, save_file = NULL) {
   snp_col  <- detect_snp_column(fastlmm_results)
   gene_col <- detect_gene_column(fastlmm_results)
   gene_common_col <- detect_gene_common_name_column(fastlmm_results)
-
+  
+  # Detect which effect size column exists
+  if ("SnpWeight" %in% names(fastlmm_results)) {
+    effect_col <- "SnpWeight"
+  } else if ("abs_effect_size" %in% names(fastlmm_results)) {
+    effect_col <- "abs_effect_size"
+  } else {
+    stop("Neither SnpWeight nor abs_effect_size column found in results!")
+  }
+  
+  cat("Using effect size column:", effect_col, "\n")
+  
   available_snps  <- intersect(fastlmm_results[[snp_col]], bim_data$snp_id)
   cat("Available variants:", length(available_snps), "of",
       length(unique(fastlmm_results[[snp_col]])), "\n")
   eqtls_to_verify <- fastlmm_results %>% filter(.data[[snp_col]] %in% available_snps)
-
   if (!is.null(n_eqtls)) {
     eqtls_to_verify <- eqtls_to_verify %>% arrange(PValue) %>% head(n_eqtls)
     cat("Verifying top", nrow(eqtls_to_verify), "by FastLMM P\n")
   } else {
     cat("Verifying all", nrow(eqtls_to_verify), "eQTLs\n")
   }
-
   results <- data.frame(
     SNP_ID = character(nrow(eqtls_to_verify)), Gene_ID = character(nrow(eqtls_to_verify)),
     Gene_Common_Name = character(nrow(eqtls_to_verify)), Resolved_Gene_ID = character(nrow(eqtls_to_verify)),
@@ -143,7 +202,6 @@ verify_eqtls_all <- function(fastlmm_results, seurat_object, bim_data, fam_data,
     FastLMM_Beta = numeric(nrow(eqtls_to_verify)), FastLMM_P = numeric(nrow(eqtls_to_verify)),
     Effect_Agreement = logical(nrow(eqtls_to_verify)), R_Squared = numeric(nrow(eqtls_to_verify)),
     stringsAsFactors = FALSE)
-
   cell_sample_map      <- seurat_object$SNG.BEST.GUESS
   cells_with_genotypes <- names(cell_sample_map)[cell_sample_map %in% fam_data$iid]
   cat("Cells with genotype:", length(cells_with_genotypes), "\n")
@@ -153,20 +211,19 @@ verify_eqtls_all <- function(fastlmm_results, seurat_object, bim_data, fam_data,
     snp_id  <- eqtls_to_verify[[snp_col]][i]
     gene_id <- eqtls_to_verify[[gene_col]][i]
     gene_common <- if (!is.null(gene_common_col)) eqtls_to_verify[[gene_common_col]][i] else ""
-
-    results$SNP_ID[i] <- snp_id; results$Gene_ID[i] <- gene_id
+    results$SNP_ID[i] <- snp_id
+    results$Gene_ID[i] <- gene_id
     results$Gene_Common_Name[i] <- ifelse(is.na(gene_common), "", gene_common)
-    results$FastLMM_Beta[i] <- eqtls_to_verify$SnpWeight[i]
+    # USE THE DETECTED COLUMN
+    results$FastLMM_Beta[i] <- eqtls_to_verify[[effect_col]][i]
     results$FastLMM_P[i]    <- eqtls_to_verify$PValue[i]
-
+    
     resolved_gene <- if (gene_id %in% rownames(seurat_object)) gene_id else
       if (!is.na(gene_common) && gene_common != "" && gene_common %in% rownames(seurat_object)) gene_common else NULL
     if (is.null(resolved_gene)) { results$Status[i] <- "Gene not found"; next }
     results$Resolved_Gene_ID[i] <- resolved_gene
-
     snp_idx <- which(bim_data$snp_id == snp_id)[1]
     if (is.na(snp_idx)) { results$Status[i] <- "SNP not found"; next }
-
     genotypes        <- bed_matrix[, snp_idx]
     plink_sample_map <- setNames(genotypes, fam_data$iid)
     cell_genotypes   <- plink_sample_map[cell_sample_map[cells_with_genotypes]]
@@ -174,12 +231,10 @@ verify_eqtls_all <- function(fastlmm_results, seurat_object, bim_data, fam_data,
     cell_genotypes   <- cell_genotypes[!is.na(cell_genotypes)]
     if (length(cell_genotypes) < 20 || length(unique(cell_genotypes)) < 2) {
       results$Status[i] <- "Insufficient data"; next }
-
     gene_expr <- GetAssayData(seurat_object, slot = "counts")[resolved_gene, names(cell_genotypes)]
     plot_data <- data.frame(expression = as.numeric(gene_expr), genotype = cell_genotypes)
     plot_data <- plot_data[complete.cases(plot_data), ]
     results$N_Cells[i] <- nrow(plot_data)
-
     tryCatch({
       model <- glm.nb(expression ~ genotype, data = plot_data)
       null_model <- glm.nb(expression ~ 1, data = plot_data)
@@ -191,7 +246,6 @@ verify_eqtls_all <- function(fastlmm_results, seurat_object, bim_data, fam_data,
       results$Status[i] <- "Success"; successful <- successful + 1
     }, error = function(e) { results$Status[i] <- "Model failed" })
   }
-
   cat("Success:", successful, "/", nrow(results),
       "(", round(100 * successful / max(nrow(results), 1), 1), "%)\n")
   sd_ok <- results[results$Status == "Success", ]
@@ -300,6 +354,112 @@ create_enhanced_verification_plot <- function(plot_data, result, association, va
 }
 ```
 
+```{r raw-cell-plot-fn}
+# Plot and save violin plots for top verified eQTLs
+plot_save_raw_single_cell <- function(results_table, variant_type, n_plots,
+                                      seurat_object, bim_data, fam_data, bed_matrix,
+                                      out_dir, save_plots = TRUE) {
+  
+  results_table$SNP_ID <- as.character(results_table$SNP_ID)
+  
+  # Filter for successful verifications and sort by absolute beta
+  top <- results_table %>% 
+    filter(Status == "Success") %>%
+    mutate(Abs_Beta = abs(Verification_Beta)) %>%
+    arrange(desc(Abs_Beta)) %>% 
+    head(n_plots)
+  
+  cat("Creating violin plots for top", nrow(top), variant_type, "cis-eQTLs by |verified beta|\n\n")
+  
+  if (nrow(top) == 0) {
+    cat("No successful verifications found\n")
+    return(list())
+  }
+  
+  cell_sample_map      <- seurat_object$SNG.BEST.GUESS
+  cells_with_genotypes <- names(cell_sample_map)[cell_sample_map %in% fam_data$iid]
+  
+  plots_list <- list()
+  
+  for (i in seq_len(nrow(top))) {
+    row <- top[i, ]
+    snp_id        <- as.character(row$SNP_ID)
+    gene_id       <- as.character(row$Gene_ID)
+    resolved_gene <- as.character(row$Resolved_Gene_ID)
+    
+    # Get genotypes for this SNP
+    snp_idx <- which(bim_data$snp_id == snp_id)[1]
+    if (is.na(snp_idx)) { 
+      cat(sprintf("  [%d/%d] Skip %s (not in bim)\n", i, nrow(top), snp_id))
+      next 
+    }
+    
+    genotypes        <- bed_matrix[, snp_idx]
+    plink_sample_map <- setNames(genotypes, fam_data$iid)
+    cell_genotypes   <- plink_sample_map[cell_sample_map[cells_with_genotypes]]
+    names(cell_genotypes) <- cells_with_genotypes
+    cell_genotypes   <- cell_genotypes[!is.na(cell_genotypes)]
+    
+    # Get expression
+    gene_expr <- GetAssayData(seurat_object, slot = "counts")[resolved_gene, names(cell_genotypes)]
+    
+    # Build plot data
+    plot_data <- data.frame(
+      cell = names(cell_genotypes),
+      expression = as.numeric(gene_expr),
+      genotype = cell_genotypes,
+      sample = cell_sample_map[names(cell_genotypes)]
+    )
+    plot_data <- plot_data[complete.cases(plot_data), ]
+    
+    # Create result object
+    result <- list(
+      snp_id = snp_id, 
+      gene_id = gene_id, 
+      resolved_gene_id = resolved_gene,
+      verification_beta = row$Verification_Beta,
+      verification_pval = row$Verification_P,
+      verification_log2fc = row$Verification_Beta / log(2)
+    )
+    
+    # Create association object
+    association <- data.frame(
+      SnpWeight = row$FastLMM_Beta, 
+      PValue = row$FastLMM_P
+    )
+    
+    # Create violin plot
+    p <- create_raw_single_cell_plot(plot_data, result, association, variant_type)
+    plots_list[[i]] <- p
+    
+    cat(sprintf("  [%d/%d] %s → %s\n", i, nrow(top), snp_id, resolved_gene))
+    print(p)
+    
+    # Save plot
+    if (save_plots) {
+      # Sanitize filenames (remove special characters)
+      snp_clean <- gsub("[^A-Za-z0-9]", "_", snp_id)
+      gene_clean <- gsub("[^A-Za-z0-9]", "_", resolved_gene)
+      
+      fn <- file.path(out_dir, 
+                      sprintf("violin_%s_top%02d_%s_%s.tiff", 
+                              variant_type, i, snp_clean, gene_clean))
+      
+      ggsave(fn, p, width = 12, height = 8, units = "in", dpi = 300,
+             compression = "lzw", bg = "white")
+      
+      cat(sprintf("      → Saved to: %s\n", basename(fn)))
+    }
+  }
+  
+  cat("\n✓ Created and saved", length(plots_list), "violin plots\n\n")
+  invisible(plots_list)
+}
+```
+
+
+
+
 ```{r topn-fn}
 # From a verified results table, plot the top-N successes by |verification beta|.
 plot_top_eqtls <- function(results_table, variant_type, n_plots,
@@ -348,16 +508,22 @@ plot_top_eqtls <- function(results_table, variant_type, n_plots,
     plots_list[[i]] <- p
     print(p)   # embed in the compiled HTML
 
-    if (save_plots) {
-  fn <- file.path(out_dir, sprintf("PanelB_%s_top%02d_%s_%s.tiff", variant_type, i,
+     if (save_plots) {
+   fn <- file.path(out_dir, sprintf("PanelB_%s_top%02d_%s_%s.tiff", variant_type, i,
                     gsub("[^A-Za-z0-9]", "_", snp_id),
                     gsub("[^A-Za-z0-9]", "_", resolved_gene)))
-  ggsave(fn, p, width = 12, height = 8, units = "in", dpi = 300, 
+  ggsave(fn, p, width = 12, height = 8, units = "in", dpi = 300,
          compression = "lzw", bg = "white")
 }
   plots_list
+  }
+  
 }
+
 ```
+
+
+
 
 # 4. Run per variant type (cis only, top 5)
 
@@ -366,19 +532,15 @@ against single-cell counts, then plot and save the best `N_TOP` by verified effe
 
 ```{r run-all, results='asis', fig.width=12, fig.height=8}
 all_summaries <- list()
-
 for (vt in variant_order) {
   cat("\n\n## ", vt, "\n\n", sep = "")
   cfg <- variant_cfg[[vt]]
-
-  # genotype matrix
   bed_matrix <- BEDMatrix(cfg$plink)
   bim_data   <- fread(paste0(cfg$plink, ".bim"),
                       col.names = c("chr","snp_id","gen_dist","pos","allele1","allele2"))
   fam_data   <- fread(paste0(cfg$plink, ".fam"),
                       col.names = c("fid","iid","father","mother","sex","phenotype"))
-
-  # cis eQTLs for this type
+  
   if (USE_COMBINED) {
     ann <- all_annot[Genetic_variants == vt]
   } else {
@@ -387,15 +549,73 @@ for (vt in variant_order) {
   cis <- as.data.frame(ann[ann$cis_trans == "Cis", ])
   cat("cis eQTLs:", nrow(cis), " | PLINK strains:", nrow(fam_data),
       " | variants:", nrow(bim_data), "\n\n")
+  
   if (nrow(cis) == 0) { cat("_No cis eQTLs — skipped._\n"); next }
-
+  
   res <- verify_eqtls_all(cis, seurat_object, bim_data, fam_data, bed_matrix,
                           n_eqtls = N_VERIFY,
                           save_file = file.path(OUT, paste0("PanelB_verify_", vt, "_cis.csv")))
-
+  
   plot_top_eqtls(res, vt, N_TOP, seurat_object, bim_data, fam_data, bed_matrix,
                  out_dir = OUT, save_plots = TRUE)
 
+  # ============ RAW CELLS PLOTTING WITH SAVING ============
+  cat("\n### ", vt, " - Raw Single Cells\n\n", sep = "")
+  plots_raw <- list()
+  top_successes <- res %>% filter(Status == "Success") %>%
+    mutate(Abs_Beta = abs(Verification_Beta)) %>%
+    arrange(desc(Abs_Beta)) %>% head(N_TOP)
+  
+  cell_sample_map      <- seurat_object$SNG.BEST.GUESS
+  cells_with_genotypes <- names(cell_sample_map)[cell_sample_map %in% fam_data$iid]
+  
+  if (nrow(top_successes) > 0) {
+    for (i in seq_len(nrow(top_successes))) {
+      row <- top_successes[i, ]
+      snp_id        <- as.character(row$SNP_ID)
+      gene_id       <- as.character(row$Gene_ID)
+      resolved_gene <- as.character(row$Resolved_Gene_ID)
+      
+      snp_idx <- which(bim_data$snp_id == snp_id)[1]
+      if (is.na(snp_idx)) next
+      
+      genotypes        <- bed_matrix[, snp_idx]
+      plink_sample_map <- setNames(genotypes, fam_data$iid)
+      cell_genotypes   <- plink_sample_map[cell_sample_map[cells_with_genotypes]]
+      names(cell_genotypes) <- cells_with_genotypes
+      cell_genotypes   <- cell_genotypes[!is.na(cell_genotypes)]
+      
+      gene_expr <- GetAssayData(seurat_object, slot = "counts")[resolved_gene, names(cell_genotypes)]
+      plot_data <- data.frame(cell = names(cell_genotypes),
+                              expression = as.numeric(gene_expr),
+                              genotype = cell_genotypes,
+                              sample = cell_sample_map[names(cell_genotypes)])
+      plot_data <- plot_data[complete.cases(plot_data), ]
+      
+      result <- list(snp_id = snp_id, gene_id = gene_id, resolved_gene_id = resolved_gene,
+                     verification_beta = row$Verification_Beta,
+                     verification_pval = row$Verification_P,
+                     verification_log2fc = row$Verification_Beta / log(2))
+      association <- data.frame(SnpWeight = row$FastLMM_Beta, PValue = row$FastLMM_P)
+      
+      p_raw <- create_raw_single_cell_plot(plot_data, result, association, vt)
+      plots_raw[[i]] <- p_raw
+      
+      print(p_raw)
+      
+      # ✅ SAVE THE PLOT
+      snp_clean <- gsub("[^A-Za-z0-9]", "_", snp_id)
+      gene_clean <- gsub("[^A-Za-z0-9]", "_", resolved_gene)
+      
+      fn <- file.path(OUT, sprintf("violin_%s_top%02d_%s_%s.tiff", vt, i, snp_clean, gene_clean))
+      ggsave(fn, p_raw, width = 12, height = 8, units = "in", dpi = 300,
+             compression = "lzw", bg = "white")
+      
+      cat(sprintf("    → Saved: %s\n", basename(fn)))
+    }
+  }
+  # ============ END RAW CELLS PLOTTING ============
+  
   ok <- res[res$Status == "Success", ]
   all_summaries[[vt]] <- data.frame(
     Variant_type   = vt,

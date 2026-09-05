@@ -176,27 +176,23 @@ res <- list(
                    "YPD.1", "YPD.2"),
   rank_concordance(Flu1_norm, Flu2_norm, "Fluconazole",
                    "Fluconazole.1", "Fluconazole.2"),
-  rank_concordance(bulk_tpm, sc_norm, "sc 2% glucose vs. Caudal (2024)",
-                   "Caudal (2024)", "sc 2% glucose")
+  rank_concordance(bulk_tpm, sc_norm, "Synthetic complete vs. Caudal (2024)",
+                   "Caudal (2024)", "Synthetic complete")
 )
 
-lvl        <- c("YPD", "Fluconazole", "sc 2% glucose vs. Caudal (2024)")
+lvl        <- c("YPD", "Fluconazole", "Synthetic complete vs. Caudal (2024)")
 rank_df    <- bind_rows(lapply(res, `[[`, "df"))    %>% mutate(comparison = factor(comparison, levels = lvl))
 rank_stats <- bind_rows(lapply(res, `[[`, "stats")) %>% mutate(comparison = factor(comparison, levels = lvl))
-
-knitr::kable(rank_stats %>% select(-xlab, -ylab), digits = 3)
 ```
 
 # Figure 1C — ranked concordance panels
-
 ```{r theme}
-pub_theme <- theme_classic(base_size = 9) +
+pub_theme <- theme_classic(base_size = 9, base_family = "Arial") +
   theme(
-    axis.title = element_text(size = 9,  face = "bold", color = "black"),
-    axis.text  = element_text(size = 8,  color = "black"),
+    axis.title = element_text(size = 12,  face = "bold", color = "black"),
+    axis.text  = element_text(size = 11,  color = "black"),
     axis.line  = element_line(linewidth = 0.4, color = "black"),
     axis.ticks = element_line(linewidth = 0.35, color = "black"),
-    plot.title = element_text(size = 9,  face = "bold", hjust = 0.5),
     panel.grid       = element_blank(),
     plot.background  = element_rect(fill = "white", color = NA),
     panel.background = element_rect(fill = "white", color = NA)
@@ -206,46 +202,57 @@ pub_theme <- theme_classic(base_size = 9) +
 ```{r fig1c}
 # ── panel colours ────────────────────────────────────────────────────────────
 panel_colors <- c(
-  "YPD"                              = "#4E79A7",  # blue
-  "Fluconazole"                      = "#E15759",  # red
-  "sc 2% glucose vs. Caudal (2024)" = "#59A14F"   # green
+  "YPD"                                  = "#4E79A7",
+  "Fluconazole"                          = "#E15759",
+  "Synthetic complete vs. Caudal (2024)" = "#59A14F"
 )
+
+global_range <- range(c(rank_df$x, rank_df$y), na.rm = TRUE)
 
 make_panel <- function(cmp) {
   d <- filter(rank_df,    comparison == cmp)
   s <- filter(rank_stats, comparison == cmp)
-
   ggplot(d, aes(x = x, y = y, color = comparison)) +
     geom_point(alpha = 0.1, size = 0.3, shape = 16) +
     scale_color_manual(values = panel_colors, guide = "none") +
     annotate("text", x = Inf, y = -Inf,
              label = paste0("Spearman r = ", round(s$spearman_r, 3)),
-             hjust = 1.1, vjust = -0.8, size = 2.8, fontface = "bold") +
-    scale_x_continuous(expand = expansion(mult = 0.02)) +
-    scale_y_continuous(expand = expansion(mult = 0.02)) +
+             hjust = 1.1, vjust = -0.8, size = 4, fontface = "bold") +
+    scale_x_continuous(limits = global_range, breaks = seq(0, global_range[2], by = 1000),
+                       expand = expansion(mult = 0.02)) +
+    scale_y_continuous(limits = global_range, breaks = seq(0, global_range[2], by = 1000),
+                       expand = expansion(mult = 0.02)) +
     coord_fixed() +
-    labs(title = as.character(cmp), x = s$xlab, y = s$ylab) +
+    labs(x = s$xlab, y = s$ylab) +
     pub_theme
 }
 
-fig1c <- wrap_plots(lapply(lvl, make_panel), nrow = 1) +
-  plot_annotation(tag_levels = "i")
-
+fig1c <- wrap_plots(lapply(lvl, make_panel), nrow = 1)
 fig1c
-```
 
+
+```
+Figure 1C. Gene expression rankings are highly concordant across independent replicates and datasets.
+
+Scatter plots showing ranked gene expression concordance. For each condition, genes are ranked by their mean expression level across strains, and this ranking is compared between two datasets. Panel (i) shows YPD replicates with high concordance (Spearman r = 0.953), demonstrating reproducible gene expression rankings in standard growth conditions. Panel (ii) shows fluconazole-treated replicates (Spearman r = 0.908), indicating strong reproducibility under stress. Panel (iii) compares sc 2% glucose (single cell study) against published Caudal (2024, bulk RNAseq) data (Spearman r = 0.838), showing good concordance across experimental approaches.
 ```{r save_fig1c}
 ggsave(file.path(OUT_DIR, "Fig1C_rank_concordance.pdf"), fig1c,
        width = 9, height = 3.4, units = "in")
 ggsave(file.path(OUT_DIR, "Fig1C_rank_concordance.tiff"), fig1c,
        width = 9, height = 3.4, units = "in", dpi = 300,
-       device = "tiff", compression = "lzw")
+       device = "tiff", compression = "lzw")s
 
 write.csv(rank_stats %>% select(-xlab, -ylab),
           file.path(OUT_DIR, "Fig1C_summary_stats.csv"), row.names = FALSE)
 ```
 
+
+
 # Panel D — same-strain vs different-strain replicate concordance
+
+"How similar is this strain's overall gene expression profile between two independent experiments?" 
+
+Strain A's gene expression profile is more similar to strain A in replicate 2 then to other strains
 
 # ============================================================
 # Figure 1D / Supplementary — same-strain vs different-strain
@@ -258,28 +265,29 @@ write.csv(rank_stats %>% select(-xlab, -ylab),
 #     rather than shared technical noise)
 # ============================================================
 
+Is a strain's transcriptome reproducible across replicates?
+
+
+Figure 1D - MOVE IT TO SUPPLEMENTARY. Gene expression profiles are reproducible within strains across independent replicates.
+
+Density distributions of Spearman correlations (log₁p-transformed, replicate 1 vs 2) for the YPD condition. Each correlation represents genome-wide expression similarity between two replicate experiments. Same-strain comparisons (blue, n = 96 strains) measure expression reproducibility within individual strains across replicates and show a median r of 0.932. Cross-strain comparisons (red, n = 9,120 strain pairs) measure expression similarity between different strains across replicates and serve as a null expectation, with median r of 0.894. The marked separation between distributions demonstrates that a strain's transcriptional profile is highly reproducible and driven by intrinsic strain-specific factors rather than technical noise or shared environmental responses. Wilcoxon rank-sum test (one-sided, H₁: same-strain r > cross-strain r): p = 7.1 × 10⁻¹⁷.
 
 ```{r}
 strain_concordance <- function(mat1, mat2, label) {
-
   shared_genes   <- intersect(rownames(mat1), rownames(mat2))
   shared_strains <- intersect(colnames(mat1), colnames(mat2))
-
   cat("\n---", label, "---\n")
   cat("Shared strains:", length(shared_strains), "\n")
   cat("Shared genes:  ", length(shared_genes),   "\n")
-
   mat1_sub <- mat1[shared_genes, shared_strains]
   mat2_sub <- mat2[shared_genes, shared_strains]
-
   # ── Same-strain r ─────────────────────────────────────────────
   same_strain_r <- sapply(shared_strains, function(s) {
     cor(log1p(as.numeric(mat1_sub[, s])),
         log1p(as.numeric(mat2_sub[, s])),
         method = "spearman", use = "complete.obs")
   })
-
-  # ── Different-strain r (null) ─────────────────────────────────
+  # ── Cross-strain r (null) ──────────────────────────────────────
   all_diff_r <- c()
   for (i in 1:length(shared_strains)) {
     for (j in 1:length(shared_strains)) {
@@ -291,19 +299,15 @@ strain_concordance <- function(mat1, mat2, label) {
       }
     }
   }
-
   cat("Same-strain pairs:", length(same_strain_r), "\n")
-  cat("Different-strain pairs:", length(all_diff_r), "\n")
-
+  cat("Cross-strain pairs:", length(all_diff_r), "\n")
   wt <- wilcox.test(same_strain_r, all_diff_r, alternative = "greater")
   cat("Wilcoxon p-value:", format(wt$p.value, scientific = TRUE), "\n")
-
   df <- bind_rows(
     data.frame(r = same_strain_r, group = "Same strain"),
-    data.frame(r = all_diff_r,    group = "Different strains")
+    data.frame(r = all_diff_r,    group = "Cross-strain")
   ) %>%
-    mutate(group = factor(group, levels = c("Different strains", "Same strain")))
-
+    mutate(group = factor(group, levels = c("Cross-strain", "Same strain")))
   stats <- data.frame(
     comparison    = label,
     n_genes       = length(shared_genes),
@@ -314,46 +318,51 @@ strain_concordance <- function(mat1, mat2, label) {
     median_diff_r = median(all_diff_r),
     wilcox_p      = wt$p.value
   )
-
   list(df = df, stats = stats)
 }
 ```
 
 ```{r}
+library(ggrepel)
+
 concordance_colors <- c(
-  "Same strain"       = "#2166AC",
-  "Different strains" = "#D6604D"
+  "Same strain" = "#2166AC",
+  "Cross-strain" = "#D6604D"
 )
 
 make_concordance_panel <- function(res, condition_label) {
-
   medians <- res$df %>%
     group_by(group) %>%
     summarise(med = median(r), .groups = "drop")
-
+  
   p_label <- format(res$stats$wilcox_p, digits = 2, scientific = TRUE)
-
+  
   ggplot(res$df, aes(x = r, fill = group, color = group)) +
     geom_density(alpha = 0.5, linewidth = 0.5, color = NA) +
     geom_vline(data = medians, aes(xintercept = med, color = group),
-               linetype = "dashed", linewidth = 0.6) +
+               linetype = "dashed", linewidth = 0.6, show.legend = FALSE) +
+    ggrepel::geom_text_repel(
+      data = medians, 
+      aes(x = med, y = Inf, label = round(med, 3), color = group),
+      size = 4, fontface = "bold", show.legend = FALSE,
+      direction = "y",
+      nudge_y = -0.5,
+      segment.size = 0.3,
+      force = 2
+    ) +
     scale_fill_manual(values  = concordance_colors) +
     scale_color_manual(values = concordance_colors) +
     annotate("text", x = -Inf, y = Inf,
              label = paste0("Wilcoxon p = ", p_label),
-             hjust = -0.1, vjust = 1.4, size = 2.8, fontface = "italic") +
+             hjust = -0.1, vjust = 1.4, size = 4, fontface = "italic") +
     labs(
-      title    = condition_label,
-      subtitle = paste0("Same-strain median r = ", round(res$stats$median_same_r, 3),
-                        "  |  Different-strain median r = ", round(res$stats$median_diff_r, 3)),
       x = "Spearman r (log1p, replicate 1 vs replicate 2)",
       y = "Density", fill = NULL, color = NULL
     ) +
     pub_theme +
     theme(
-      legend.position = "top",
-      plot.subtitle   = element_text(size = 7, hjust = 0.5, color = "grey30"),
-      legend.text     = element_text(size = 7)
+      legend.position = "bottom",
+      legend.text     = element_text(size = 15)
     )
 }
 ```
@@ -371,21 +380,21 @@ figS_Flu
 knitr::kable(
   bind_rows(res_YPD$stats, res_Flu$stats),
   digits = 3,
-  caption = "Same-strain vs different-strain replicate concordance"
+  caption = "Same-strain vs cross-strain replicate concordance"
 )
 ```
 
 ```{r}
 ggsave(file.path(OUT_DIR, "Fig1D_YPD_strain_concordance.pdf"), fig1d_YPD,
-       width = 3.2, height = 3.2, units = "in")
+       width = 4.5, height = 3.5, units = "in")
+
 ggsave(file.path(OUT_DIR, "Fig1D_YPD_strain_concordance.tiff"), fig1d_YPD,
-       width = 3.2, height = 3.2, units = "in", dpi = 300,
-       device = "tiff", compression = "lzw")
+       width = 4.5, height = 3.5, units = "in", dpi = 300)
 
 ggsave(file.path(OUT_DIR, "FigS_Flu_strain_concordance.pdf"), figS_Flu,
-       width = 3.2, height = 3.2, units = "in")
+       width = 4.5, height = 3.5, units = "in")
 ggsave(file.path(OUT_DIR, "FigS_Flu_strain_concordance.tiff"), figS_Flu,
-       width = 3.2, height = 3.2, units = "in", dpi = 300,
+       width = 4.5, height = 3.5, units = "in", dpi = 300,
        device = "tiff", compression = "lzw")
 
 write.csv(bind_rows(res_YPD$stats, res_Flu$stats),

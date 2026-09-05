@@ -1,0 +1,9 @@
+Genetic_variants	Variant_subtype	n_variants	mean_traits	median_traits	max_traits
+InDels	DEL	428	1.72	1	18
+InDels	INS	354	1.62	1	8
+SVs	INV	1	10	10	10
+SVs	DUP	17	8	6	24
+SVs	DEL	83	7.27	5	34
+SVs	INS	81	5.22	4	26
+SVs	CONTR	8	4.12	4	7
+SVs	TRA	2	2.5	2.5	3

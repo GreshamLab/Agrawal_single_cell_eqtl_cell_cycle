@@ -1,0 +1,28 @@
+PLINK v1.9.0-b.8 64-bit (22 Oct 2024)
+Options in effect:
+  --bfile /projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/pan_transcriptome_paper/SNPs/SNPs_no_change_name_and_no_strain_filtering_only_MAF15_filtered/full969Matrix.SNPs.Biallelic.Var.DP10.99percNonMissing.MAF15.NoSubTelo20kb.plink
+  --clump ../plink_inputs/plink_snps.txt
+  --clump-kb 2
+  --clump-p1 0.05
+  --clump-r2 0.6
+  --out clumped_results_snps
+
+Hostname: torch-login-b-1.hpc-infra.svc.cluster.local
+Working directory: /projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Agrawal_single_cell_eqtl_cell_cycle/Figure.3/Fig.3-Panel-A-C-D-cis-and-trans-eqtl-YPD-variant-type/results/YPD.1/clumped
+Start time: Thu Aug 27 11:01:48 2026
+
+Random number seed: 1787842908
+128265 MB RAM detected; reserving 64132 MB for main workspace.
+47757 variants loaded from .bim file.
+969 people (0 males, 0 females, 969 ambiguous) loaded from .fam.
+Ambiguous sex IDs written to clumped_results_snps.nosex .
+Using 1 thread (no multithreaded calculations invoked).
+Before main variant filters, 969 founders and 0 nonfounders present.
+Calculating allele frequencies... done.
+Total genotyping rate is 0.999565.
+47757 variants and 969 people pass filters and QC.
+Note: No phenotypes present.
+--clump: 1777 clumps formed from 2355 top variants.
+Results written to clumped_results_snps.clumped .
+
+End time: Thu Aug 27 11:01:49 2026

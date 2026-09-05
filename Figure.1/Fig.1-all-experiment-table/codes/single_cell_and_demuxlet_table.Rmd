@@ -1,0 +1,138 @@
+---
+title: "Experimental summary statistics"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r libraries}
+library(Seurat)
+library(Matrix)
+library(dplyr)
+library(tibble)
+
+select <- dplyr::select
+filter <- dplyr::filter
+```
+
+```{r config}
+MIN_COUNTS   <- 3
+MIN_FEATURES <- 200
+OUT_DIR  <- "../results"
+
+samples <- tribble(
+  ~Condition,     ~Replicate, ~demuxlet_path, ~matrix_dir,
+  "YPD", 1,
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.1/demuxlet/merged_demuxlet_output_YPD.tsv",
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.1/alignment/output_of_alignment_YPD1_with_clean_gtf/run_count/outs/filtered_feature_bc_matrix/",
+  
+  "YPD", 2,
+  "/scratch/aa9679/SingleCell_cerevisiae/Gene_exp_analysis/yeast/yeast.2/data/merged_demuxlet_output_YPD_2.tsv",
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.2/alignment/output_of_alignment_YPD2_with_clean_gtf/run_count/outs/filtered_feature_bc_matrix/",
+  
+  "Fluconazole", 1,
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Flu.1/demuxlet/merged_demuxlet_output_flu_1.tsv",
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Flu.1/alignment/output_of_alignment_flu1_cust_ref/run_count/outs/filtered_feature_bc_matrix/",
+  
+  "Fluconazole", 2,
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Flu.2/demuxlet/merged_demuxlet_output_flu_2.tsv",
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Flu.2/alignment/output_of_alignment_flu2_cust_ref/run_count/outs/filtered_feature_bc_matrix/",
+  
+  "Synthetic-complete", 1, 
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.1/demuxlet/merged.tsv",
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.1/alignment/output_of_alignment_sc_with_cus_ref/run_count/outs/filtered_feature_bc_matrix/",
+  
+  "Synthetic-complete", 2, 
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2/demuxlet/merged_demuxlet_output_scglu2.tsv",
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2/alignment/output_of_alignment_sc.2_with_cus_ref/run_count/outs/filtered_feature_bc_matrix/"
+)
+```
+
+```{r functions}
+load_demuxlet <- function(path) {
+  d <- read.delim(path, stringsAsFactors = FALSE)
+  num_cols <- c("BEST.LLK", "NUM.READS", "NUM.SNPS", "NEXT.LLK",
+                "DIFF.LLK.BEST.NEXT", "BEST.POSTERIOR", "SNG.POSTERIOR",
+                "SNG.BEST.LLK", "SNG.NEXT.LLK", "SNG.ONLY.POSTERIOR",
+                "DBL.BEST.LLK", "DIFF.LLK.SNG.DBL")
+  num_cols <- intersect(num_cols, colnames(d))
+  d[num_cols] <- lapply(d[num_cols], as.numeric)
+  na.omit(d)
+}
+
+strip_suffix <- function(x) sub("-\\d+$", "", x)
+
+read_counts <- function(matrix_dir, min_features = MIN_FEATURES) {
+  mat <- Read10X(data.dir = matrix_dir)
+  if (is.list(mat)) mat <- mat[[1]]
+  colnames(mat) <- strip_suffix(colnames(mat))
+  mat[, Matrix::colSums(mat > 0) >= min_features, drop = FALSE]
+}
+
+summarise_qc <- function(Condition, Replicate, demuxlet_path, matrix_dir) {
+
+  # Load data
+  dmx <- load_demuxlet(demuxlet_path)
+  dmx$BARCODE <- strip_suffix(dmx$BARCODE)
+  mat <- read_counts(matrix_dir)
+
+  # Shared barcodes (QC-passing cells)
+  shared <- intersect(dmx$BARCODE, colnames(mat))
+  dmx <- dmx[dmx$BARCODE %in% shared, ]
+  mat <- mat[, shared, drop = FALSE]
+
+  # Calculate metrics
+  total_reads <- sum(mat)
+  total_umis  <- Matrix::colSums(mat)
+  total_genes <- Matrix::rowSums(mat > 0)
+
+  n_dmx <- nrow(dmx)
+  n_sng <- sum(dmx$DROPLET.TYPE == "SNG")
+  n_dbl <- sum(dmx$DROPLET.TYPE == "DBL")
+  n_amb <- sum(dmx$DROPLET.TYPE == "AMB")
+
+  # Catch any unexpected DROPLET.TYPE values
+  if (n_sng + n_dbl + n_amb != n_dmx) {
+    warning(Condition, ".", Replicate, ": droplet types don't sum to total — ",
+            paste(names(table(dmx$DROPLET.TYPE)), table(dmx$DROPLET.TYPE),
+                  sep = "=", collapse = ", "))
+  }
+
+  data.frame(
+    Condition             = Condition,
+    Replicate             = Replicate,
+    N_cells_total         = ncol(mat),
+    N_genes_detected      = nrow(mat),
+    Total_reads           = format(total_reads, big.mark = ","),
+    Mean_reads_per_cell   = round(mean(total_umis), 0),
+    Median_reads_per_cell = round(median(total_umis), 0),
+    Mean_genes_per_cell   = round(mean(total_genes), 0),
+    Median_genes_per_cell = round(median(total_genes), 0),
+    N_singlets_demuxlet   = n_sng,
+    N_doublets_demuxlet   = n_dbl,
+    N_ambiguous_demuxlet  = n_amb,
+    Pct_singlets          = round(100 * n_sng / n_dmx, 1),
+    Pct_doublets          = round(100 * n_dbl / n_dmx, 1),
+    Pct_ambiguous         = round(100 * n_amb / n_dmx, 1),
+    stringsAsFactors = FALSE
+  )
+}
+```
+
+```{r compute}
+summary_table <- bind_rows(lapply(seq_len(nrow(samples)), function(i) {
+  do.call(summarise_qc, as.list(samples[i, ]))
+}))
+
+summary_table$Condition <- factor(summary_table$Condition, 
+                                   levels = c("YPD", "Fluconazole", "Synthetic-complete"))
+summary_table <- arrange(summary_table, Condition, Replicate)
+
+#knitr::kable(summary_table, caption = "Summary of single-cell RNA-seq and demultiplexing statistics")
+```
+
+```{r save}
+write.csv(summary_table, file.path(OUT_DIR, "Supplementary_Table_QC_summary.csv"), row.names = FALSE)
+```

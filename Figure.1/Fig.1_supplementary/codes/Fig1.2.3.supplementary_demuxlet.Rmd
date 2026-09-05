@@ -143,77 +143,142 @@ all_demux <- bind_rows(
   )
 ```
 
----
+# Supplementary Figure 1 & 2 — Genotype abundance distribution
+# Figure 1: All conditions WITH S288C
+# Figure 2: All conditions WITHOUT S288C
 
-# Supplementary Figure 1 — Genotype abundance distribution
-
-*One panel per condition (YPD, Fluconazole, sc 2% glucose). Within each condition
-replicates are shown side-by-side. Bars show number of singlet-assigned cells per
-strain; colour indicates droplet-type composition across all replicates.*
-
-```{r suppfig1, fig.width=14, fig.height=5}
+```{r suppfig1_and_2, fig.width=12, fig.height=14}
 # Per-run singlet counts per strain
 strain_counts <- all_demux %>%
   dplyr::filter(DROPLET.TYPE == "SNG") %>%
   dplyr::mutate(Strain = clean_strain(BEST.GUESS)) %>%
   dplyr::count(Condition, Replicate, RunLabel, Strain, name = "n_cells")
 
-make_abundance_panel <- function(cond, include_dgy3 = TRUE) {
+# ── Summary: strains genotyped per condition ──────────────────────────
+strain_summary <- strain_counts %>%
+  group_by(Condition, RunLabel) %>%
+  summarise(
+    n_strains      = n_distinct(Strain),
+    total_cells    = sum(n_cells),
+    median_cells   = median(n_cells),
+    n_strains_lt10 = sum(n_cells < 10),
+    n_strains_lt50 = sum(n_cells < 50),
+    .groups = "drop"
+  )
+
+strain_summary
+
+for (excl in c(FALSE, TRUE)) {
+  d <- if (excl) filter(strain_counts, Strain != "DGY3") else strain_counts
+  cat(if (excl) "\n### Excluding DGY3\n" else "\n### Including DGY3\n")
+  d %>%
+    group_by(Condition, RunLabel) %>%
+    summarise(n_strains = n_distinct(Strain), total_cells = sum(n_cells),
+              median_cells = median(n_cells), n_strains_lt10 = sum(n_cells < 10),
+              n_strains_lt50 = sum(n_cells < 50), .groups = "drop") %>%
+    knitr::kable(digits = 0) %>% print()
+}
+# Color palette: light shade for Rep 1, dark shade for Rep 2
+rep_colors <- c(
+  "YPD.1"              = "#92B3D5",  # light blue
+  "YPD.2"              = "#4E79A7",  # dark blue
+  "Fluconazole.1"      = "#F4A8A0",  # light red
+  "Fluconazole.2"      = "#E15759",  # dark red
+  "sc 2% glucose.1"    = "#A8D584",  # light green
+  "sc 2% glucose.2"    = "#59A14F"   # dark green
+)
+
+make_abundance_panel <- function(cond, include_dgy3 = TRUE, show_x_label = FALSE) {
   d <- dplyr::filter(strain_counts, Condition == cond)
   
   if (!include_dgy3) d <- dplyr::filter(d, Strain != "DGY3")
+  
   strain_order <- d %>%
     dplyr::group_by(Strain) %>%
     dplyr::summarise(mean_n = mean(n_cells), .groups = "drop") %>%
     dplyr::arrange(mean_n) %>%
     dplyr::pull(Strain)
+  
   d <- dplyr::mutate(d,
     Strain   = factor(Strain, levels = strain_order),
     RunLabel = factor(RunLabel)
   )
-  n_reps  <- dplyr::n_distinct(d$RunLabel)
-  subtitle <- if (include_dgy3) "With S288C" else "Without S288C"
+  
+  n_reps <- dplyr::n_distinct(d$RunLabel)
+  
   ggplot(d, aes(x = Strain, y = n_cells, fill = RunLabel)) +
     geom_bar(stat = "identity", position = position_dodge(preserve = "single"),
              width = 0.7) +
-    geom_hline(yintercept = 200, color = "red", linetype = "solid", linewidth = 1) +  # ← ADD THIS
+    geom_hline(yintercept = 200, color = "red", linetype = "solid", linewidth = 1) +
     scale_fill_manual(
-      values = if (n_reps == 1) COND_COLORS[[as.character(cond)]] else c("#4E79A7", "#76B7B2"),
+      values = rep_colors,
       name   = "Run"
     ) +
     scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
     labs(
-      title    = subtitle,
-      x        = "Strain",
-      y        = "Number of singlet cells"
+      title = as.character(cond),
+      x     = if (show_x_label) "Strain" else NULL,
+      y     = "Number of singlet cells"
     ) +
     pub_theme +
     theme(
-      axis.text.x     = element_text(size = 5, angle = 90, hjust = 1, vjust = 0.5),
+      axis.text.x     = element_text(size = 11, angle = 90, hjust = 1, vjust = 0.5),
+      plot.title      = element_text(size = 11, face = "bold", hjust = 0.5),
       legend.position = if (n_reps == 1) "none" else "right"
     )
 }
 
-# Print one figure per condition, each with two panels (with/without DGY3)
-for (cond in levels(all_demux$Condition)) {
-  p_with    <- make_abundance_panel(cond, include_dgy3 = TRUE)
-  p_without <- make_abundance_panel(cond, include_dgy3 = FALSE)
-  fig <- (p_with / p_without) +
-    plot_annotation(
-      title = paste0("Supplementary Figure 1 — ", cond, ": Genotype abundance distribution"),
-      theme = theme(plot.title = element_text(size = 10, face = "bold", hjust = 0.5))
-    )
-  print(fig)
-  
-  # Clean filename: replace spaces, %, and other special chars
-  clean_cond <- gsub("[^a-zA-Z0-9._-]", "_", cond)  # ← Keep only alphanumeric, dots, underscores, hyphens
-  
-  ggsave(
-    file.path(OUT_DIR, paste0("SuppFig1_", clean_cond, "_genotype_abundance.pdf")),
-    fig, width = 12, height = 8
-  )
-}
+# Get condition order
+cond_levels <- levels(all_demux$Condition)
+
+# ─────────────────────────────────────────────────────────────────────
+# Figure 1: WITH S288C (DGY3)
+# ─────────────────────────────────────────────────────────────────────
+panels_with <- lapply(seq_along(cond_levels), function(i) {
+  cond <- cond_levels[i]
+  is_last <- i == length(cond_levels)
+  make_abundance_panel(cond, include_dgy3 = TRUE, show_x_label = is_last)
+})
+
+fig1 <- wrap_plots(panels_with, ncol = 1)
+
+print(fig1)
+
+ggsave(
+  file.path(OUT_DIR, "SuppFig1_genotype_abundance_WITH_S288C.pdf"),
+  fig1, width = 12, height = 14, dpi = 300, device = "pdf"
+)
+
+ggsave(
+  file.path(OUT_DIR, "SuppFig1_genotype_abundance_WITH_S288C.tiff"),
+  fig1, width = 12, height = 14, dpi = 300, device = "tiff", compression = "lzw"
+)
+
+# ─────────────────────────────────────────────────────────────────────
+# Figure 2: WITHOUT S288C (DGY3)
+# ─────────────────────────────────────────────────────────────────────
+panels_without <- lapply(seq_along(cond_levels), function(i) {
+  cond <- cond_levels[i]
+  is_last <- i == length(cond_levels)
+  make_abundance_panel(cond, include_dgy3 = FALSE, show_x_label = is_last)
+})
+
+fig2 <- wrap_plots(panels_without, ncol = 1)
+
+print(fig2)
+
+ggsave(
+  file.path(OUT_DIR, "SuppFig2_genotype_abundance_WITHOUT_S288C.pdf"),
+  fig2, width = 12, height = 14, dpi = 300, device = "pdf"
+)
+
+ggsave(
+  file.path(OUT_DIR, "SuppFig2_genotype_abundance_WITHOUT_S288C.tiff"),
+  fig2, width = 12, height = 14, dpi = 300, device = "tiff", compression = "lzw"
+)
 ```
+
+
 
 ```{r save_suppfig1}
 # ggsave(file.path(OUT_DIR, "SuppFig1_genotype_abundance.pdf"),  suppfig1, width = 14, height = 5)
@@ -276,6 +341,15 @@ repro_stats <- repro_wide %>%
 ```
 
 ```{r suppfig2, fig.width=7, fig.height=3.5}
+
+# Color palette: light/dark for each condition
+rep_colors <- c(
+  "YPD.1"         = "#92B3D5",  # light blue
+  "YPD.2"         = "#4E79A7",  # dark blue
+  "Fluconazole.1" = "#F4A8A0",  # light red
+  "Fluconazole.2" = "#E15759"   # dark red
+)
+
 make_repro_scatter <- function(cond) {
   d <- dplyr::filter(repro_wide, Condition == cond)
   s <- dplyr::filter(repro_stats, Condition == cond)
@@ -307,7 +381,7 @@ make_cell_count_panel <- function(cond) {
   ggplot(d, aes(x = RunLabel, y = total_cells, fill = RunLabel)) +
     geom_bar(stat = "identity", width = 0.5) +
     geom_text(aes(label = scales::comma(total_cells)), vjust = -0.4, size = 3) +
-    scale_fill_manual(values = c("#4E79A7", "#76B7B2")) +
+    scale_fill_manual(values = rep_colors[paste0(cond, ".", c(1, 2))]) +
     scale_y_continuous(expand = expansion(mult = c(0, 0.15)),
                        labels = scales::comma) +
     labs(title = "Total singlet cells recovered",
@@ -334,7 +408,7 @@ make_depth_panel <- function(cond) {
   ggplot(d_long, aes(x = RunLabel, y = Value, fill = RunLabel)) +
     geom_bar(stat = "identity", width = 0.5) +
     geom_text(aes(label = scales::comma(round(Value))), vjust = -0.4, size = 2.8) +
-    scale_fill_manual(values = c("#4E79A7", "#76B7B2")) +
+    scale_fill_manual(values = rep_colors[paste0(cond, ".", c(1, 2))]) +
     scale_y_continuous(expand = expansion(mult = c(0, 0.15)),
                        labels = scales::comma) +
     facet_wrap(~Metric, scales = "free_y") +
@@ -370,7 +444,12 @@ for (cond in c("YPD", "Fluconazole")) {
 
   ggsave(
     file.path(OUT_DIR, paste0("SuppFig2_", cond, "_reproducibility_QC.pdf")),
-    fig, width = 12, height = 4
+    fig, width = 12, height = 4, device = "pdf"
+  )
+  
+  ggsave(
+    file.path(OUT_DIR, paste0("SuppFig2_", cond, "_reproducibility_QC.tiff")),
+    fig, width = 12, height = 4, device = "tiff", compression = "lzw"
   )
 }
 
@@ -385,6 +464,7 @@ write.csv(qc_per_run,   file.path(OUT_DIR, "SuppFig2_run_QC_summary.csv"),      
 # 
 # write.csv(repro_stats, file.path(OUT_DIR, "SuppFig2_reproducibility_stats.csv"), row.names = FALSE)
 ```
+
 
 ---
 
@@ -476,6 +556,182 @@ print(suppfig3_row2)
 ggsave(file.path(OUT_DIR, "SuppFig3_amb_clade_heatmap_row1.pdf"), suppfig3_row1, width = 10, height = 5)
 ggsave(file.path(OUT_DIR, "SuppFig3_amb_clade_heatmap_row2.pdf"), suppfig3_row2, width = 10, height = 5)
 ```
+# Supplementary Figure 3 — Source of demuxlet strain mix-ups (genetic relatedness)
+
+```{r suppfig3_compute}
+# ── Condition-specific color gradients (light to dark) ────────────────────────
+cond_heatmap_colors <- list(
+  "YPD" = c(light = "#D6E8F7", dark = "#4E79A7"),
+  "Fluconazole" = c(light = "#F5D5D1", dark = "#E15759"),
+  "sc 2% glucose" = c(light = "#D9E8CF", dark = "#59A14F"),
+  "Combined" = c(light = "#E6E6FA", dark = "#6B5B95")  # Purple for combined
+)
+
+# ── Annotate AMB droplets with clade of best & next guess ────────────────────
+amb_all <- all_demux %>%
+  dplyr::filter(DROPLET.TYPE == "AMB") %>%
+  dplyr::mutate(
+    SNG.BEST.GUESS  = clean_strain(SNG.BEST.GUESS),
+    SNG.NEXT.GUESS  = clean_strain(SNG.NEXT.GUESS)
+  ) %>%
+  left_join(lookup %>% rename(Clade.best = Clades),
+            by = c("SNG.BEST.GUESS" = "Standardized.name")) %>%
+  left_join(lookup %>% select(Standardized.name, Clades) %>%
+              rename(Clade.next = Clades),
+            by = c("SNG.NEXT.GUESS" = "Standardized.name")) %>%
+  filter(!is.na(Clade.best), !is.na(Clade.next))
+
+# ── Make clade heatmap function ────────────────────────────────────────────────
+make_clade_heatmap <- function(df, title_str, cond = NULL) {
+  ct <- df %>%
+    dplyr::count(Clade.best, Clade.next, name = "n") %>%
+    complete(Clade.best, Clade.next, fill = list(n = 0L))
+  
+  ct <- ct %>%
+    mutate(on_diag = Clade.best == Clade.next)
+  
+  # Choose color scale based on condition
+  if (!is.null(cond) && cond %in% names(cond_heatmap_colors)) {
+    colors <- cond_heatmap_colors[[cond]]
+    fill_scale <- scale_fill_gradient(
+      low = colors["light"], 
+      high = colors["dark"],
+      name = "Ambiguous\ndroplets"
+    )
+  } else {
+    # Default to combined (purple)
+    colors <- cond_heatmap_colors[["Combined"]]
+    fill_scale <- scale_fill_gradient(
+      low = colors["light"], 
+      high = colors["dark"],
+      name = "Ambiguous\ndroplets"
+    )
+  }
+  
+  ggplot(ct, aes(x = Clade.best, y = Clade.next, fill = n)) +
+    geom_tile(color = "white", linewidth = 0.3) +
+    geom_tile(data = filter(ct, on_diag),
+              aes(x = Clade.best, y = Clade.next),
+              fill = NA, color = "black", linewidth = 0.6) +
+    geom_text(aes(label = ifelse(n > 0, n, "")),
+              size = 2.2, color = "white", fontface = "bold") +
+    fill_scale +
+    coord_fixed() +
+    labs(
+      title = title_str,
+      x     = "Clade of top-ranked strain (SNG.BEST.GUESS)",
+      y     = "Clade of second-ranked strain (SNG.NEXT.GUESS)"
+    ) +
+    pub_theme +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 12),
+      axis.text.y = element_text(size = 12),
+      axis.title       = element_text(color = "black", size = 12, face = "bold"),
+      legend.text          = element_text(size = 12),
+      legend.title         = element_text(size = 13, face = "bold"),
+      plot.title  = element_text(size = 10, face = "bold", hjust = 0.5)
+    )
+}
+
+# ── Generate heatmaps ──────────────────────────────────────────────────────────
+# Combined panel (all conditions, purple)
+hm_all <- make_clade_heatmap(amb_all, "All conditions combined", cond = "Combined")
+
+# Per-condition panels (with condition-specific colors)
+hm_cond <- map(
+  levels(all_demux$Condition),
+  function(cond) {
+    make_clade_heatmap(
+      filter(amb_all, Condition == cond),
+      as.character(cond),
+      cond = as.character(cond)
+    )
+  }
+)
+```
+
+```{r suppfig3, fig.width=14, fig.height=10}
+
+# ─────────────────────────────────────────────────────────────────────
+# Layout: Combined on left, per-condition on right
+# ─────────────────────────────────────────────────────────────────────
+
+# Row 1: Combined + YPD
+suppfig3_row1 <- wrap_plots(list(hm_all, hm_cond[[1]]), nrow = 1)
+
+# Row 2: Fluconazole + Synthetic-complete
+suppfig3_row2 <- wrap_plots(list(hm_cond[[2]], hm_cond[[3]]), nrow = 1)
+
+print(suppfig3_row1)
+print(suppfig3_row2)
+
+# Save as PDFs and TIFFs
+ggsave(
+  file.path(OUT_DIR, "SuppFig3_amb_clade_heatmap_row1.pdf"),
+  suppfig3_row1, width = 14, height = 5, dpi = 300, device = "pdf"
+)
+
+ggsave(
+  file.path(OUT_DIR, "SuppFig3_amb_clade_heatmap_row1.tiff"),
+  suppfig3_row1, width = 14, height = 5, dpi = 300, device = "tiff", compression = "lzw"
+)
+
+ggsave(
+  file.path(OUT_DIR, "SuppFig3_amb_clade_heatmap_row2.pdf"),
+  suppfig3_row2, width = 14, height = 5, dpi = 300, device = "pdf"
+)
+
+ggsave(
+  file.path(OUT_DIR, "SuppFig3_amb_clade_heatmap_row2.tiff"),
+  suppfig3_row2, width = 14, height = 5, dpi = 300, device = "tiff", compression = "lzw"
+)
+
+# Save both rows together as one figure
+fig_combined <- suppfig3_row1 / suppfig3_row2 +
+  plot_annotation(
+    theme = theme(plot.title = element_text(size = 12, face = "bold", hjust = 0.5))
+  )
+
+print(fig_combined)
+
+ggsave(
+  file.path(OUT_DIR, "SuppFig3_amb_clade_heatmap_combined.pdf"),
+  fig_combined, width = 14, height = 14, dpi = 300, device = "pdf"
+)
+
+ggsave(
+  file.path(OUT_DIR, "SuppFig3_amb_clade_heatmap_combined.tiff"),
+  fig_combined, width = 14, height = 14, dpi = 300, device = "tiff", compression = "lzw"
+)
+```
+
+**Key changes:**
+- ✅ Added `"Combined" = c(light = "#E6E6FA", dark = "#6B5B95")` — light to dark purple
+- ✅ Combined figure now uses purple gradient (distinct from condition colors)
+- ✅ Per-condition figures still use blue/red/green
+- ✅ `cond = "Combined"` passed to `make_clade_heatmap()` for combined figure
+
+**Color scheme:**
+- **Combined** = Purple (#E6E6FA → #6B5B95) — visually distinct neutral color
+- **YPD** = Blue (#D6E8F7 → #4E79A7)
+- **Fluconazole** = Red (#F5D5D1 → #E15759)
+- **sc 2% glucose** = Green (#D9E8CF → #59A14F)
+
+Now the combined figure stands out clearly as the pooled data! ✓
+
+**Key changes:**
+- ✅ Added `cond_heatmap_colors` with light-to-dark gradients for each condition
+- ✅ Modified `make_clade_heatmap()` to accept optional `cond` parameter
+- ✅ **Combined figure uses default blue** (neutral, no condition bias)
+- ✅ **Per-condition figures use their specific colors** (YPD blue, Fluconazole red, sc 2% glucose green)
+- ✅ Added TIFF saves for all outputs
+- ✅ Added a combined full-page version
+
+This approach:
+- Makes the combined figure visually neutral
+- Helps readers quickly identify which condition each heatmap represents
+- Maintains visual consistency with other figures in your paper ✓
+
 
 ```{r save_suppfig3}
 # ggsave(file.path(OUT_DIR, "SuppFig3_amb_clade_heatmap.pdf"),  suppfig3, width = 14, height = 4)

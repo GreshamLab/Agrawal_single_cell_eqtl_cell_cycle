@@ -1,0 +1,9 @@
+"Variant_Type","Comparison","N_eQTLs","Concordant","Concordant_Pct","Pearson_r","Spearman_rho"
+"CNVs","Flu vs YPD.1",806,686,85.11,0.757,0.7192
+"InDels","Flu vs YPD.1",1041,857,82.32,0.7091,0.7004
+"SNPs","Flu vs YPD.1",1869,1567,83.84,0.7007,0.6865
+"SVs","Flu vs YPD.1",911,746,81.89,0.6988,0.6963
+"CNVs","Flu vs sc2glu",809,601,74.29,0.5843,0.547
+"InDels","Flu vs sc2glu",1044,749,71.74,0.5571,0.5617
+"SNPs","Flu vs sc2glu",1910,1340,70.16,0.4959,0.4887
+"SVs","Flu vs sc2glu",911,674,73.98,0.5593,0.5706

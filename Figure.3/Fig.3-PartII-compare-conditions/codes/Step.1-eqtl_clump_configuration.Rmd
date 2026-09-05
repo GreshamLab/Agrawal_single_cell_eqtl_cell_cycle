@@ -1,0 +1,130 @@
+---
+title: "Step.1-eqtl_clump_configuration"
+output: html_document
+---
+
+# ===================================================================
+# CROSS-CONDITION eQTL LD CLUMPING CONFIGURATION
+# ===================================================================
+# Single config file for YPD, SC2Glu, Fluconazole
+# Produces PLINK inputs and clumped variant tables for all conditions
+
+# ─────────────────────────────────────────────────────────────────
+# 1. OUTPUT DIRECTORY (created once)
+# ─────────────────────────────────────────────────────────────────
+```{r}
+# Minimal LD clumping config for all three conditions
+library(dplyr)
+library(data.table)
+
+PLINK_OUT <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Agrawal_single_cell_eqtl_cell_cycle/Figure.3/Fig.3-PartII-compare-conditions/results/plink"
+dir.create(PLINK_OUT, showWarnings = FALSE, recursive = TRUE)
+
+# All conditions in one compact list
+conds <- list(
+  YPD = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.1/fastlmm/results",
+  SC2Glu = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2/fastlmm/results",
+  Fluconazole = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/merged_fluconazole/new_fastlmm_march_26_2026/results"
+)
+
+# Genotype files (same for all conditions)
+genos <- list(
+  SNPs   = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/pan_transcriptome_paper/SNPs/SNPs_no_change_name_and_no_strain_filtering_only_MAF15_filtered/full969Matrix.SNPs.Biallelic.Var.DP10.99percNonMissing.MAF15.NoSubTelo20kb.plink",
+  InDels = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/vcf_files_sent_by_Anne/SNPs_indels/modified_snp_indel_plink_for_96strains/Indels_only_96/indels.96samples",
+  SVs    = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/vcf_files_sent_by_Anne/SVs_from_SV.1087/SV.1087samples_updated_fam_files/SV.1087samples.SVs",
+  CNVs   = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/pan_transcriptome_paper/CNVs/CNVs_no_change_name_and_no_strain_filtering_only_MAF15_filtered/CNV_969strains_gain_maf15_N400_20221121.plink"
+)
+
+# ─ STEP 1: Create PLINK inputs ──────────────────────────────────
+for (cond_name in names(conds)) {
+  cond_dir <- conds[[cond_name]]
+  
+  # Decide variant filename pattern
+  if (cond_name == "YPD") {
+    suffix <- c(SNPs = "YPD.1", InDels = "YPD.1", SVs = "YPD.1", CNVs = "YPD.1")
+  } else if (cond_name == "SC2Glu") {
+    suffix <- c(SNPs = "sc2glu", InDels = "sc2glu", SVs = "sc2glu", CNVs = "sc2glu")
+  } else {
+    suffix <- c(SNPs = "flu", InDels = "flu", SVs = "flu", CNVs = "flu")
+  }
+  
+  for (vtype in names(suffix)) {
+    assoc_file <- file.path(cond_dir, paste0("all_signif_", vtype, "_", suffix[[vtype]], 
+                                              "_with_double_id_final_filtered_for_ncount_less_than_5_with_threshold.txt"))
+    
+    if (!file.exists(assoc_file)) { cat("⚠️ Missing:", assoc_file, "\n"); next }
+    
+    # Read and convert to PLINK format
+    d <- read.table(assoc_file, header = TRUE, sep = "\t", quote = "", stringsAsFactors = FALSE)
+    plink_df <- data.frame(SNP = d$SNP, CHR = d$Chr, BP = d$ChrPos, P = d$PValue)
+    
+    # Create output directories
+    dir_in  <- file.path(PLINK_OUT, paste0(cond_name, "_plink_inputs"))
+    dir_out <- file.path(PLINK_OUT, paste0(cond_name, "_clumped"))
+    dir.create(dir_in,  showWarnings = FALSE, recursive = TRUE)
+    dir.create(dir_out, showWarnings = FALSE, recursive = TRUE)
+    
+    # Write PLINK input
+    out_file <- file.path(dir_in, paste0("plink_", tolower(vtype), ".txt"))
+    write.table(plink_df, out_file, row.names = FALSE, quote = FALSE, sep = "\t")
+    cat("✓", cond_name, vtype, "→", basename(out_file), "\n")
+  }
+}
+
+# ─ STEP 2: Print bash commands ──────────────────────────────────
+cat("\n", strrep("═", 70), "\n", "RUN THESE BASH COMMANDS:\n", strrep("═", 70), "\n\n")
+
+for (cond_name in names(conds)) {
+  clump_dir <- file.path(PLINK_OUT, paste0(cond_name, "_clumped"))
+  plink_dir <- file.path(PLINK_OUT, paste0(cond_name, "_plink_inputs"))
+  
+  cat("# ", cond_name, "\ncd", clump_dir, "\n\n")
+  
+  for (vtype in names(genos)) {
+    cat(sprintf("plink --bfile %s --clump %s/plink_%s.txt --clump-p1 0.05 --clump-r2 0.6 --clump-kb 2 --out clumped_%s\n\n",
+                genos[[vtype]], plink_dir, tolower(vtype), tolower(vtype)))
+  }
+}
+
+# ─ STEP 3: Load clumped results (after bash) ────────────────────
+load_all_clumped <- function() {
+  all_clumped_list <- list()
+  
+  for (cond_name in names(conds)) {
+    clump_dir <- file.path(PLINK_OUT, paste0(cond_name, "_clumped"))
+    
+    # Check files exist
+    if (!all(file.exists(file.path(clump_dir, paste0("clumped_", tolower(names(genos)), ".clumped"))))) {
+      cat("⚠️ Clumped files not ready for", cond_name, "- run PLINK first\n")
+      return(NULL)
+    }
+    
+    # Load each variant type
+    dt_list <- list()
+    for (vtype in names(genos)) {
+      assoc_file <- file.path(conds[[cond_name]], 
+                              paste0("all_signif_", vtype, "_", 
+                                     if(cond_name=="YPD") "YPD.1" else if(cond_name=="SC2Glu") "sc2glu" else "flu",
+                                     "_with_double_id_final_filtered_for_ncount_less_than_5_with_threshold.txt"))
+      
+      clump_file <- file.path(clump_dir, paste0("clumped_", tolower(vtype), ".clumped"))
+      
+      if (!file.exists(clump_file)) { next }
+      
+      lead_snps <- read.table(clump_file, header = TRUE, stringsAsFactors = FALSE)$SNP
+      assoc_data <- read.table(assoc_file, header = TRUE, sep = "\t", quote = "", stringsAsFactors = FALSE)
+      
+      dt_list[[vtype]] <- assoc_data[assoc_data$SNP %in% lead_snps, ] %>%
+        mutate(Genetic_variants = vtype)
+    }
+    
+    all_clumped_list[[cond_name]] <- bind_rows(dt_list)
+    cat("✓", cond_name, ":", nrow(all_clumped_list[[cond_name]]), "lead variants\n")
+  }
+  
+  return(all_clumped_list)
+}
+
+# Uncomment after PLINK clumping is done:
+# clumped_data <- load_all_clumped()
+```

@@ -1,0 +1,1344 @@
+---
+title: "eQTL Concordance and GO Enrichment Analysis Across Conditions"
+author: "Akriti Agrawal"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+library(tidyverse)
+library(ggplot2)
+library(gridExtra)
+library(clusterProfiler)
+library(org.Sc.sgd.db)
+library(enrichplot)
+library(stringr)
+
+# resolve dplyr masking
+bind_rows <- dplyr::bind_rows
+count     <- dplyr::count
+select    <- dplyr::select
+filter    <- dplyr::filter
+```
+
+# STEP 1: Load and Prepare Data
+
+```{r load-data}
+# ── YPD.1 ────────────────────────────────────────────────────
+all_snps_eqtl_YPD1 <- read.table(
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.1/fastlmm/results/all_signif_SNP_YPD.1_with_double_id_final_filtered_for_ncount_less_than_5_with_threshold.txt",
+  header = TRUE, sep = "\t", stringsAsFactors = FALSE, quote = ""
+)
+
+all_CNV_eqtl_YPD1 <- read.table(
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.1/fastlmm/results/all_signif_CNV_YPD.1_with_double_id_final_filtered_for_ncount_less_than_5_with_threshold.txt",
+  header = TRUE, sep = "\t", stringsAsFactors = FALSE, quote = ""
+)
+
+all_indel_eqtl_YPD1 <- read.table(
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.1/fastlmm/results/all_signif_Indels_YPD.1_with_double_id_final_filtered_for_ncount_less_than_5_with_threshold.txt",
+  header = TRUE, sep = "\t", stringsAsFactors = FALSE, quote = ""
+)
+
+all_SV_eqtl_YPD1 <- read.table(
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.1/fastlmm/results/all_signif_SVs_YPD.1_with_double_id_final_filtered_for_ncount_less_than_5_with_threshold.txt",
+  header = TRUE, sep = "\t", stringsAsFactors = FALSE, quote = ""
+)
+
+# ── fluconazole ────────────────────────────────────────────────────
+all_snps_eqtl_FLU <- read.table(
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/merged_fluconazole/new_fastlmm_march_26_2026/results/all_signif_SNP_flu_with_double_id_final_filtered_for_ncount_less_than_5_with_threshold.txt",
+  header = TRUE, sep = "\t", stringsAsFactors = FALSE, quote = ""
+)
+
+all_CNV_eqtl_FLU <- read.table(
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/merged_fluconazole/new_fastlmm_march_26_2026/results/all_signif_CNV_flu_with_double_id_final_filtered_for_ncount_less_than_5_with_threshold.txt",
+  header = TRUE, sep = "\t", stringsAsFactors = FALSE, quote = ""
+)
+
+all_indel_eqtl_FLU <- read.table(
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/merged_fluconazole/new_fastlmm_march_26_2026/results/all_signif_Indels_flu_with_double_id_final_filtered_for_ncount_less_than_5_with_threshold.txt",
+  header = TRUE, sep = "\t", stringsAsFactors = FALSE, quote = ""
+)
+
+all_SV_eqtl_FLU <- read.table(
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/merged_fluconazole/new_fastlmm_march_26_2026/results/all_signif_SVs_flu_with_double_id_final_filtered_for_ncount_less_than_5_with_threshold.txt",
+  header = TRUE, sep = "\t", stringsAsFactors = FALSE, quote = ""
+)
+
+# ── sc2glu ────────────────────────────────────────────────────
+all_snps_eqtl_SC2GLU <- read.table(
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2/fastlmm/results/all_signif_SNP_sc2glu_with_double_id_final_filtered_for_ncount_less_than_5_with_threshold.txt",
+  header = TRUE, sep = "\t", stringsAsFactors = FALSE, quote = ""
+)
+
+all_CNV_eqtl_SC2GLU <- read.table(
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2/fastlmm/results/all_signif_CNV_sc2glu_with_double_id_final_filtered_for_ncount_less_than_5_with_threshold.txt",
+  header = TRUE, sep = "\t", stringsAsFactors = FALSE, quote = ""
+)
+
+all_indel_eqtl_SC2GLU <- read.table(
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2/fastlmm/results/all_signif_Indels_sc2glu_with_double_id_final_filtered_for_ncount_less_than_5_with_threshold.txt",
+  header = TRUE, sep = "\t", stringsAsFactors = FALSE, quote = ""
+)
+
+all_SV_eqtl_SC2GLU <- read.table(
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2/fastlmm/results/all_signif_SVs_sc2glu_with_double_id_final_filtered_for_ncount_less_than_5_with_threshold.txt",
+  header = TRUE, sep = "\t", stringsAsFactors = FALSE, quote = ""
+)
+
+cat("✓ Data loaded for all variant types and conditions\n\n")
+```
+
+# STEP 2: Directory Definitions and Output Paths
+
+```{r setup-directories}
+DIRS_flu <- list(
+  SNPs   = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/merged_fluconazole/new_fastlmm_march_26_2026/results/results_SNPs_968_with_double_id_final_filtered_for_ncount_less_than_5/",
+  CNVs   = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/merged_fluconazole/new_fastlmm_march_26_2026/results/results_CNVs_with_double_id_final_filtered_for_ncount_less_than_5",
+  InDels = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/merged_fluconazole/new_fastlmm_march_26_2026/results/results_Indels_with_double_id_final_filtered_for_ncount_less_than_5",
+  SVs    = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/merged_fluconazole/new_fastlmm_march_26_2026/results/results_SVs_with_double_id_final_filtered_for_ncount_less_than_5"
+)
+
+DIRS_YPD1 <- list(
+  SNPs   = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.1/fastlmm/results/results_SNPs_968_with_double_id_final_filtered_for_ncount_less_than_5/",
+  CNVs   = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.1/fastlmm/results/results_CNVs_with_double_id_final_filtered_for_ncount_less_than_5",
+  InDels = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.1/fastlmm/results/results_Indels_with_double_id_final_filtered_for_ncount_less_than_5",
+  SVs    = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.1/fastlmm/results/results_SVs_with_double_id_final_filtered_for_ncount_less_than_5"
+)
+
+DIRS_sc2glu <- list(
+  SNPs   = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2/fastlmm/results/results_SNPs_968_with_double_id_final_filtered_for_ncount_less_than_5_run2/",
+  CNVs   = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2/fastlmm/results/results_CNVs_with_double_id_final_filtered_for_ncount_less_than_5",
+  InDels = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2/fastlmm/results/results_Indels_with_double_id_final_filtered_for_ncount_less_than_5",
+  SVs    = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2/fastlmm/results/results_SVs_with_double_id_final_filtered_for_ncount_less_than_5"
+)
+
+OUTPUT_DIR <- "../results/"
+if (!dir.exists(OUTPUT_DIR)) {
+  dir.create(OUTPUT_DIR, recursive = TRUE)
+}
+
+cat("✓ Directory mappings defined\n")
+cat("✓ Output directory ready:", OUTPUT_DIR, "\n\n")
+```
+
+# STEP 3: Combine All Variant Types into Single "Significant" Datasets
+
+```{r combine-variants}
+flu_signif_combined <- bind_rows(
+  all_snps_eqtl_FLU %>% mutate(Variant_Type = "SNPs"),
+  all_CNV_eqtl_FLU %>% mutate(Variant_Type = "CNVs"),
+  all_indel_eqtl_FLU %>% mutate(Variant_Type = "InDels"),
+  all_SV_eqtl_FLU %>% mutate(Variant_Type = "SVs")
+)
+
+ypd1_signif_combined <- bind_rows(
+  all_snps_eqtl_YPD1 %>% mutate(Variant_Type = "SNPs"),
+  all_CNV_eqtl_YPD1 %>% mutate(Variant_Type = "CNVs"),
+  all_indel_eqtl_YPD1 %>% mutate(Variant_Type = "InDels"),
+  all_SV_eqtl_YPD1 %>% mutate(Variant_Type = "SVs")
+)
+
+sc2glu_signif_combined <- bind_rows(
+  all_snps_eqtl_SC2GLU %>% mutate(Variant_Type = "SNPs"),
+  all_CNV_eqtl_SC2GLU %>% mutate(Variant_Type = "CNVs"),
+  all_indel_eqtl_SC2GLU %>% mutate(Variant_Type = "InDels"),
+  all_SV_eqtl_SC2GLU %>% mutate(Variant_Type = "SVs")
+)
+
+cat("Fluconazole significant eQTLs (all variants combined):", nrow(flu_signif_combined), "\n")
+cat("  SNPs:  ", nrow(all_snps_eqtl_FLU), "\n")
+cat("  CNVs:  ", nrow(all_CNV_eqtl_FLU), "\n")
+cat("  InDels:", nrow(all_indel_eqtl_FLU), "\n")
+cat("  SVs:   ", nrow(all_SV_eqtl_FLU), "\n\n")
+
+cat("YPD.1 significant eQTLs (all variants combined):", nrow(ypd1_signif_combined), "\n\n")
+
+cat("SC2Glu significant eQTLs (all variants combined):", nrow(sc2glu_signif_combined), "\n\n")
+```
+
+# STEP 4: Generalized Retrieval Function for All Comparisons
+
+```{r retrieval-function}
+# retrieve_concordance_data_combined <- function(signif_data, cond1_name, cond2_name, 
+#                                                 all_dirs_cond1, all_dirs_cond2) {
+#   
+#   cat(sprintf("Retrieving: %s (significant) → %s (lookup)\n", cond1_name, cond2_name))
+#   
+#   cond1_genes <- unique(signif_data$Source_Phenotype)
+#   cat(sprintf("  Genes to process: %d\n", length(cond1_genes)))
+#   
+#   cond2_lookup <- lapply(seq_along(cond1_genes), function(i) {
+#     gene <- cond1_genes[i]
+#     if (i %% 50 == 0) cat(sprintf("    [%d/%d]\n", i, length(cond1_genes)))
+#     
+#     gene_variants <- signif_data %>% filter(Source_Phenotype == gene)
+#     if (nrow(gene_variants) == 0) return(NULL)
+#     
+#     var_types <- unique(gene_variants$Variant_Type)
+#     
+#     results_for_gene <- lapply(var_types, function(vtype) {
+#       dir_cond2 <- all_dirs_cond2[[vtype]]
+#       path_cond2 <- file.path(dir_cond2, gene, paste0(gene, ".first_assoc.txt"))
+#       
+#       if (!file.exists(path_cond2)) return(NULL)
+#       
+#       cond1_vars <- gene_variants %>% 
+#         filter(Variant_Type == vtype) %>% 
+#         select(SNP, Beta_Cond1 = SnpWeight, P_Cond1 = PValue, Variant_Type)
+#       
+#       if (nrow(cond1_vars) == 0) return(NULL)
+#       
+#       cond2 <- tryCatch({
+#         read.table(path_cond2, header = TRUE, sep = "\t", 
+#                    stringsAsFactors = FALSE, quote = "") %>%
+#           select(SNP, Beta_Cond2 = SnpWeight, P_Cond2 = PValue)
+#       }, error = function(e) NULL)
+#       
+#       if (is.null(cond2)) return(NULL)
+#       
+#       inner_join(cond1_vars, cond2, by = "SNP")
+#       
+#     }) %>% bind_rows()
+#     
+#     if (nrow(results_for_gene) == 0) return(NULL)
+#     results_for_gene %>% mutate(Gene = gene)
+#     
+#   }) %>% bind_rows()
+#   
+#   final_data <- cond2_lookup %>%
+#     mutate(Condition1 = cond1_name, Condition2 = cond2_name)
+#   
+#   cat(sprintf("  Retrieved: %d variant×gene pairs\n", nrow(final_data)))
+#   cat(sprintf("  Breakdown by variant type:\n"))
+#   for (vtype in c("SNPs", "CNVs", "InDels", "SVs")) {
+#     n_type <- nrow(filter(final_data, Variant_Type == vtype))
+#     if (n_type > 0) cat(sprintf("    %s: %d\n", vtype, n_type))
+#   }
+#   cat("\n")
+#   
+#   return(final_data)
+# }
+# 
+# cat("✓ Retrieval function defined\n\n")
+```
+
+# STEP 5: Data Retrieval
+
+```{r retrieve-concordance}
+# cat("╔════════════════════════════════════════════╗\n")
+# cat("║  RETRIEVING CONCORDANCE DATA               ║\n")
+# cat("╚════════════════════════════════════════════╝\n\n")
+# 
+# conc_flu_ypd1 <- retrieve_concordance_data_combined(
+#   flu_signif_combined, "Fluconazole", "YPD.1", DIRS_flu, DIRS_YPD1
+# )
+# 
+# conc_flu_sc2glu <- retrieve_concordance_data_combined(
+#   flu_signif_combined, "Fluconazole", "sc2glu", DIRS_flu, DIRS_sc2glu
+# )
+# 
+# cat("✓ Concordance data retrieved\n\n")
+```
+
+# STEP 6: Save to RDS and Reload
+
+```{r save-and-reload-rds}
+# saveRDS(conc_flu_ypd1, file.path(OUTPUT_DIR, "conc_flu_ypd1.rds"))
+# saveRDS(conc_flu_sc2glu, file.path(OUTPUT_DIR, "conc_flu_sc2glu.rds"))
+# 
+# cat("✓ Saved concordance data to RDS files\n\n")
+
+# Reload from RDS
+conc_flu_ypd1 <- readRDS(file.path(OUTPUT_DIR, "conc_flu_ypd1.rds"))
+conc_flu_sc2glu <- readRDS(file.path(OUTPUT_DIR, "conc_flu_sc2glu.rds"))
+
+cat("✓ Reloaded from RDS\n")
+cat("  conc_flu_ypd1:   ", nrow(conc_flu_ypd1), "rows\n")
+cat("  conc_flu_sc2glu: ", nrow(conc_flu_sc2glu), "rows\n\n")
+```
+
+# STEP 7: Concordance Statistics Calculation
+
+```{r concordance-stats-detailed}
+calculate_concordance_stats <- function(concordance_data, flu_total, comparison_name, 
+                                        cond1_name = "Fluconazole", cond2_name = "Condition2") {
+  
+  cat(sprintf("\n%s (all variants)\n", comparison_name))
+  cat(strrep("=", 70), "\n\n")
+  
+  n_retrieved <- nrow(concordance_data)
+  n_not_found <- flu_total - n_retrieved
+  
+  directions <- sign(concordance_data$Beta_Cond1) == sign(concordance_data$Beta_Cond2)
+  n_concordant <- sum(directions, na.rm = TRUE)
+  n_discordant <- n_retrieved - n_concordant
+  obs_sign_conc <- n_concordant / n_retrieved
+  
+  # Observed effect size correlations
+  obs_r <- cor(concordance_data$Beta_Cond1, concordance_data$Beta_Cond2, method = "pearson")
+  obs_rho <- cor(concordance_data$Beta_Cond1, concordance_data$Beta_Cond2, method = "spearman")
+  
+  # Binomial test
+  binom_result <- binom.test(n_concordant, n_retrieved, p = 0.5, 
+                              alternative = "greater")
+  
+  # Permutation tests
+  cat("Running permutation tests (n=5000)...\n")
+  n_perms <- 5000
+  
+  perm_sign <- replicate(n_perms, {
+    perm_indices <- sample(1:n_retrieved, n_retrieved, replace = TRUE)
+    perm_beta2 <- concordance_data$Beta_Cond2[perm_indices]
+    sum(sign(concordance_data$Beta_Cond1) == sign(perm_beta2), na.rm = TRUE) / n_retrieved
+  })
+  
+  perm_r <- replicate(n_perms, {
+    perm_indices <- sample(1:n_retrieved, n_retrieved, replace = TRUE)
+    perm_beta2 <- concordance_data$Beta_Cond2[perm_indices]
+    cor(concordance_data$Beta_Cond1, perm_beta2, method = "pearson")
+  })
+  
+  perm_p_sign <- sum(perm_sign >= obs_sign_conc) / n_perms
+  perm_p_r <- sum(perm_r >= obs_r) / n_perms
+  
+  # Print results
+  cat(sprintf("\n╔════════════════════════════════════════════╗\n"))
+  cat(sprintf("║  eQTL SHARING BREAKDOWN                    ║\n"))
+  cat(sprintf("╚════════════════════════════════════════════╝\n\n"))
+  
+  cat(sprintf("Total %s significant eQTLs: %d\n", cond1_name, flu_total))
+  cat(sprintf("  NOT found in %s: %d (%.1f%%)\n", cond2_name, n_not_found, 
+              100 * n_not_found / flu_total))
+  cat(sprintf("  FOUND in %s: %d (%.1f%%)\n", cond2_name, n_retrieved, 
+              100 * n_retrieved / flu_total))
+  cat(sprintf("    ├─ Concordant (same direction): %d (%.1f%% of found)\n", 
+              n_concordant, 100 * obs_sign_conc))
+  cat(sprintf("    └─ Discordant (opposite direction): %d (%.1f%% of found)\n\n", 
+              n_discordant, 100 * (1 - obs_sign_conc)))
+  
+  cat(sprintf("\nEffect size correlations (n=%d):\n", n_retrieved))
+  cat(sprintf("  Pearson r:   %.4f\n", obs_r))
+  cat(sprintf("  Spearman ρ:  %.4f\n\n", obs_rho))
+  
+  cat("Concordance by variant type:\n")
+  for (vtype in c("SNPs", "CNVs", "InDels", "SVs")) {
+    subset <- concordance_data %>% filter(Variant_Type == vtype)
+    if (nrow(subset) > 0) {
+      n_conc_vt <- sum(sign(subset$Beta_Cond1) == sign(subset$Beta_Cond2), na.rm = TRUE)
+      pct_conc <- 100 * n_conc_vt / nrow(subset)
+      cat(sprintf("  %s (n=%d): %.1f%% concordant\n", vtype, nrow(subset), pct_conc))
+    }
+  }
+  
+  cat("\nStatistical tests:\n")
+  cat(sprintf("  Binomial test (H0: concordance = 0.50)\n"))
+  cat(sprintf("    p-value: %.3e\n", binom_result$p.value))
+  cat(sprintf("  Permutation test (n = %d)\n", n_perms))
+  cat(sprintf("    Sign concordance p-value: %.4f\n", perm_p_sign))
+  cat(sprintf("    Pearson r p-value:        %.4f\n\n", perm_p_r))
+  
+  cat("✓ Statistics calculated\n\n")
+  
+  return(list(
+    data = concordance_data,
+    flu_total = flu_total,
+    n_not_found = n_not_found,
+    n_retrieved = n_retrieved,
+    n_concordant = n_concordant,
+    n_discordant = n_discordant,
+    obs_sign_conc = obs_sign_conc,
+    obs_r = obs_r,
+    obs_rho = obs_rho,
+    perm_sign = perm_sign,
+    perm_r = perm_r,
+    perm_p_sign = perm_p_sign,
+    perm_p_r = perm_p_r,
+    binom_result = binom_result,
+    n_total = n_retrieved
+  ))
+}
+
+conc_flu_ypd1_stats <- calculate_concordance_stats(
+  conc_flu_ypd1, 
+  flu_total = nrow(flu_signif_combined),
+  comparison_name = "Fluconazole vs YPD.1",
+  cond1_name = "Fluconazole",
+  cond2_name = "YPD.1"
+)
+
+conc_flu_sc2glu_stats <- calculate_concordance_stats(
+  conc_flu_sc2glu,
+  flu_total = nrow(flu_signif_combined),
+  comparison_name = "Fluconazole vs SC2Glu",
+  cond1_name = "Fluconazole",
+  cond2_name = "SC2Glu"
+)
+```
+
+# STEP 8: Effect Size Plots
+
+```{r effect-size-plots}
+make_concordance_plot_by_variant <- function(conc_data, stats, comparison_label) {
+  
+  variant_colors <- c(
+    "SNPs" = "#3498DB",
+    "CNVs" = "#E67E22",
+    "InDels" = "#9B59B6",
+    "SVs" = "#E74C3C"
+  )
+  
+  plot_data <- conc_data %>%
+    mutate(
+      direction = ifelse(sign(Beta_Cond1) == sign(Beta_Cond2), 
+                        "Concordant", "Discordant")
+    )
+  
+  # Get data range for positioning labels
+  x_range <- range(plot_data$Beta_Cond1, na.rm = TRUE)
+  x_width <- x_range[2] - x_range[1]
+  
+  # Calculate label positions on regression lines at different x-positions
+  label_positions <- data.frame(
+    Variant_Type = c("SNPs", "CNVs", "InDels", "SVs"),
+    x_pos = c(
+      x_range[1] + 0.15 * x_width,
+      x_range[1] + 0.35 * x_width,
+      x_range[1] + 0.55 * x_width,
+      x_range[1] + 0.75 * x_width
+    ),
+    y_pos = numeric(4),
+    stringsAsFactors = FALSE
+  )
+  
+  # Fit regression for each variant type
+  for(i in 1:nrow(label_positions)) {
+    vtype <- label_positions$Variant_Type[i]
+    subset <- plot_data %>% filter(Variant_Type == vtype)
+    
+    if(nrow(subset) > 1) {
+      fit <- lm(Beta_Cond2 ~ Beta_Cond1, data = subset)
+      y_val <- predict(fit, newdata = data.frame(Beta_Cond1 = label_positions$x_pos[i]))
+      label_positions$y_pos[i] <- y_val
+    }
+  }
+  
+  # Create the plot
+  p <- ggplot(plot_data, aes(x = Beta_Cond1, y = Beta_Cond2)) +
+    
+    # Points colored by direction
+    geom_point(aes(color = direction), size = 2, alpha = 0.3, show.legend = TRUE) +
+    
+    # Regression lines by variant type
+    geom_smooth(data = plot_data %>% filter(Variant_Type == "SNPs"),
+                method = "lm", se = FALSE, color = variant_colors["SNPs"], 
+                linewidth = 1.2, linetype = "solid", show.legend = FALSE) +
+    geom_smooth(data = plot_data %>% filter(Variant_Type == "CNVs"),
+                method = "lm", se = FALSE, color = variant_colors["CNVs"], 
+                linewidth = 1.2, linetype = "solid", show.legend = FALSE) +
+    geom_smooth(data = plot_data %>% filter(Variant_Type == "InDels"),
+                method = "lm", se = FALSE, color = variant_colors["InDels"], 
+                linewidth = 1.2, linetype = "solid", show.legend = FALSE) +
+    geom_smooth(data = plot_data %>% filter(Variant_Type == "SVs"),
+                method = "lm", se = FALSE, color = variant_colors["SVs"], 
+                linewidth = 1.2, linetype = "solid", show.legend = FALSE) +
+    
+    # 1:1 reference line
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", 
+                color = "grey50", linewidth = 0.6, alpha = 0.7) +
+    
+    # Reference lines at 0
+    geom_hline(yintercept = 0, color = "grey70", linewidth = 0.3, alpha = 0.5) +
+    geom_vline(xintercept = 0, color = "grey70", linewidth = 0.3, alpha = 0.5) +
+    
+    # Manual color scale for direction
+    scale_color_manual(
+      values = c("Concordant" = "#27AE60", "Discordant" = "#E74C3C"),
+      name = "Direction"
+    ) +
+    
+    # Add labels directly on regression lines - colored by variant type
+    geom_text(data = label_positions,
+              aes(x = x_pos, y = y_pos, label = Variant_Type, color = Variant_Type),
+              size = 4.2, fontface = "bold", show.legend = FALSE,
+              bbox = list(boxcolour = "white", alpha = 0.7, pad = unit(1, "mm"))) +
+    
+    # Unified color scale
+    scale_color_manual(
+      values = c("Concordant" = "#27AE60", "Discordant" = "#E74C3C",
+                 "SNPs" = variant_colors["SNPs"], "CNVs" = variant_colors["CNVs"],
+                 "InDels" = variant_colors["InDels"], "SVs" = variant_colors["SVs"]),
+      name = "Direction"
+    ) +
+    
+    # Statistics annotation
+    annotate("text", x = -Inf, y = Inf, hjust = -0.05, vjust = 1.2,
+             label = sprintf("Pearson r = %.3f\nSpearman ρ = %.3f\nSign concordance = %.1f%%\nn = %d",
+                             stats$obs_r, stats$obs_rho, 100 * stats$obs_sign_conc, stats$n_total),
+             size = 3.6, fontface = "bold",
+             bbox = list(boxcolour = "white", alpha = 0.85, size = 0.5)) +
+    
+    labs(title = comparison_label,
+         x = "Effect size β (Condition 1)",
+         y = "Effect size β (Condition 2)",
+         subtitle = "Points: colored by concordance | Lines & labels: colored by variant type | Dashed: 1:1 reference") +
+    
+    theme_classic(base_size = 12) +
+    theme(
+      plot.title = element_text(face = "bold", size = 13, hjust = 0.5),
+      plot.subtitle = element_text(size = 9, hjust = 0.5, color = "grey60"),
+      axis.title = element_text(face = "bold"),
+      legend.position = "right",
+      panel.grid.major = element_line(color = "grey95", linewidth = 0.2)
+    )
+  
+  return(p)
+}
+
+p_flu_ypd1 <- make_concordance_plot_by_variant(
+  conc_flu_ypd1, conc_flu_ypd1_stats, "Fluconazole vs YPD.1"
+)
+
+p_flu_sc2glu <- make_concordance_plot_by_variant(
+  conc_flu_sc2glu, conc_flu_sc2glu_stats, "Fluconazole vs SC2Glu"
+)
+
+combined_scatter <- gridExtra::grid.arrange(p_flu_ypd1, p_flu_sc2glu, nrow = 1)
+print(combined_scatter)
+
+ggsave(file.path(OUTPUT_DIR, "Fig_effect_size_concordance.tiff"),
+       combined_scatter, width = 14, height = 6, dpi = 600, compression = "lzw")
+
+cat("╔════════════════════════════════════════════╗\n")
+cat("║  FIGURE LEGEND - Concordance Plot         ║\n")
+cat("╚════════════════════════════════════════════╝\n\n")
+cat("Points (colored by concordance direction):\n")
+cat("  • Green points  = Concordant (same direction)\n")
+cat("  • Red points    = Discordant (opposite direction)\n\n")
+cat("Regression lines & labels (colored by variant type):\n")
+cat("  • Blue line & SNPs label      = SNPs\n")
+cat("  • Orange line & CNVs label    = CNVs\n")
+cat("  • Purple line & InDels label  = InDels\n")
+cat("  • Red line & SVs label        = SVs\n\n")
+cat("Reference lines:\n")
+cat("  • Dashed grey line = Perfect 1:1 correlation\n\n")
+cat("✓ Saved: Fig_effect_size_concordance.tiff\n\n")
+```
+
+# STEP 9: Null Distribution Plots
+
+```{r null-distribution-plots}
+make_null_plot_combined <- function(stats, comparison_name) {
+  
+  perm_df <- data.frame(
+    sign_conc = stats$perm_sign,
+    pearson_r = stats$perm_r
+  )
+  
+  # Panel A: Sign concordance
+  p_null_sign <- ggplot(perm_df, aes(x = sign_conc)) +
+    geom_histogram(bins = 50, fill = "grey70", color = "white", linewidth = 0.2) +
+    geom_vline(xintercept = stats$obs_sign_conc, color = "#E74C3C", linewidth = 1.2) +
+    geom_vline(xintercept = 0.5, color = "black", linewidth = 0.5, linetype = "dashed") +
+    annotate("text", x = Inf, y = Inf,
+             label = sprintf("Observed = %.3f\np-value = %.2e",
+                             stats$obs_sign_conc, 
+                             stats$binom_result$p.value),
+             hjust = 1.05, vjust = 1.4, size = 3.5, fontface = "bold",
+             bbox = list(boxcolour = "white", alpha = 0.8, size = 0.5)) +
+    labs(title = "Sign Concordance Distribution",
+         x = "Sign concordance (permutation)", y = "Frequency") +
+    theme_classic(base_size = 11) +
+    theme(plot.title = element_text(face = "bold", size = 12))
+  
+  # Panel B: Pearson r
+  p_null_r <- ggplot(perm_df, aes(x = pearson_r)) +
+    geom_histogram(bins = 50, fill = "grey70", color = "white", linewidth = 0.2) +
+    geom_vline(xintercept = stats$obs_r, color = "#27AE60", linewidth = 1.2) +
+    geom_vline(xintercept = 0, color = "black", linewidth = 0.5, linetype = "dashed") +
+    annotate("text", x = Inf, y = Inf,
+             label = sprintf("Observed = %.3f\np-value = %.4f",
+                             stats$obs_r, 
+                             stats$perm_p_r),
+             hjust = 1.05, vjust = 1.4, size = 3.5, fontface = "bold",
+             bbox = list(boxcolour = "white", alpha = 0.8, size = 0.5)) +
+    labs(title = "Pearson r Distribution",
+         x = "Pearson r (permutation)", y = "Frequency") +
+    theme_classic(base_size = 11) +
+    theme(plot.title = element_text(face = "bold", size = 12))
+  
+  gridExtra::grid.arrange(p_null_sign, p_null_r, nrow = 1)
+}
+
+p_null_flu_ypd1 <- make_null_plot_combined(conc_flu_ypd1_stats, "Fluconazole vs YPD.1")
+p_null_flu_sc2glu <- make_null_plot_combined(conc_flu_sc2glu_stats, "Fluconazole vs SC2Glu")
+
+print(p_null_flu_ypd1)
+ggsave(file.path(OUTPUT_DIR, "Fig_null_distribution_Flu_vs_YPD1.tiff"),
+       p_null_flu_ypd1, width = 12, height = 5, dpi = 600, compression = "lzw")
+
+print(p_null_flu_sc2glu)
+ggsave(file.path(OUTPUT_DIR, "Fig_null_distribution_Flu_vs_sc2glu.tiff"),
+       p_null_flu_sc2glu, width = 12, height = 5, dpi = 600, compression = "lzw")
+
+cat("✓ Saved null distribution plots\n\n")
+```
+
+---
+
+# Analysis: Categorization, Concordance, and GO Enrichment
+
+```{r categorize-eqtls}
+categorize_eqtls <- function(signif_data_cond1, concordance_data, cond1_name, cond2_name) {
+  
+  cat(sprintf("\n%s vs %s\n", cond1_name, cond2_name))
+  cat(strrep("=", 70), "\n\n")
+  
+  all_sig_cond1 <- signif_data_cond1 %>%
+    select(SNP, Gene = Source_Phenotype, Beta_Cond1 = SnpWeight, 
+           Variant_Type, P_Cond1 = PValue) %>%
+    mutate(pair_id = paste0(SNP, "_", Gene))
+  
+  found_in_cond2 <- concordance_data %>%
+    mutate(pair_id = paste0(SNP, "_", Gene)) %>%
+    select(pair_id, Beta_Cond2, P_Cond2)
+  
+  categorized <- all_sig_cond1 %>%
+    left_join(found_in_cond2, by = "pair_id") %>%
+    mutate(
+      Found_in_both = !is.na(Beta_Cond2),
+      Direction_Match = ifelse(Found_in_both, sign(Beta_Cond1) == sign(Beta_Cond2), NA),
+      Category = case_when(
+        !Found_in_both ~ sprintf("%s-only", cond1_name),
+        Found_in_both & Direction_Match ~ "Shared-Concordant",
+        Found_in_both & !Direction_Match ~ "Shared-Discordant"
+      )
+    )
+  
+  cat(sprintf("TOTAL %s eQTLs: %d\n\n", cond1_name, nrow(all_sig_cond1)))
+  cat(sprintf("%s-ONLY: %d (%.1f%%)\n", cond1_name, sum(!categorized$Found_in_both), 
+              100 * sum(!categorized$Found_in_both) / nrow(all_sig_cond1)))
+  cat(sprintf("Shared-Concordant: %d (%.1f%% of shared)\n",
+              sum(categorized$Category == "Shared-Concordant", na.rm = TRUE),
+              100 * sum(categorized$Category == "Shared-Concordant", na.rm = TRUE) / sum(categorized$Found_in_both)))
+  cat(sprintf("Shared-Discordant: %d (%.1f%% of shared)\n\n",
+              sum(categorized$Category == "Shared-Discordant", na.rm = TRUE),
+              100 * sum(categorized$Category == "Shared-Discordant", na.rm = TRUE) / sum(categorized$Found_in_both)))
+  
+  return(categorized)
+}
+
+eqtl_categories_flu_ypd <- categorize_eqtls(flu_signif_combined, conc_flu_ypd1, 
+                                             "Fluconazole", "YPD.1")
+eqtl_categories_flu_sc2 <- categorize_eqtls(flu_signif_combined, conc_flu_sc2glu,
+                                             "Fluconazole", "SC2Glu")
+```
+
+```{r extract-genes}
+extract_category_genes <- function(categorized_data, cond1_name, cond2_name) {
+  
+  genes_cond1_only <- categorized_data %>%
+    filter(Category == sprintf("%s-only", cond1_name)) %>%
+    pull(Gene) %>% unique()
+  
+  genes_shared_concordant <- categorized_data %>%
+    filter(Category == "Shared-Concordant") %>%
+    pull(Gene) %>% unique()
+  
+  genes_shared_discordant <- categorized_data %>%
+    filter(Category == "Shared-Discordant") %>%
+    pull(Gene) %>% unique()
+  
+  genes_cond2_only <- setdiff(
+    categorized_data %>% filter(!is.na(Beta_Cond2)) %>% pull(Gene) %>% unique(),
+    categorized_data$Gene %>% unique()
+  )
+  
+  cat(sprintf("%s-specific: %d | %s-specific: %d | Concordant: %d | Discordant: %d\n\n",
+              cond1_name, length(genes_cond1_only), cond2_name, length(genes_cond2_only),
+              length(genes_shared_concordant), length(genes_shared_discordant)))
+  
+  return(list(cond1_only = genes_cond1_only, cond2_only = genes_cond2_only,
+              shared_concordant = genes_shared_concordant, shared_discordant = genes_shared_discordant))
+}
+
+gene_sets_flu_ypd <- extract_category_genes(eqtl_categories_flu_ypd, "Fluconazole", "YPD.1")
+gene_sets_flu_sc2 <- extract_category_genes(eqtl_categories_flu_sc2, "Fluconazole", "SC2Glu")
+```
+
+```{r plot-sharing}
+plot_eqtl_sharing <- function(categorized_data, title) {
+  
+  summary_df <- categorized_data %>%
+    group_by(Category) %>%
+    summarise(N = n(), .groups = "drop") %>%
+    mutate(Pct = round(100 * N / sum(N), 1),
+           Category = factor(Category, levels = c("Fluconazole-only", "Shared-Concordant", 
+                                                   "Shared-Discordant")))
+  
+  colors <- c("Fluconazole-only" = "#E74C3C", "Shared-Concordant" = "#27AE60", 
+              "Shared-Discordant" = "#F39C12")
+  
+  ggplot(summary_df, aes(x = Category, y = N, fill = Category)) +
+    geom_col(width = 0.6, alpha = 0.8) +
+    geom_text(aes(label = sprintf("n=%d\n%.1f%%", N, Pct)), vjust = -0.3, size = 4, fontface = "bold") +
+    scale_fill_manual(values = colors) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+    labs(title = title, y = "Number of eQTLs", x = NULL) +
+    theme_classic(base_size = 12) +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+          axis.text.x = element_text(angle = 30, hjust = 1, face = "bold"),
+          legend.position = "none")
+}
+
+p1 <- plot_eqtl_sharing(eqtl_categories_flu_ypd, "Fluconazole vs YPD.1")
+p2 <- plot_eqtl_sharing(eqtl_categories_flu_sc2, "Fluconazole vs SC2Glu")
+
+combined_sharing <- gridExtra::grid.arrange(p1, p2, nrow = 1)
+print(combined_sharing)
+
+ggsave(file.path(OUTPUT_DIR, "Fig_eQTL_sharing.tiff"), combined_sharing, width = 12, height = 5, dpi = 600)
+cat("✓ Saved: Fig_eQTL_sharing.tiff\n\n")
+```
+
+```{r summary-table}
+cat("\n╔════════════════════════════════════════════════════════════════╗\n")
+cat("║  VERIFYING STATISTICS OBJECTS                                 ║\n")
+cat("╚════════════════════════════════════════════════════════════════╝\n\n")
+
+cat("conc_flu_ypd1_stats fields:\n")
+print(names(conc_flu_ypd1_stats))
+cat("\nconc_flu_sc2glu_stats fields:\n")
+print(names(conc_flu_sc2glu_stats))
+cat("\n")
+
+summary_table_detailed <- data.frame(
+  Comparison = c("Flu vs YPD.1", "Flu vs SC2Glu"),
+  Total_Flu_eQTLs = c(
+    conc_flu_ypd1_stats$flu_total,
+    conc_flu_sc2glu_stats$flu_total
+  ),
+  Flu_Only = c(
+    conc_flu_ypd1_stats$n_not_found,
+    conc_flu_sc2glu_stats$n_not_found
+  ),
+  Flu_Only_Pct = c(
+    sprintf("%.1f%%", 100 * conc_flu_ypd1_stats$n_not_found / conc_flu_ypd1_stats$flu_total),
+    sprintf("%.1f%%", 100 * conc_flu_sc2glu_stats$n_not_found / conc_flu_sc2glu_stats$flu_total)
+  ),
+  Found_in_Other = c(
+    conc_flu_ypd1_stats$n_retrieved,
+    conc_flu_sc2glu_stats$n_retrieved
+  ),
+  Found_Pct = c(
+    sprintf("%.1f%%", 100 * conc_flu_ypd1_stats$n_retrieved / conc_flu_ypd1_stats$flu_total),
+    sprintf("%.1f%%", 100 * conc_flu_sc2glu_stats$n_retrieved / conc_flu_sc2glu_stats$flu_total)
+  ),
+  Concordant = c(
+    conc_flu_ypd1_stats$n_concordant,
+    conc_flu_sc2glu_stats$n_concordant
+  ),
+  Concordant_Pct = c(
+    sprintf("%.1f%%", 100 * conc_flu_ypd1_stats$obs_sign_conc),
+    sprintf("%.1f%%", 100 * conc_flu_sc2glu_stats$obs_sign_conc)
+  ),
+  Discordant = c(
+    conc_flu_ypd1_stats$n_discordant,
+    conc_flu_sc2glu_stats$n_discordant
+  ),
+  Discordant_Pct = c(
+    sprintf("%.1f%%", 100 * (1 - conc_flu_ypd1_stats$obs_sign_conc)),
+    sprintf("%.1f%%", 100 * (1 - conc_flu_sc2glu_stats$obs_sign_conc))
+  ),
+  Pearson_r = c(
+    sprintf("%.4f", conc_flu_ypd1_stats$obs_r),
+    sprintf("%.4f", conc_flu_sc2glu_stats$obs_r)
+  ),
+  Spearman_rho = c(
+    sprintf("%.4f", conc_flu_ypd1_stats$obs_rho),
+    sprintf("%.4f", conc_flu_sc2glu_stats$obs_rho)
+  ),
+  stringsAsFactors = FALSE
+)
+
+cat("╔════════════════════════════════════════════════════════════════╗\n")
+cat("║  COMPREHENSIVE ANALYSIS SUMMARY                              ║\n")
+cat("╚════════════════════════════════════════════════════════════════╝\n\n")
+
+cat("eQTL SHARING AND CONCORDANCE SUMMARY\n")
+cat(strrep("=", 140), "\n\n")
+print(summary_table_detailed, row.names = FALSE, digits = 4)
+
+cat("\n\nINTERPRETATION:\n")
+cat("────────────────────────────────────────────────────────────────\n")
+cat("• Total_Flu_eQTLs: Total significant eQTLs in Fluconazole\n")
+cat("• Flu_Only: Fluconazole eQTLs NOT found in the other condition\n")
+cat("• Found_in_Other: Fluconazole eQTLs that ARE detected in the other condition\n")
+cat("• Concordant: Of found eQTLs, those with same direction of effect\n")
+cat("• Discordant: Of found eQTLs, those with opposite direction of effect\n")
+cat("• Pearson r / Spearman ρ: Correlation of effect sizes (only for found eQTLs)\n\n")
+
+cat("\nQUICK REFERENCE:\n")
+cat("────────────────────────────────────────────────────────────────\n\n")
+
+cat("Fluconazole vs YPD.1:\n")
+cat(sprintf("  Total Flu eQTLs: %d\n", conc_flu_ypd1_stats$flu_total))
+cat(sprintf("  Flu-only (not found in YPD.1): %d (%.1f%%)\n", 
+            conc_flu_ypd1_stats$n_not_found,
+            100 * conc_flu_ypd1_stats$n_not_found / conc_flu_ypd1_stats$flu_total))
+cat(sprintf("  Found in YPD.1: %d (%.1f%%)\n", 
+            conc_flu_ypd1_stats$n_retrieved,
+            100 * conc_flu_ypd1_stats$n_retrieved / conc_flu_ypd1_stats$flu_total))
+cat(sprintf("    ├─ Concordant (same direction): %d (%.1f%% of found)\n", 
+            conc_flu_ypd1_stats$n_concordant,
+            100 * conc_flu_ypd1_stats$obs_sign_conc))
+cat(sprintf("    └─ Discordant (opposite direction): %d (%.1f%% of found)\n", 
+            conc_flu_ypd1_stats$n_discordant,
+            100 * (1 - conc_flu_ypd1_stats$obs_sign_conc)))
+cat(sprintf("  Effect size correlation: r = %.4f, ρ = %.4f\n\n", 
+            conc_flu_ypd1_stats$obs_r, conc_flu_ypd1_stats$obs_rho))
+
+cat("Fluconazole vs SC2Glu:\n")
+cat(sprintf("  Total Flu eQTLs: %d\n", conc_flu_sc2glu_stats$flu_total))
+cat(sprintf("  Flu-only (not found in SC2Glu): %d (%.1f%%)\n", 
+            conc_flu_sc2glu_stats$n_not_found,
+            100 * conc_flu_sc2glu_stats$n_not_found / conc_flu_sc2glu_stats$flu_total))
+cat(sprintf("  Found in SC2Glu: %d (%.1f%%)\n", 
+            conc_flu_sc2glu_stats$n_retrieved,
+            100 * conc_flu_sc2glu_stats$n_retrieved / conc_flu_sc2glu_stats$flu_total))
+cat(sprintf("    ├─ Concordant (same direction): %d (%.1f%% of found)\n", 
+            conc_flu_sc2glu_stats$n_concordant,
+            100 * conc_flu_sc2glu_stats$obs_sign_conc))
+cat(sprintf("    └─ Discordant (opposite direction): %d (%.1f%% of found)\n", 
+            conc_flu_sc2glu_stats$n_discordant,
+            100 * (1 - conc_flu_sc2glu_stats$obs_sign_conc)))
+cat(sprintf("  Effect size correlation: r = %.4f, ρ = %.4f\n\n", 
+            conc_flu_sc2glu_stats$obs_r, conc_flu_sc2glu_stats$obs_rho))
+
+cat("\n✓ Analysis complete\n")
+```
+
+```{r variant-breakdown}
+# ============================================================================
+# Variant type breakdown
+# ============================================================================
+
+variant_breakdown <- rbind(
+  conc_flu_ypd1_stats$data %>%
+    group_by(Variant_Type) %>%
+    summarise(
+      Comparison = "Flu vs YPD.1",
+      N_eQTLs = n(),
+      Concordant = sum(sign(Beta_Cond1) == sign(Beta_Cond2)),
+      Concordant_Pct = round((sum(sign(Beta_Cond1) == sign(Beta_Cond2)) / n()) * 100, 2),
+      Pearson_r = round(cor(Beta_Cond1, Beta_Cond2, method = "pearson"), 4),
+      Spearman_rho = round(cor(Beta_Cond1, Beta_Cond2, method = "spearman"), 4),
+      .groups = "drop"
+    ),
+  conc_flu_sc2glu_stats$data %>%
+    group_by(Variant_Type) %>%
+    summarise(
+      Comparison = "Flu vs sc2glu",
+      N_eQTLs = n(),
+      Concordant = sum(sign(Beta_Cond1) == sign(Beta_Cond2)),
+      Concordant_Pct = round((sum(sign(Beta_Cond1) == sign(Beta_Cond2)) / n()) * 100, 2),
+      Pearson_r = round(cor(Beta_Cond1, Beta_Cond2, method = "pearson"), 4),
+      Spearman_rho = round(cor(Beta_Cond1, Beta_Cond2, method = "spearman"), 4),
+      .groups = "drop"
+    )
+)
+
+cat("\n")
+cat("════════════════════════════════════════════════════════════\n")
+cat("VARIANT TYPE BREAKDOWN\n")
+cat("════════════════════════════════════════════════════════════\n\n")
+print(variant_breakdown)
+```
+
+```{r identify-condition-specific}
+# ============================================================================
+# Identify YPD.1-only and SC2Glu-only eQTLs (simplified)
+# ============================================================================
+
+cat("╔════════════════════════════════════════════════════════════════╗\n")
+cat("║  IDENTIFYING CONDITION-SPECIFIC eQTLs                         ║\n")
+cat("╚════════════════════════════════════════════════════════════════╝\n\n")
+
+# YPD.1-specific eQTLs
+cat("YPD.1-specific eQTLs:\n")
+cat("─────────────────────────────────────────\n\n")
+
+ypd1_genes <- unique(ypd1_signif_combined$Source_Phenotype)
+flu_genes <- unique(flu_signif_combined$Source_Phenotype)
+
+ypd1_only_genes <- setdiff(ypd1_genes, flu_genes)
+ypd1_shared_genes <- intersect(ypd1_genes, flu_genes)
+
+cat(sprintf("Total YPD.1 significant eQTLs: %d\n", nrow(ypd1_signif_combined)))
+cat(sprintf("  Found in Fluconazole: %d (%.1f%%)\n", 
+            nrow(ypd1_signif_combined %>% filter(Source_Phenotype %in% flu_genes)),
+            100 * nrow(ypd1_signif_combined %>% filter(Source_Phenotype %in% flu_genes)) / nrow(ypd1_signif_combined)))
+cat(sprintf("  YPD.1-only (not in Flu): %d (%.1f%%)\n", 
+            nrow(ypd1_signif_combined %>% filter(Source_Phenotype %in% ypd1_only_genes)),
+            100 * nrow(ypd1_signif_combined %>% filter(Source_Phenotype %in% ypd1_only_genes)) / nrow(ypd1_signif_combined)))
+cat(sprintf("  Genes: %d YPD.1-only, %d shared\n\n", 
+            length(ypd1_only_genes), length(ypd1_shared_genes)))
+
+# SC2Glu-specific eQTLs
+cat("SC2Glu-specific eQTLs:\n")
+cat("─────────────────────────────────────────\n\n")
+
+sc2glu_genes <- unique(sc2glu_signif_combined$Source_Phenotype)
+
+sc2glu_only_genes <- setdiff(sc2glu_genes, flu_genes)
+sc2glu_shared_genes <- intersect(sc2glu_genes, flu_genes)
+
+cat(sprintf("Total SC2Glu significant eQTLs: %d\n", nrow(sc2glu_signif_combined)))
+cat(sprintf("  Found in Fluconazole: %d (%.1f%%)\n", 
+            nrow(sc2glu_signif_combined %>% filter(Source_Phenotype %in% flu_genes)),
+            100 * nrow(sc2glu_signif_combined %>% filter(Source_Phenotype %in% flu_genes)) / nrow(sc2glu_signif_combined)))
+cat(sprintf("  SC2Glu-only (not in Flu): %d (%.1f%%)\n", 
+            nrow(sc2glu_signif_combined %>% filter(Source_Phenotype %in% sc2glu_only_genes)),
+            100 * nrow(sc2glu_signif_combined %>% filter(Source_Phenotype %in% sc2glu_only_genes)) / nrow(sc2glu_signif_combined)))
+cat(sprintf("  Genes: %d SC2Glu-only, %d shared\n\n", 
+            length(sc2glu_only_genes), length(sc2glu_shared_genes)))
+
+# Save gene lists
+ypd1_only_eqtls <- ypd1_signif_combined %>% filter(Source_Phenotype %in% ypd1_only_genes)
+sc2glu_only_eqtls <- sc2glu_signif_combined %>% filter(Source_Phenotype %in% sc2glu_only_genes)
+
+write.csv(ypd1_only_eqtls, file.path(OUTPUT_DIR, "YPD1_only_eQTLs.csv"), row.names = FALSE)
+write.csv(sc2glu_only_eqtls, file.path(OUTPUT_DIR, "SC2Glu_only_eQTLs.csv"), row.names = FALSE)
+
+cat("✓ Condition-specific eQTL analysis complete\n")
+cat(sprintf("✓ Saved: YPD1_only_eQTLs.csv (%d eQTLs)\n", nrow(ypd1_only_eqtls)))
+cat(sprintf("✓ Saved: SC2Glu_only_eQTLs.csv (%d eQTLs)\n\n", nrow(sc2glu_only_eqtls)))
+```
+
+```{r go-prep}
+# ============================================================================
+# CHUNK 12A: PREPARE DATA FOR GO ENRICHMENT
+# ============================================================================
+
+prepare_concordant_genes <- function(conc_stats_data, comparison_name,
+                                      min_effect_size_corr = 0.5) {
+  
+  cat("\n╔════════════════════════════════════════════╗\n")
+  cat(sprintf("║  GO PREP: %s\n", comparison_name))
+  cat("╚════════════════════════════════════════════╝\n\n")
+  
+  data <- conc_stats_data
+  
+  concordant_vars <- data %>%
+    filter(
+      sign(Beta_Cond1) == sign(Beta_Cond2),
+      abs(Beta_Cond1) > 0 & abs(Beta_Cond2) > 0
+    )
+  
+  gene_concordance <- concordant_vars %>%
+    group_by(Gene) %>%
+    summarise(
+      N_variants = n(),
+      Mean_abs_beta_cond1 = mean(abs(Beta_Cond1)),
+      Mean_abs_beta_cond2 = mean(abs(Beta_Cond2)),
+      Pearson_r = cor(Beta_Cond1, Beta_Cond2, method = "pearson"),
+      N_concordant = sum(sign(Beta_Cond1) == sign(Beta_Cond2)),
+      Pct_concordant = (N_concordant / n()) * 100,
+      .groups = "drop"
+    ) %>%
+    mutate(
+      Has_high_correlation = abs(Pearson_r) > min_effect_size_corr
+    )
+  
+  genes_high_concordance <- gene_concordance %>%
+    filter(Has_high_correlation) %>%
+    pull(Gene) %>%
+    unique()
+  
+  genes_low_concordance <- gene_concordance %>%
+    filter(!Has_high_correlation) %>%
+    pull(Gene) %>%
+    unique()
+  
+  cat(sprintf("Total genes tested: %d\n", n_distinct(data$Gene)))
+  cat(sprintf("Genes with high concordance (|r| > %.2f): %d\n", 
+              min_effect_size_corr, length(genes_high_concordance)))
+  cat(sprintf("Genes with low concordance: %d\n", length(genes_low_concordance)))
+  cat(sprintf("\nVariant breakdown:\n"))
+  cat(sprintf("  Total variants in data: %d\n", nrow(data)))
+  cat(sprintf("  Concordant variants (same sign): %d\n", nrow(concordant_vars)))
+  cat(sprintf("  Discordant variants: %d\n\n", nrow(data) - nrow(concordant_vars)))
+  
+  return(list(
+    comparison_name = comparison_name,
+    genes_high_concordance = genes_high_concordance,
+    genes_low_concordance = genes_low_concordance,
+    gene_concordance_stats = gene_concordance,
+    all_concordant_data = concordant_vars
+  ))
+}
+
+go_prep_flu_ypd1 <- prepare_concordant_genes(
+  conc_flu_ypd1_stats$data, 
+  "Fluconazole vs YPD.1",
+  min_effect_size_corr = 0.5
+)
+
+go_prep_flu_sc2glu <- prepare_concordant_genes(
+  conc_flu_sc2glu_stats$data, 
+  "Fluconazole vs sc2glu",
+  min_effect_size_corr = 0.5
+)
+
+cat("✓ GO preparation complete\n\n")
+```
+
+```{r go-enrichment}
+# ============================================================================
+# CHUNK 12B: GO ENRICHMENT - Three-way comparison
+# ============================================================================
+
+library(clusterProfiler)
+library(org.Sc.sgd.db)
+
+# Define tested universe
+tested_universe <- read.csv(
+  "/scratch/aa9679/SingleCell_cerevisiae/Gene_exp_analysis/yeast_custom_annotations.csv"
+) %>%
+  filter(gene_biotype == "protein_coding") %>% 
+  pull(gene_id) %>% 
+  unique()
+
+cat(sprintf("Tested universe: %d protein-coding genes\n\n", length(tested_universe)))
+
+# Prepare gene categories
+prepare_three_way_categories <- function(concordance_data, cond1_name, cond2_name,
+                                         all_signif_cond1, all_signif_cond2,
+                                         min_effect_size_corr = 0.5) {
+  
+  cat(sprintf("\n╔════════════════════════════════════════════╗\n"))
+  cat(sprintf("║  Preparing categories: %s vs %s\n", cond1_name, cond2_name))
+  cat(sprintf("╚════════════════════════════════════════════╝\n\n"))
+  
+  genes_cond1 <- unique(all_signif_cond1$Source_Phenotype)
+  genes_cond2 <- unique(all_signif_cond2$Source_Phenotype)
+  
+  genes_shared <- intersect(genes_cond1, genes_cond2)
+  
+  gene_corr <- concordance_data %>%
+    filter(Gene %in% genes_shared) %>%
+    group_by(Gene) %>%
+    summarise(
+      Pearson_r = cor(Beta_Cond1, Beta_Cond2, method = "pearson"),
+      .groups = "drop"
+    )
+  
+  genes_high_conc_shared <- gene_corr %>%
+    filter(abs(Pearson_r) > min_effect_size_corr) %>%
+    pull(Gene) %>%
+    unique()
+  
+  genes_cond1_only <- setdiff(genes_cond1, genes_cond2)
+  genes_cond2_only <- setdiff(genes_cond2, genes_cond1)
+  
+  cat(sprintf("%s total genes: %d\n", cond1_name, length(genes_cond1)))
+  cat(sprintf("%s total genes: %d\n\n", cond2_name, length(genes_cond2)))
+  
+  cat(sprintf("Shared genes (in both): %d\n", length(genes_shared)))
+  cat(sprintf("  → High concordance (|r| > %.2f): %d\n", 
+              min_effect_size_corr, length(genes_high_conc_shared)))
+  cat(sprintf("  → Low concordance: %d\n\n", 
+              length(genes_shared) - length(genes_high_conc_shared)))
+  
+  cat(sprintf("%s-only genes: %d\n", cond1_name, length(genes_cond1_only)))
+  cat(sprintf("%s-only genes: %d\n\n", cond2_name, length(genes_cond2_only)))
+  
+  list(
+    cond1_only = genes_cond1_only,
+    high_conc_shared = genes_high_conc_shared,
+    cond2_only = genes_cond2_only,
+    all_shared = genes_shared,
+    cond1_name = cond1_name,
+    cond2_name = cond2_name
+  )
+}
+
+cat("\n═══════════════════════════════════════════════════\n")
+cat("PREPARING GENE CATEGORIES\n")
+cat("═══════════════════════════════════════════════════\n")
+
+go_categories_flu_ypd1 <- prepare_three_way_categories(
+  conc_flu_ypd1,
+  cond1_name = "Fluconazole",
+  cond2_name = "YPD.1",
+  all_signif_cond1 = flu_signif_combined,
+  all_signif_cond2 = ypd1_signif_combined,
+  min_effect_size_corr = 0.5
+)
+
+go_categories_flu_sc2glu <- prepare_three_way_categories(
+  conc_flu_sc2glu,
+  cond1_name = "Fluconazole",
+  cond2_name = "sc2glu",
+  all_signif_cond1 = flu_signif_combined,
+  all_signif_cond2 = sc2glu_signif_combined,
+  min_effect_size_corr = 0.5
+)
+
+cat("\n✓ Gene categories prepared\n\n")
+
+# GO enrichment function
+run_enrichGO <- function(gene_list, label, universe, ontology = "ALL") {
+  
+  g <- intersect(gene_list, universe)
+  cat(sprintf("  %s | genes in universe: %d\n", label, length(g)))
+  
+  if (length(g) < 10) { 
+    cat("    → too few genes (<10), skipping\n")
+    return(NULL) 
+  }
+  
+  res <- enrichGO(
+    gene = g, 
+    universe = universe, 
+    OrgDb = org.Sc.sgd.db, 
+    keyType = "ORF",
+    ont = ontology, 
+    pAdjustMethod = "BH", 
+    pvalueCutoff = 0.05, 
+    qvalueCutoff = 0.1
+  )
+  
+  if (is.null(res) || nrow(res) == 0) { 
+    cat("    → no significant terms\n")
+    return(NULL) 
+  }
+  
+  cat(sprintf("    → significant terms: %d\n", nrow(res)))
+  return(res)
+}
+
+# Plot comparison function
+plot_go_three_way <- function(gene_categories, tested_universe, title, outfile) {
+  
+  cat(sprintf("\n═══ %s ═══\n", title))
+  
+  # Build the three categories with SIMPLIFIED labels
+  go_lists <- list(
+    gene_categories$cond2_only,
+    gene_categories$high_conc_shared,
+    gene_categories$cond1_only
+  )
+  
+  names(go_lists) <- c(
+    sprintf("%s-only", gene_categories$cond2_name),
+    "Shared\n(high concordance)",
+    sprintf("%s-only", gene_categories$cond1_name)
+  )
+  
+  cat("eGene category sizes:\n")
+  print(sapply(go_lists, length))
+  
+  # Run enrichment for each category
+  cat("\nRunning GO enrichment:\n")
+  go_res <- lapply(names(go_lists), function(g) {
+    run_enrichGO(go_lists[[g]], g, tested_universe, ont = "ALL")
+  }) %>% setNames(names(go_lists))
+  
+  # Filter out NULL results
+  go_res <- go_res[!sapply(go_res, is.null)]
+  
+  if (length(go_res) < 2) {
+    cat("\n⚠️  Fewer than 2 categories with significant terms — plot skipped.\n\n")
+    return(invisible(NULL))
+  }
+  
+  cat(sprintf("\n✓ %d categories with significant GO terms\n", length(go_res)))
+  
+  SHOW_N <- 15
+  
+  # Merge results for comparison
+  cg <- merge_result(go_res)
+  cg@compareClusterResult$Cluster <- factor(
+    cg@compareClusterResult$Cluster, 
+    levels = names(go_lists)
+  )
+  
+  # Wrap descriptions
+  cg@compareClusterResult$Description <- str_wrap(
+    cg@compareClusterResult$Description, width = 60
+  )
+  
+  # Create dotplot
+  p <- dotplot(cg, showCategory = SHOW_N) + 
+    ggtitle(title) + 
+    theme_bw(base_size = 12) +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 14, 
+                                margin = margin(b = 10)),
+      axis.text.y = element_text(size = 8, color = "black", lineheight = 0.85),
+      axis.text.x = element_text(size = 10, face = "bold", color = "black", 
+                                 angle = 30, hjust = 1),
+      axis.title.x = element_text(size = 11, face = "bold"),
+      axis.title.y = element_blank(),
+      legend.title = element_text(size = 10, face = "bold"),
+      legend.text = element_text(size = 9)
+    )
+  
+  print(p)
+  
+  # Calculate height based on number of terms
+  n_terms <- length(unique(p$data$Description))
+  height <- max(7, 0.35 * n_terms + 2)
+  
+  ggsave(
+    file.path(OUTPUT_DIR, outfile), p, 
+    width = 12, height = height,
+    units = "in", dpi = 300, device = "tiff", 
+    compression = "lzw", limitsize = FALSE
+  )
+  
+  cat(sprintf("✓ Saved: %s\n\n", outfile))
+  invisible(p)
+}
+
+# ============================================================================
+# GO: Fluconazole vs YPD.1 (Three-way)
+# ============================================================================
+
+cat("\n╔════════════════════════════════════════════╗\n")
+cat("║  GO ENRICHMENT: Fluconazole vs YPD.1      ║\n")
+cat("║  (YPD-only | High Concordance | Flu-only) ║\n")
+cat("╚════════════════════════════════════════════╝\n")
+
+p_go_flu_ypd1 <- plot_go_three_way(
+  go_categories_flu_ypd1,
+  tested_universe,
+  "GO Enrichment: Fluconazole vs YPD.1",
+  "GO_Flu_vs_YPD1_three_way.tiff"
+)
+
+# ============================================================================
+# GO: Fluconazole vs sc2glu (Three-way)
+# ============================================================================
+
+cat("╔════════════════════════════════════════════╗\n")
+cat("║  GO ENRICHMENT: Fluconazole vs sc2glu     ║\n")
+cat("║ (SC2Glu-only | High Concordance | Flu-only)║\n")
+cat("╚════════════════════════════════════════════╝\n")
+
+p_go_flu_sc2glu <- plot_go_three_way(
+  go_categories_flu_sc2glu,
+  tested_universe,
+  "GO Enrichment: Fluconazole vs sc2glu",
+  "GO_Flu_vs_sc2glu_three_way.tiff"
+)
+
+cat("\n✓ GO enrichment analysis complete\n\n")
+
+# ============================================================================
+# Summary table of gene categories
+# ============================================================================
+
+go_summary <- data.frame(
+  Comparison = c("Flu vs YPD.1", "Flu vs YPD.1", "Flu vs YPD.1",
+                 "Flu vs sc2glu", "Flu vs sc2glu", "Flu vs sc2glu"),
+  Category = c("YPD.1-only", "High Concordance", "Fluconazole-only",
+               "sc2glu-only", "High Concordance", "Fluconazole-only"),
+  N_Genes = c(
+    length(go_categories_flu_ypd1$cond2_only),
+    length(go_categories_flu_ypd1$high_conc_shared),
+    length(go_categories_flu_ypd1$cond1_only),
+    length(go_categories_flu_sc2glu$cond2_only),
+    length(go_categories_flu_sc2glu$high_conc_shared),
+    length(go_categories_flu_sc2glu$cond1_only)
+  ),
+  Interpretation = c(
+    "Condition-specific", "Shared across conditions", "Condition-specific",
+    "Condition-specific", "Shared across conditions", "Condition-specific"
+  )
+)
+
+cat("════════════════════════════════════════════════════════════\n")
+cat("GO ENRICHMENT GENE CATEGORIES SUMMARY\n")
+cat("════════════════════════════════════════════════════════════\n\n")
+print(go_summary)
+
+write.csv(go_summary,
+          file.path(OUTPUT_DIR, "GO_gene_categories_summary.csv"),
+          row.names = FALSE)
+
+cat("\n✓ Saved: GO_gene_categories_summary.csv\n")
+```
+
+```{r go-concordance-summary}
+# ============================================================================
+# CHUNK 12C: SUMMARY - Concordant genes by category
+# ============================================================================
+
+concordance_gene_summary <- rbind(
+  data.frame(
+    Comparison = "Flu vs YPD.1",
+    Category = c("High Concordance", "Low Concordance"),
+    N_Genes = c(
+      length(go_prep_flu_ypd1$genes_high_concordance),
+      length(go_prep_flu_ypd1$genes_low_concordance)
+    ),
+    Mean_Effect_Size_Corr = c(
+      mean(filter(go_prep_flu_ypd1$gene_concordance_stats, 
+                  Has_high_correlation)$Pearson_r, na.rm = TRUE),
+      mean(filter(go_prep_flu_ypd1$gene_concordance_stats, 
+                  !Has_high_correlation)$Pearson_r, na.rm = TRUE)
+    )
+  ),
+  data.frame(
+    Comparison = "Flu vs sc2glu",
+    Category = c("High Concordance", "Low Concordance"),
+    N_Genes = c(
+      length(go_prep_flu_sc2glu$genes_high_concordance),
+      length(go_prep_flu_sc2glu$genes_low_concordance)
+    ),
+    Mean_Effect_Size_Corr = c(
+      mean(filter(go_prep_flu_sc2glu$gene_concordance_stats, 
+                  Has_high_correlation)$Pearson_r, na.rm = TRUE),
+      mean(filter(go_prep_flu_sc2glu$gene_concordance_stats, 
+                  !Has_high_correlation)$Pearson_r, na.rm = TRUE)
+    )
+  )
+)
+
+cat("\n")
+cat("════════════════════════════════════════════════════════════\n")
+cat("CONCORDANT GENES SUMMARY\n")
+cat("════════════════════════════════════════════════════════════\n\n")
+print(concordance_gene_summary)
+
+write.csv(concordance_gene_summary,
+          file.path(OUTPUT_DIR, "Concordant_Genes_Summary.csv"),
+          row.names = FALSE)
+
+cat("\n✓ Saved: Concordant_Genes_Summary.csv\n\n")
+
+# Save the detailed concordance statistics per gene
+write.csv(go_prep_flu_ypd1$gene_concordance_stats,
+          file.path(OUTPUT_DIR, "Gene_Concordance_Stats_Flu_vs_YPD1.csv"),
+          row.names = FALSE)
+
+write.csv(go_prep_flu_sc2glu$gene_concordance_stats,
+          file.path(OUTPUT_DIR, "Gene_Concordance_Stats_Flu_vs_sc2glu.csv"),
+          row.names = FALSE)
+
+cat("✓ Saved: Gene_Concordance_Stats_*.csv\n")
+```
+
+---
+
+**All steps complete!** This is your final, fully integrated `.Rmd` file with all changes included.

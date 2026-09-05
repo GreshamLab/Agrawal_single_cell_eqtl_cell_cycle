@@ -1,0 +1,4 @@
+condition,regulon,n_genes,selection_method,n_go_hits
+YPD.1,GAL,5,canonical_fallback,0
+YPD.1,NCR,10,canonical_fallback,0
+YPD.1,Stress,6,canonical_fallback,0

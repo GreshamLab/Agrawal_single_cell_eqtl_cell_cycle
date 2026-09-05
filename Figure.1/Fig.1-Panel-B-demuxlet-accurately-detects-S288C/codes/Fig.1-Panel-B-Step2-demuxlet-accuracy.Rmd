@@ -163,6 +163,10 @@ results %>%
 
 # 4. Figure 1B
 
+
+Figure 1B. Demuxlet accurately identifies DGY3 cells across conditions using NATMX transcriptionally barcoded DGY3 cells.
+
+Bar plot showing demuxlet accuracy in calling DGY3 single-cell demultiplexing assignments, benchmarked against NATMX transcriptionally barcoded DGY3 cells as ground truth. Bars represent mean recall ± SD across replicates (n = 2 per condition), with individual replicate values overlaid as points. Demuxlet achieves high recall in both YPD (96%) and Fluconazole (84%), demonstrating reliable strain identification across growth conditions. This validates demuxlet's performance for accurate single-cell demultiplexing of the pooled 96-strain library.
 ```{r figure}
 metric_col <- paste0(ifelse(METRIC == "recall", "Recall_", "Precision_"), MARKER)
 
@@ -184,11 +188,10 @@ condition_colors <- c("YPD" = "#4E79A7", "Fluconazole" = "#E15759")
 
 pub_theme <- theme_classic(base_size = 11) +
   theme(
-    axis.text        = element_text(color = "black", size = 10),
-    axis.title       = element_text(color = "black", size = 11, face = "bold"),
+    axis.text        = element_text(color = "black", size = 11),
+    axis.title       = element_text(color = "black", size = 12, face = "bold"),
     axis.line        = element_line(color = "black", linewidth = 0.5),
     axis.ticks       = element_line(color = "black", linewidth = 0.4),
-    plot.title       = element_text(hjust = 0.5, size = 11, face = "bold"),
     legend.position  = "none",
     panel.grid       = element_blank(),
     plot.background  = element_rect(fill = "white", color = NA),
@@ -209,8 +212,7 @@ fig1b <- ggplot(summary_df, aes(x = x_label, y = Mean, fill = Condition)) +
   scale_y_continuous(limits = c(0, 110), expand = c(0, 0),
                      breaks = seq(0, 100, 25)) +
   labs(x = NULL,
-       y = "Demuxlet accuracy (%)",
-       title = "DGY3 recovery (NATMX barcode)") +
+       y = "Demuxlet accuracy (%)") +
   pub_theme
 
 fig1b

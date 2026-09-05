@@ -1,5 +1,601 @@
 ---
-title: "Fig3-supplementary2-raw-eqtl-verification-for-sc2glu-fluconazole"
-output: html_document
+title: "Panel B — Single-cell raw-data validation of cis-eQTLs (sc2glu & Fluconazole)"
+author: "Akriti Agrawal"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    theme: flatly
+    highlight: tango
+    code_folding: show
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(inputFile, encoding = encoding, output_dir = "../results/") })
 ---
 
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 10, fig.height = 6)
+```
+
+```{r libs}
+library(tidyverse)
+library(Seurat)
+library(data.table)
+library(BEDMatrix)
+library(MASS)
+select <- dplyr::select
+filter <- dplyr::filter
+```
+
+# 1. Scope
+
+Cis-eQTL verification against raw single-cell counts, for **sc2glu** and **Fluconazole**
+(same design as the YPD Panel B, and the same cis/trans annotation logic as
+`Fig.3-supplementary-cis-trans-eQTL-flu-sc2glu.Rmd`, re-run here rather than read back
+from its slim harmonised output — that file's `combined`/per-type tables drop the signed
+`SnpWeight` and any gene-common-name column needed for verification).
+
+The verification loop runs for **all four variant types** (SNP/CNV/Indel/SV) per
+condition so the cross-type validation summary is complete, but per the confirmed scope,
+**only SNP cis-eQTL outputs are saved to disk** — the top `N_TOP` SNP plots. CNV/InDel/SV
+are verified for counts/agreement only (printed, not written).
+
+```{r config}
+OUT           <- "../results"
+ANNOT_CSV     <- "/scratch/aa9679/SingleCell_cerevisiae/Gene_exp_analysis/yeast_custom_annotations.csv"
+CIS_WINDOW_BP <- 2000
+
+N_VERIFY <- 60   # candidate pool per type (bounds knit time)
+N_TOP    <- 5    # best examples plotted/saved — SNP only
+
+# ---- Fluconazole ------------------------------------------------------------
+flu_RES  <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/merged_fluconazole/new_fastlmm_march_26_2026/results"
+flu_CLMP <- flu_RES
+
+# ---- sc2glu -------------------------------------------------------------
+sc2_RES  <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2/fastlmm/results"
+sc2_CLMP <- file.path(sc2_RES, "plink_without_double_id")
+
+# genotype paths below are pasted verbatim from the user's fastlmm variant_types
+# config for each condition (same source matrices as YPD: SNPs/CNVs from the
+# pan_transcriptome_paper filtered sets, Indels/SVs from the Anne VCF conversions —
+# only the strain subset differs: 82fluc/81fluc-strains vs 71-strains vs YPD's own).
+CONDITIONS <- list(
+  Fluconazole = list(
+    GENE_LOC    = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/merged_fluconazole/new_fastlmm_march_26_2026/data/pheno_data/gene_location.txt",
+    SEURAT_FILE = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/merged_fluconazole/combine_flu_gene_expression_data/Na_va_data_subsetted_flu_replicates_merged.rds",
+    variant_cfg = list(
+      SNP   = list(clumped  = file.path(flu_CLMP, "clumped_results_snp_82.clumped"),
+                   assoc    = file.path(flu_RES,  "all_signif_SNPs_flu_with_threshold.txt"),
+                   genotype = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/pan_transcriptome_paper/SNPs/SNPs_change_names_in_fam_968/SNPs_82fluc/full969Matrix.SNPs.Biallelic.Var.DP10.99percNonMissing.MAF15.NoSubTelo20kb.plink_YPD.1_82fluc_strains"),
+      CNV   = list(clumped  = file.path(flu_CLMP, "clumped_results_CNVs.clumped"),
+                   assoc    = file.path(flu_RES,  "all_signif_CNVs_flu_with_threshold.txt"),
+                   genotype = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/pan_transcriptome_paper/CNVs/CNVs_82fluc/CNV_969strains_gain_maf15_N400_20221121.plink_82fluc_strains"),
+      Indel = list(clumped  = file.path(flu_CLMP, "clumped_results_Indels.clumped"),
+                   assoc    = file.path(flu_RES,  "all_signif_Indels_flu_with_threshold.txt"),
+                   genotype = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/vcf_files_sent_by_Anne/SNPs_indels/modified_snp_indel_plink_for_96strains/Indels_only_fluc_81strains/indels._fluc_81strains"),
+      SV    = list(clumped  = file.path(flu_CLMP, "clumped_results_SVs.clumped"),
+                   assoc    = file.path(flu_RES,  "all_signif_SVs_flu_with_threshold.txt"),
+                   genotype = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/vcf_files_sent_by_Anne/SVs_from_SV.1087/SV.1087samples_updated_fam_files/SVs_for_fluc_81strains/SV.1087samples.SVs_to_fluc_81strains")
+    )
+  ),
+  sc2glu = list(
+    GENE_LOC    = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.1/fastlmm/data/pheno_data/gene_location.txt",
+    SEURAT_FILE = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2/sc2glu.1_and_sc2glu.2_seurat_merged/Na_va_data_subsetted_sc2glu_replicates_merged.rds",
+    variant_cfg = list(
+      SNP   = list(clumped  = file.path(sc2_CLMP, "clumped_results_snp.clumped"),
+                   assoc    = file.path(sc2_RES,  "all_signif_SNP_71_with_threshold.txt"),
+                   genotype = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/pan_transcriptome_paper/SNPs/SNPs_change_names_in_fam_968/SNPs_71/full969Matrix.SNPs.Biallelic.Var.DP10.99percNonMissing.MAF15.NoSubTelo20kb.plink_71strains"),
+      CNV   = list(clumped  = file.path(sc2_CLMP, "clumped_results_CNVs.clumped"),
+                   assoc    = file.path(sc2_RES,  "all_signif_CNV_71_with_threshold.txt"),
+                   genotype = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/pan_transcriptome_paper/CNVs/CNVs_71/CNV_969strains_gain_maf15_N400_20221121.plink_71strains"),
+      Indel = list(clumped  = file.path(sc2_CLMP, "clumped_results_Indels.clumped"),
+                   assoc    = file.path(sc2_RES,  "all_signif_Indels_71_with_threshold.txt"),
+                   genotype = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/vcf_files_sent_by_Anne/SNPs_indels/modified_snp_indel_plink_for_96strains/Indels_only_71/indels.71samples"),
+      SV    = list(clumped  = file.path(sc2_CLMP, "clumped_results_SVs.clumped"),
+                   assoc    = file.path(sc2_RES,  "all_signif_SVs_71_with_threshold.txt"),
+                   genotype = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/vcf_files_sent_by_Anne/SVs_from_SV.1087/SV.1087samples_updated_fam_files/SVs_for_71_strains/SV.1087samples.SVs_to_71strains")
+    )
+  )
+)
+
+variant_order <- c("SNP", "CNV", "Indel", "SV")
+```
+
+**Consistency check** on the genotype paths above: SNPs/CNVs are drawn from the same
+`pan_transcriptome_paper` MAF15-filtered matrices used for YPD, only re-subset to each
+condition's own strain list (82/81 fluconazole strains, 71 sc2glu strains); Indels/SVs
+come from the same Anne-VCF conversions used for YPD, likewise re-subset. Both conditions
+and YPD therefore share one genome build and one variant-calling pipeline per type — only
+the `--keep` strain subset differs, which is what you'd want for this to be a fair
+same-panel comparison. I can't read the cluster filesystem from here to confirm each path
+resolves and each `.fam` contains the expected strain count — run the sanity chunk below
+first and check the printed counts against 82/81 (Fluconazole) and 71 (sc2glu) before
+trusting the rest of the knit.
+
+```{r sanity-check}
+for (cond_label in names(CONDITIONS)) {
+  cat("\n====", cond_label, "====\n")
+  for (vt in variant_order) {
+    g <- CONDITIONS[[cond_label]]$variant_cfg[[vt]]$genotype
+    fam <- paste0(g, ".fam")
+    ok <- file.exists(fam)
+    n  <- if (ok) length(readLines(fam)) else NA
+    cat(sprintf("  %-6s fam exists: %-5s  n_strains: %s\n", vt, ok, n))
+  }
+}
+```
+
+# 2. Shared reference objects (genome, annotations — same as Fig.3-supplementary)
+
+```{r reference}
+ann <- read.csv(ANNOT_CSV)
+annotations_gr <- GRanges(ann$seqnames,
+                          IRanges(ann$start, ann$end),
+                          strand = ann$strand,
+                          type = ann$type, gene_id = ann$gene_id, gene_name = ann$gene_name)
+
+roman16 <- c("I","II","III","IV","V","VI","VII","VIII","IX","X","XI","XII","XIII","XIV","XV","XVI")
+num_to_roman <- function(x) roman16[x]
+
+feature_priority <- c(promoter=1, three_prime_UTR=2, five_prime_UTR=3,
+                      start_codon=4, stop_codon=5, CDS=6)
+prio <- function(f) { p <- feature_priority[f]; p[is.na(p)] <- 99; p }
+
+build_gene_loc <- function(path) {
+  read.table(path, header = TRUE, stringsAsFactors = FALSE) %>%
+    select(gene_id, gene_name, chr, left, right) %>%
+    mutate(right = right + 2,
+           gene_id = str_replace(gene_id, "-", "."))
+}
+```
+
+# 3. Annotation functions (identical to Fig.3-supplementary; kept in sync)
+
+```{r reader}
+read_clumped <- function(clumped, assoc) {
+  ids <- read.table(clumped, header = TRUE)$SNP
+  read.table(assoc, header = TRUE, sep = "\t", stringsAsFactors = FALSE) %>%
+    filter(SNP %in% ids)
+}
+```
+
+```{r annot-point}
+annotate_point <- function(df, pick = c("priority","first")) {
+  pick <- match.arg(pick)
+  df$var_chr_roman <- num_to_roman(df$Chr)
+  gr <- GRanges(df$var_chr_roman, IRanges(df$ChrPos, df$ChrPos))
+  df$causal_gene <- NA_character_; df$causal_gene_feature <- NA_character_
+
+  ov <- findOverlaps(gr, annotations_gr, type = "any")
+  for (i in unique(queryHits(ov))) {
+    subj <- subjectHits(ov)[queryHits(ov) == i]
+    k <- if (pick == "priority") subj[which.min(prio(annotations_gr$type[subj]))] else subj[1]
+    df$causal_gene[i] <- annotations_gr$gene_id[k]
+    df$causal_gene_feature[i] <- annotations_gr$type[k]
+  }
+  m <- which(is.na(df$causal_gene))
+  if (length(m)) {
+    ng <- nearest(gr[m], annotations_gr); ok <- !is.na(ng)
+    d <- rep(NA_real_, length(m)); d[ok] <- distance(gr[m][ok], annotations_gr[ng[ok]])
+    near <- !is.na(d) & d <= CIS_WINDOW_BP
+    df$causal_gene[m[near]]          <- annotations_gr$gene_id[ng[near]]
+    df$causal_gene_feature[m[near]]  <- "intergenic_nearby"
+    df$causal_gene_feature[m[!near]] <- "intergenic_distant"
+  }
+  df
+}
+```
+
+```{r annot-range}
+annotate_range <- function(df, range_end, use_nearest) {
+  df$var_chr_roman <- num_to_roman(df$Chr)
+  gr <- GRanges(df$var_chr_roman, IRanges(df$ChrPos, range_end))
+  df$causal_gene <- NA_character_; df$causal_gene_feature <- NA_character_
+
+  ov <- findOverlaps(gr, annotations_gr, type = "any")
+  for (i in unique(queryHits(ov))) {
+    subj <- subjectHits(ov)[queryHits(ov) == i]
+    df$causal_gene[i]         <- paste(unique(annotations_gr$gene_id[subj]), collapse = "; ")
+    df$causal_gene_feature[i] <- paste(unique(annotations_gr$type[subj]),   collapse = "; ")
+  }
+  if (use_nearest) {
+    m <- which(is.na(df$causal_gene))
+    if (length(m)) {
+      ng <- nearest(gr[m], annotations_gr); ok <- !is.na(ng)
+      d <- rep(NA_real_, length(m)); d[ok] <- distance(gr[m][ok], annotations_gr[ng[ok]])
+      near <- !is.na(d) & d <= CIS_WINDOW_BP
+      df$causal_gene[m[near]]          <- annotations_gr$gene_id[ng[near]]
+      df$causal_gene_feature[m[near]]  <- "intergenic_nearby"
+      df$causal_gene_feature[m[!near]] <- "intergenic_distant"
+    }
+  } else {
+    df$causal_gene_feature[is.na(df$causal_gene)] <- "intergenic_distant"
+  }
+  df
+}
+```
+
+```{r annot-dispatch}
+annotate_variant <- function(df, vt) {
+  if (vt == "SNP") return(annotate_point(df, "priority"))
+  if (vt == "CNV") return(annotate_point(df, "first"))
+
+  if (vt == "Indel") {
+    p <- strsplit(df$SNP, "_")                    # CHR_POS_REF_ALT  (A1=ALT, A2=REF)
+    ref_len <- vapply(p, function(x) nchar(x[3]), 1L)
+    alt_len <- vapply(p, function(x) nchar(x[4]), 1L)
+    df$Indel_Size <- alt_len - ref_len
+    range_end <- ifelse(df$Indel_Size < 0, df$ChrPos + ref_len - 1, df$ChrPos)
+    return(annotate_range(df, range_end, use_nearest = FALSE))
+  }
+  if (vt == "SV") {
+    sub <- vapply(strsplit(df$SNP, "_"), `[`, "", 2)
+    sz  <- vapply(strsplit(df$SNP, "_"), function(x){ i <- which(x=="len"); if(length(i)) as.numeric(x[i+1]) else NA_real_ }, 0)
+    range_end <- ifelse(sub %in% c("INS","TRA"), df$ChrPos, df$ChrPos + abs(sz))
+    range_end[is.na(range_end)] <- df$ChrPos[is.na(range_end)]
+    return(annotate_range(df, range_end, use_nearest = TRUE))
+  }
+}
+```
+
+```{r cis-trans-raw}
+# Same cis/trans rule as Fig.3-supplementary's add_cis_trans(), but keeps ALL input
+# columns (SnpWeight, PValue, Pheno, ...) instead of selecting down to a slim schema —
+# the verification step needs the raw, signed FastLMM values.
+add_cis_trans_raw <- function(df, vt) {
+  df %>%
+    left_join(gene_location_fixed, by = c("Pheno" = "gene_id")) %>%
+    mutate(Pheno_chr = chr, Pheno_start = left, Pheno_end = right,
+           dist_to_pheno = case_when(
+             var_chr_roman != Pheno_chr ~ NA_real_,
+             ChrPos < Pheno_start ~ Pheno_start - ChrPos,
+             ChrPos > Pheno_end   ~ ChrPos - Pheno_end,
+             TRUE ~ 0),
+           cis_trans = case_when(
+             var_chr_roman != Pheno_chr ~ "Trans",
+             dist_to_pheno == 0    ~ "Cis",
+             dist_to_pheno <= 2000 ~ "Cis",
+             causal_gene == Pheno  ~ "Cis",
+             TRUE                  ~ "Trans"),
+           variant_type = vt)
+}
+```
+
+# 4. Verification + plotting helpers (same as the YPD Panel B template)
+
+```{r detectors}
+detect_snp_column <- function(data) {
+  for (col in c("SNP", "SNP_ID", "snp_id", "snp", "variant_id", "variant", "rsid"))
+    if (col %in% colnames(data)) { cat("SNP column:", col, "\n"); return(col) }
+  stop("No SNP column. Have: ", paste(colnames(data), collapse = ", "))
+}
+detect_gene_column <- function(data) {
+  for (col in c("Pheno", "Source_Phenotype", "Gene", "gene", "gene_id", "Gene_ID", "target_gene"))
+    if (col %in% colnames(data)) { cat("Gene column:", col, "\n"); return(col) }
+  stop("No gene column. Have: ", paste(colnames(data), collapse = ", "))
+}
+detect_gene_common_name_column <- function(data) {
+  for (col in c("gene_common_name", "Gene_Common_Name", "common_name", "symbol", "gene_symbol"))
+    if (col %in% colnames(data)) { cat("Gene common-name column:", col, "\n"); return(col) }
+  NULL
+}
+```
+
+```{r verify-fn}
+verify_eqtls_all <- function(fastlmm_results, seurat_object, bim_data, fam_data,
+                             bed_matrix, n_eqtls = NULL, save_file = NULL) {
+  snp_col  <- detect_snp_column(fastlmm_results)
+  gene_col <- detect_gene_column(fastlmm_results)
+  gene_common_col <- detect_gene_common_name_column(fastlmm_results)
+
+  available_snps  <- intersect(fastlmm_results[[snp_col]], bim_data$snp_id)
+  cat("Available variants:", length(available_snps), "of",
+      length(unique(fastlmm_results[[snp_col]])), "\n")
+  eqtls_to_verify <- fastlmm_results %>% filter(.data[[snp_col]] %in% available_snps)
+
+  if (!is.null(n_eqtls)) {
+    eqtls_to_verify <- eqtls_to_verify %>% arrange(PValue) %>% head(n_eqtls)
+    cat("Verifying top", nrow(eqtls_to_verify), "by FastLMM P\n")
+  } else {
+    cat("Verifying all", nrow(eqtls_to_verify), "eQTLs\n")
+  }
+
+  results <- data.frame(
+    SNP_ID = character(nrow(eqtls_to_verify)), Gene_ID = character(nrow(eqtls_to_verify)),
+    Gene_Common_Name = character(nrow(eqtls_to_verify)), Resolved_Gene_ID = character(nrow(eqtls_to_verify)),
+    Status = character(nrow(eqtls_to_verify)), N_Cells = integer(nrow(eqtls_to_verify)),
+    Verification_Beta = numeric(nrow(eqtls_to_verify)), Verification_P = numeric(nrow(eqtls_to_verify)),
+    FastLMM_Beta = numeric(nrow(eqtls_to_verify)), FastLMM_P = numeric(nrow(eqtls_to_verify)),
+    Effect_Agreement = logical(nrow(eqtls_to_verify)), R_Squared = numeric(nrow(eqtls_to_verify)),
+    stringsAsFactors = FALSE)
+
+  cell_sample_map      <- seurat_object$SNG.BEST.GUESS
+  cells_with_genotypes <- names(cell_sample_map)[cell_sample_map %in% fam_data$iid]
+  cat("Cells with genotype:", length(cells_with_genotypes), "\n")
+
+  successful <- 0
+  for (i in seq_len(nrow(eqtls_to_verify))) {
+    snp_id  <- eqtls_to_verify[[snp_col]][i]
+    gene_id <- eqtls_to_verify[[gene_col]][i]
+    gene_common <- if (!is.null(gene_common_col)) eqtls_to_verify[[gene_common_col]][i] else ""
+
+    results$SNP_ID[i] <- snp_id; results$Gene_ID[i] <- gene_id
+    results$Gene_Common_Name[i] <- ifelse(is.na(gene_common), "", gene_common)
+    results$FastLMM_Beta[i] <- eqtls_to_verify$SnpWeight[i]
+    results$FastLMM_P[i]    <- eqtls_to_verify$PValue[i]
+
+    resolved_gene <- if (gene_id %in% rownames(seurat_object)) gene_id else
+      if (!is.na(gene_common) && gene_common != "" && gene_common %in% rownames(seurat_object)) gene_common else NULL
+    if (is.null(resolved_gene)) { results$Status[i] <- "Gene not found"; next }
+    results$Resolved_Gene_ID[i] <- resolved_gene
+
+    snp_idx <- which(bim_data$snp_id == snp_id)[1]
+    if (is.na(snp_idx)) { results$Status[i] <- "SNP not found"; next }
+
+    genotypes        <- bed_matrix[, snp_idx]
+    plink_sample_map <- setNames(genotypes, fam_data$iid)
+    cell_genotypes   <- plink_sample_map[cell_sample_map[cells_with_genotypes]]
+    names(cell_genotypes) <- cells_with_genotypes
+    cell_genotypes   <- cell_genotypes[!is.na(cell_genotypes)]
+    if (length(cell_genotypes) < 20 || length(unique(cell_genotypes)) < 2) {
+      results$Status[i] <- "Insufficient data"; next }
+
+    gene_expr <- GetAssayData(seurat_object, slot = "counts")[resolved_gene, names(cell_genotypes)]
+    plot_data <- data.frame(expression = as.numeric(gene_expr), genotype = cell_genotypes)
+    plot_data <- plot_data[complete.cases(plot_data), ]
+    results$N_Cells[i] <- nrow(plot_data)
+
+    tryCatch({
+      model <- glm.nb(expression ~ genotype, data = plot_data)
+      null_model <- glm.nb(expression ~ 1, data = plot_data)
+      cs <- summary(model)$coefficients
+      results$Verification_Beta[i] <- cs[2, 1]
+      results$Verification_P[i]    <- cs[2, 4]
+      results$Effect_Agreement[i]  <- sign(cs[2, 1]) == sign(results$FastLMM_Beta[i])
+      results$R_Squared[i]         <- as.numeric(1 - logLik(model) / logLik(null_model))
+      results$Status[i] <- "Success"; successful <- successful + 1
+    }, error = function(e) { results$Status[i] <- "Model failed" })
+  }
+
+  cat("Success:", successful, "/", nrow(results),
+      "(", round(100 * successful / max(nrow(results), 1), 1), "%)\n")
+  sd_ok <- results[results$Status == "Success", ]
+  if (nrow(sd_ok) > 1)
+    cat("Beta correlation:", round(cor(sd_ok$Verification_Beta, sd_ok$FastLMM_Beta), 3), "\n")
+  if (!is.null(save_file)) write.csv(results, save_file, row.names = FALSE)
+  results
+}
+```
+
+```{r plot-fn}
+create_enhanced_verification_plot <- function(plot_data, result, association, variant_type) {
+
+  unique_genotypes <- sort(unique(plot_data$genotype))
+  if (variant_type %in% c("SNPs", "InDels")) {
+    snp_parts <- strsplit(result$snp_id, "_")[[1]]
+    if (length(snp_parts) >= 4) { ref_allele <- snp_parts[3]; alt_allele <- snp_parts[4] }
+    else { ref_allele <- "Ref"; alt_allele <- "Alt" }
+    lab3 <- c(paste0(ref_allele, "/", ref_allele),
+              paste0(ref_allele, "/", alt_allele),
+              paste0(alt_allele, "/", alt_allele))
+    genotype_labels <- lab3[unique_genotypes + 1]
+    x_title <- "Genotype"
+  } else {
+    genotype_labels <- paste0(unique_genotypes)
+    x_title <- paste0(variant_type, " dosage")
+  }
+  plot_data$genotype_label <- factor(plot_data$genotype, levels = unique_genotypes,
+                                     labels = genotype_labels)
+
+  genotype_stats <- plot_data %>% group_by(genotype_label) %>%
+    summarise(n_cells = n(), n_samples = length(unique(sample)),
+              mean_expr = mean(expression), se_expr = sd(expression) / sqrt(n()),
+              .groups = "drop")
+
+  fold_change  <- exp(result$verification_beta)
+  fastlmm_beta <- if ("SnpWeight" %in% names(association)) association$SnpWeight else NA
+  fastlmm_pval <- if ("PValue"   %in% names(association)) association$PValue   else NA
+  fastlmm_log2fc      <- if (!is.na(fastlmm_beta)) fastlmm_beta / log(2) else NA
+  fastlmm_fold_change <- if (!is.na(fastlmm_beta)) exp(fastlmm_beta)      else NA
+  effect_agreement    <- if (!is.na(fastlmm_beta)) sign(result$verification_beta) == sign(fastlmm_beta) else NA
+
+  shared_labs <- labs(
+    title = paste0(variant_type, " eQTL: ", result$snp_id, " \u2192 ", result$resolved_gene_id,
+                   ifelse(result$resolved_gene_id != result$gene_id,
+                          paste0(" (", result$gene_id, ")"), "")),
+    subtitle = paste0("Verification: \u03b2=", round(result$verification_beta, 3),
+      ", Log2FC=", round(result$verification_log2fc, 2), ", FC=", round(fold_change, 2),
+      ", P=", format(result$verification_pval, digits = 3),
+      ifelse(!is.na(fastlmm_beta),
+        paste0("\nFastLMM: \u03b2=", round(fastlmm_beta, 3), ", Log2FC=", round(fastlmm_log2fc, 2),
+               ", FC=", round(fastlmm_fold_change, 2), ", P=", format(fastlmm_pval, digits = 3),
+               " | Agreement: ", ifelse(is.na(effect_agreement), "Unknown",
+                                        ifelse(effect_agreement, "\u2713", "\u2717"))), "")),
+    x = x_title,
+    caption = paste0("N=", nrow(plot_data), " cells from ",
+                     length(unique(plot_data$sample)), " samples | red line shows genotype trend"))
+
+  shared_theme <- theme_minimal(base_size = 12) +
+    theme(legend.position = "none",
+          plot.title = element_text(size = 16, face = "bold", hjust = 0.5, margin = margin(b = 10)),
+          plot.subtitle = element_text(size = 12, hjust = 0.5, margin = margin(b = 15), lineheight = 1.2),
+          plot.caption = element_text(size = 10, color = "black", hjust = 0.5),
+          axis.title.x = element_text(size = 16, margin = margin(t = 10)),
+          axis.title.y = element_text(size = 16, margin = margin(r = 10)),
+          axis.text = element_text(size = 12),
+          panel.grid.major = element_line(color = "grey85", size = 0.4),
+          panel.grid.minor = element_blank(),
+          panel.background = element_rect(fill = "white", color = NA),
+          plot.background  = element_rect(fill = "white", color = NA))
+
+  shared_x_scale <- scale_x_discrete(labels = function(x) {
+    sr <- genotype_stats[genotype_stats$genotype_label == x, ]
+    if (nrow(sr) > 0) paste0(x, "\nN = ", sr$n_cells, "\n(", sr$n_samples, " samples)") else x })
+  shared_fill <- scale_fill_manual(values = c("#66C2A5", "#FC8D62", "#8DA0CB"))
+
+  if (median(plot_data$expression) == 0) {
+    p <- ggplot(genotype_stats, aes(genotype_label, mean_expr, fill = genotype_label)) +
+      geom_bar(stat = "identity", width = 0.4, alpha = 0.8) +
+      geom_errorbar(aes(ymin = mean_expr - se_expr, ymax = mean_expr + se_expr),
+                    width = 0.15, size = 0.8) +
+      geom_line(aes(as.numeric(genotype_label), mean_expr, group = 1),
+                color = "red", size = 1.5, alpha = 0.8) +
+      geom_point(aes(as.numeric(genotype_label), mean_expr),
+                 color = "red", size = 3, shape = 16) +
+      shared_fill + shared_labs + labs(y = "Mean expression (UMI counts)") +
+      shared_theme + shared_x_scale + scale_y_continuous(expand = expansion(mult = c(0.05, 0.2)))
+  } else {
+    y_upper <- max(quantile(plot_data$expression, 0.95) * 1.2, 2)
+    p <- ggplot(plot_data, aes(genotype_label, expression)) +
+      geom_boxplot(aes(fill = genotype_label), width = 0.4, alpha = 0.8, outlier.shape = NA) +
+      stat_summary(fun = mean, geom = "point", size = 2.5, color = "black", shape = 18) +
+      geom_line(data = genotype_stats, aes(as.numeric(genotype_label), mean_expr, group = 1),
+                color = "red", size = 1.5, alpha = 0.8, inherit.aes = FALSE) +
+      geom_point(data = genotype_stats, aes(as.numeric(genotype_label), mean_expr),
+                 color = "red", size = 3, shape = 16, inherit.aes = FALSE) +
+      shared_fill + shared_labs + labs(y = "Gene expression (UMI counts)") +
+      shared_theme + shared_x_scale +
+      scale_y_continuous(expand = expansion(mult = c(0.05, 0.15))) +
+      coord_cartesian(ylim = c(0, y_upper))
+  }
+  p
+}
+```
+
+```{r topn-fn}
+plot_top_eqtls <- function(results_table, variant_type, n_plots,
+                           seurat_object, bim_data, fam_data, bed_matrix,
+                           out_dir, cond_label, save_plots = TRUE) {
+  results_table$SNP_ID <- as.character(results_table$SNP_ID)
+  top <- results_table %>% filter(Status == "Success") %>%
+    mutate(Abs_Beta = abs(Verification_Beta)) %>%
+    arrange(desc(Abs_Beta)) %>% head(n_plots)
+  cat("Top", nrow(top), variant_type, "cis-eQTLs by |verified beta| —", cond_label, "\n")
+  if (nrow(top) == 0) return(list())
+
+  cell_sample_map      <- seurat_object$SNG.BEST.GUESS
+  cells_with_genotypes <- names(cell_sample_map)[cell_sample_map %in% fam_data$iid]
+  plots_list <- list()
+
+  for (i in seq_len(nrow(top))) {
+    row <- top[i, ]
+    snp_id        <- as.character(row$SNP_ID)
+    gene_id       <- as.character(row$Gene_ID)
+    resolved_gene <- as.character(row$Resolved_Gene_ID)
+
+    snp_idx <- which(bim_data$snp_id == snp_id)[1]
+    if (is.na(snp_idx)) { cat("skip (not in bim):", snp_id, "\n"); next }
+
+    genotypes        <- bed_matrix[, snp_idx]
+    plink_sample_map <- setNames(genotypes, fam_data$iid)
+    cell_genotypes   <- plink_sample_map[cell_sample_map[cells_with_genotypes]]
+    names(cell_genotypes) <- cells_with_genotypes
+    cell_genotypes   <- cell_genotypes[!is.na(cell_genotypes)]
+
+    gene_expr <- GetAssayData(seurat_object, slot = "counts")[resolved_gene, names(cell_genotypes)]
+    plot_data <- data.frame(cell = names(cell_genotypes),
+                            expression = as.numeric(gene_expr),
+                            genotype = cell_genotypes,
+                            sample = cell_sample_map[names(cell_genotypes)])
+    plot_data <- plot_data[complete.cases(plot_data), ]
+
+    result <- list(snp_id = snp_id, gene_id = gene_id, resolved_gene_id = resolved_gene,
+                   verification_beta = row$Verification_Beta,
+                   verification_pval = row$Verification_P,
+                   verification_log2fc = row$Verification_Beta / log(2))
+    association <- data.frame(SnpWeight = row$FastLMM_Beta, PValue = row$FastLMM_P)
+
+    p <- create_enhanced_verification_plot(plot_data, result, association, variant_type)
+    plots_list[[i]] <- p
+    print(p)
+
+    if (save_plots) {
+      fn <- file.path(out_dir, sprintf("PanelB_%s_%s_top%02d_%s_%s.tiff",
+                        cond_label, variant_type, i,
+                        gsub("[^A-Za-z0-9]", "_", snp_id),
+                        gsub("[^A-Za-z0-9]", "_", resolved_gene)))
+      ggsave(fn, p, width = 12, height = 8, units = "in", dpi = 300,
+             compression = "lzw", bg = "white")
+    }
+  }
+  plots_list
+}
+```
+
+# 5. Per-condition runner
+
+For each condition: load its own Seurat object once, rebuild `gene_location_fixed`
+from its own gene-location file, then loop the four variant types. Only SNP gets
+plotted/saved (`N_TOP` = 5); CNV/InDel/SV are verified for the summary counts only.
+
+```{r run-condition-fn}
+run_condition_verification <- function(cond_label, cond) {
+  message("==== ", cond_label, " ====")
+  seurat_object <- readRDS(cond$SEURAT_FILE)
+  # Merged replicate objects keep per-replicate layers split (Seurat v5, e.g.
+  # counts.1/counts.2) until joined; GetAssayData()/LayerData() cannot collapse
+  # multiple layers on their own, so join once, defensively, right after load.
+  if (length(SeuratObject::Layers(seurat_object)) > 1) {
+    seurat_object <- JoinLayers(seurat_object)
+  }
+  cat(cond_label, "Seurat object:", ncol(seurat_object), "cells,", nrow(seurat_object), "genes\n")
+
+  gene_location_fixed <<- build_gene_loc(cond$GENE_LOC)
+
+  summaries <- list()
+  for (vt in variant_order) {
+    cat("\n---", cond_label, "-", vt, "---\n")
+    cfg <- cond$variant_cfg[[vt]]
+
+    raw <- tryCatch(
+      read_clumped(cfg$clumped, cfg$assoc) %>% annotate_variant(vt) %>% add_cis_trans_raw(vt),
+      error = function(e) { cat("  annotation FAILED:", conditionMessage(e), "\n"); NULL })
+    if (is.null(raw)) next
+
+    cis <- raw %>% filter(cis_trans == "Cis")
+    cat("  cis eQTLs:", nrow(cis), "\n")
+    if (nrow(cis) == 0) { cat("  _No cis eQTLs — skipped._\n"); next }
+
+    bed_matrix <- BEDMatrix(cfg$genotype)
+    bim_data   <- fread(paste0(cfg$genotype, ".bim"),
+                        col.names = c("chr","snp_id","gen_dist","pos","allele1","allele2"))
+    fam_data   <- fread(paste0(cfg$genotype, ".fam"),
+                        col.names = c("fid","iid","father","mother","sex","phenotype"))
+
+    is_snp <- (vt == "SNP")
+    res <- verify_eqtls_all(cis, seurat_object, bim_data, fam_data, bed_matrix,
+                            n_eqtls = N_VERIFY, save_file = NULL)   # no CSV saved for any type
+
+    if (is_snp) {
+      plot_top_eqtls(res, "SNPs", N_TOP, seurat_object, bim_data, fam_data, bed_matrix,
+                     out_dir = OUT, cond_label = cond_label, save_plots = TRUE)
+    }
+
+    ok <- res[res$Status == "Success", ]
+    summaries[[vt]] <- data.frame(
+      Condition      = cond_label,
+      Variant_type   = vt,
+      cis_eQTLs      = nrow(cis),
+      verified       = nrow(res),
+      successful     = nrow(ok),
+      effect_agree   = if (nrow(ok)) sum(ok$Effect_Agreement, na.rm = TRUE) else 0,
+      pct_agree      = if (nrow(ok)) round(100 * mean(ok$Effect_Agreement, na.rm = TRUE), 1) else NA,
+      beta_cor       = if (nrow(ok) > 1) round(cor(ok$Verification_Beta, ok$FastLMM_Beta), 3) else NA)
+  }
+  bind_rows(summaries)
+}
+```
+
+```{r run-all, results='asis', fig.width=12, fig.height=8}
+all_summaries <- lapply(names(CONDITIONS), function(cl) run_condition_verification(cl, CONDITIONS[[cl]]))
+```
+
+# 6. Cross-condition, cross-type validation summary (printed only — not saved)
+
+```{r summary-table}
+summary_tbl <- bind_rows(all_summaries)
+print(summary_tbl)
+```

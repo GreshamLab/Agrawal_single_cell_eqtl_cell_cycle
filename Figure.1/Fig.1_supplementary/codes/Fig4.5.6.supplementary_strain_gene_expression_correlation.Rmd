@@ -32,7 +32,7 @@ conditions <- list(
     pb1   = file.path(BASE, "YPD.1/fastlmm/data/pheno_data/pseudobulk_reliable_transcripts_YPD.txt"),
     pb2   = file.path(BASE, "YPD.2/fastlmm/data/pheno_data/pseudobulk_reliable_transcripts_YPD.txt"),
     rds1  = file.path(BASE, "YPD.1/gene_expression_analysis/output_from_pseudobulk_fastlmm/Na_va_data_subsetted.rds"),
-    rds2  = file.path(BASE, "YPD.2/gene_expression_analysis/Na_va_data_subsetted.rds")
+    rds2  = file.path(BASE, "YPD.2/gene_expression_analysis/output_from_pseudobulk_fastlmm/Na_va_data_subsetted.rds")
   ),
   Fluconazole = list(
     label = "Fluconazole",
@@ -217,18 +217,21 @@ make_strain_scatter_fig <- function(df, cond_label) {
     ) +
     theme_classic(base_size = 10) +
     theme(
-      plot.title    = element_text(size = 18, face = "bold", hjust = 0.5),
+      plot.title    = element_text(size = 16, face = "bold", hjust = 0.5),
       axis.title    = element_text(size = 16, face = "bold"),
       axis.text     = element_text(size = 16, color = "black"),
       axis.text.x   = element_text(size = 16, color = "black",
                                    angle = 90, hjust = 1, vjust = 0.5),
-      strip.text    = element_text(size = 10, face = "bold"),
+      strip.text    = element_text(size = 12, face = "bold"),
       panel.spacing = unit(0.6, "lines")
     )
 }
 
 figS4_YPD <- make_strain_scatter_fig(scatter_df_all, "YPD")
 figS4_Flu <- make_strain_scatter_fig(scatter_df_all, "Fluconazole")
+
+figS4_YPD
+figS4_Flu
 
 ggsave(file.path(OUT_DIR, "FigS4_YPD_per_strain_scatter.pdf"), figS4_YPD,
        width = 40, height = 35, limitsize = FALSE)
@@ -240,7 +243,7 @@ ggsave(file.path(OUT_DIR, "FigS4_Flu_per_strain_scatter.pdf"), figS4_Flu,
 
 ```{r figS5, fig.width=7, fig.height=6}
 s5_long <- strain_df_all %>%
-  select(condition, strain, r, mean_cells, min_cells) %>%
+  dplyr::select(condition, strain, r, mean_cells, min_cells) %>%
   pivot_longer(c(mean_cells, min_cells),
                names_to = "metric", values_to = "cells") %>%
   mutate(metric = recode(metric,
@@ -271,6 +274,48 @@ figS5
 ggsave(file.path(OUT_DIR, "FigS5_reproducibility_vs_cells.pdf"), figS5,
        width = 7, height = 6, units = "in")
 ```
+```{r}
+# Option 2: visually bin strains by cell count and plot median r per bin
+strain_df_all %>%
+  mutate(cell_bin = cut(mean_cells, breaks = c(0, 10, 20, 50, 100, 200, 300, 500, Inf))) %>%
+  group_by(condition, cell_bin) %>%
+  summarise(
+    median_r = median(r), 
+    n_strains = n(),
+    .groups = "drop"
+  ) %>%
+  knitr::kable()
+```
+find the names of the strain to remove but be skeptical
+```{r}
+# Strains with mean cells < 5 — candidates for removal (both conditions)
+# Strains where the worst replicate has < 10 cells
+strain_df_all %>%
+  filter(min_cells < 5) %>%
+  select(condition, strain, n_cells_r1, n_cells_r2, min_cells, mean_cells, r) %>%
+  arrange(condition, min_cells) %>%
+  knitr::kable(digits = 3,
+               caption = "Strains with <10 cells in at least one replicate")
+
+# YPD strains with mean cells < 10
+cat("\n=== YPD: Strains with mean_cells < 10 ===\n")
+strain_df_all %>%
+  filter(condition == "YPD", mean_cells < 10) %>%
+  select(strain, n_cells_r1, n_cells_r2, mean_cells, r) %>%
+  arrange(mean_cells) %>%
+  knitr::kable(digits = 3)
+
+# Fluconazole strains with mean cells < 10
+cat("\n=== Fluconazole: Strains with mean_cells < 10 ===\n")
+strain_df_all %>%
+  filter(condition == "Fluconazole", mean_cells < 10) %>%
+  select(strain, n_cells_r1, n_cells_r2, mean_cells, r) %>%
+  arrange(mean_cells) %>%
+  knitr::kable(digits = 3)
+```
+
+
+
 
 # Supplementary Figure 6
 

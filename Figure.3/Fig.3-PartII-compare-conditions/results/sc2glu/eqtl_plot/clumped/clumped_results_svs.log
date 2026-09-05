@@ -1,0 +1,32 @@
+PLINK v1.9.0-b.8 64-bit (22 Oct 2024)
+Options in effect:
+  --bfile /projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/vcf_files_sent_by_Anne/SVs_from_SV.1087/SV.1087samples_updated_fam_files/SV.1087samples.SVs
+  --clump /projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Agrawal_single_cell_eqtl_cell_cycle/Figure.3/Fig.3-PartII-compare-conditions/results/sc2glu/eqtl_plot/plink_inputs/plink_svs.txt
+  --clump-kb 2
+  --clump-p1 0.05
+  --clump-r2 0.6
+  --out /projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Agrawal_single_cell_eqtl_cell_cycle/Figure.3/Fig.3-PartII-compare-conditions/results/sc2glu/eqtl_plot/clumped/clumped_results_svs
+
+Hostname: torch-login-a-1.hpc-infra.svc.cluster.local
+Working directory: /projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Agrawal_single_cell_eqtl_cell_cycle/Figure.3/Fig.3-PartII-compare-conditions/results/sc2glu/eqtl_plot/clumped
+Start time: Tue Sep  1 11:24:08 2026
+
+Random number seed: 1788276248
+128265 MB RAM detected; reserving 64132 MB for main workspace.
+204 variants loaded from .bim file.
+1087 people (0 males, 0 females, 1087 ambiguous) loaded from .fam.
+Ambiguous sex IDs written to
+/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Agrawal_single_cell_eqtl_cell_cycle/Figure.3/Fig.3-PartII-compare-conditions/results/sc2glu/eqtl_plot/clumped/clumped_results_svs.nosex
+.
+Using 1 thread (no multithreaded calculations invoked).
+Before main variant filters, 1087 founders and 0 nonfounders present.
+Calculating allele frequencies... done.
+Total genotyping rate is exactly 1.
+204 variants and 1087 people pass filters and QC.
+Note: No phenotypes present.
+--clump: 166 clumps formed from 169 top variants.
+Results written to
+/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Agrawal_single_cell_eqtl_cell_cycle/Figure.3/Fig.3-PartII-compare-conditions/results/sc2glu/eqtl_plot/clumped/clumped_results_svs.clumped
+.
+
+End time: Tue Sep  1 11:24:08 2026
