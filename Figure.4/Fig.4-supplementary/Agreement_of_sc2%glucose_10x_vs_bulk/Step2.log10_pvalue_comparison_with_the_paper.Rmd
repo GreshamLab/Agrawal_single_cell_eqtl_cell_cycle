@@ -1,0 +1,764 @@
+---
+title: "Comprehensive_eQTL_analysis"
+output: html_document
+---
+
+# ============================================================================
+# UNIFIED eQTL ANALYSIS: ALL HITS (SHARED + NOT SHARED FROM BOTH STUDIES)
+# 
+# Purpose: Create one master dataframe with all eQTLs from both studies
+#          Analyze -log10(p-value) and threshold proximity together
+#          Create scatter plot: Reference -log10(p-value) vs Your -log10(p-value)
+# ============================================================================
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(gridExtra)
+```
+
+
+```{r}
+all_signif_snps_0.05 <- read.table("../../results/all_signif_SNP_71_with_threshold.txt", 
+                           header = TRUE, 
+                           sep = "\t", 
+                           stringsAsFactors = FALSE)
+
+# Convert dots to dashes in Pheno column
+all_signif_snps_0.05 <- all_signif_snps_0.05 %>%
+  mutate(Pheno = gsub("\\.", "-", Pheno))
+
+#remove the Source_Phenotype that starts with X and a number
+all_signif_snps_0.05_cleaned <- all_signif_snps_0.05 %>%
+  filter(!grepl("^[X0-9]", Pheno))
+
+# Show summary
+cat("Total associations:", nrow(all_signif_snps_0.05_cleaned), "\n")
+cat("Unique genes:", length(unique(all_signif_snps_0.05_cleaned$Pheno)), "\n")
+
+
+all_signif_snps_0.05_cleaned$Chr_ChrPos_Pheno <- paste0(all_signif_snps_0.05_cleaned$Chr, "_", 
+                                                    all_signif_snps_0.05_cleaned$ChrPos, "_", 
+                                                    all_signif_snps_0.05_cleaned$Pheno)
+
+
+```
+
+```{r}
+
+pan_transcriptome <- read.csv("/scratch/aa9679/SingleCell_cerevisiae/Gene_exp_analysis/pan_transcriptome/data/downloaded_data_from_pan_transcriptome_paper/GWAS_combined_lgcCorr_ldPruned_noBonferroni_20221207.tab", header=TRUE)
+# #create a new column where we concatenate ChrPos and Pheno and call it ChrPos_Pheno
+pan_transcriptome$Chr_ChrPos_Pheno <- paste0(pan_transcriptome$Chr, "_",
+                                                    pan_transcriptome$ChrPos, "_",
+                                                    pan_transcriptome$Pheno)
+#filter out the snp eQTLs detected
+snp_pan_transcriptome <- pan_transcriptome[pan_transcriptome$subtype == "SNP", ]
+snp_pan_transcriptome
+
+```
+
+# ============================================================================
+# STEP 1: CREATE UNIFIED DATAFRAME
+# ============================================================================
+```{r}
+
+# Prepare YOUR data
+your_data_prep <- all_signif_snps_0.05_cleaned %>%
+  mutate(
+    Your_neglog10p = -log10(PValue),
+    Your_thr_neglog10p = -log10(thr_perm),
+    Your_distance_above_threshold = Your_neglog10p - Your_thr_neglog10p,
+    Chr_ChrPos_Pheno = paste0(Chr, "_", ChrPos, "_", Pheno)
+  ) %>%
+  dplyr::select(Chr_ChrPos_Pheno, Your_neglog10p, Your_thr_neglog10p, 
+                Your_distance_above_threshold, Pheno, Chr, ChrPos, 
+                PValue, thr_perm, Your_SnpWeight = SnpWeight)  # <-- rename on select
+
+# Prepare REFERENCE data
+ref_data_prep <- snp_pan_transcriptome %>%
+  mutate(
+    Ref_neglog10p = -log10(PValue),
+    Ref_thr_neglog10p = -log10(thr_perm),
+    Ref_distance_above_threshold = Ref_neglog10p - Ref_thr_neglog10p,
+    Chr_ChrPos_Pheno = paste0(Chr, "_", ChrPos, "_", Pheno)
+  ) %>%
+  dplyr::select(Chr_ChrPos_Pheno, Ref_neglog10p, Ref_thr_neglog10p, 
+                Ref_distance_above_threshold, Pheno, Chr, ChrPos, 
+                PValue, thr_perm, Ref_SnpWeight = SnpWeight)  # <-- rename on select
+
+
+```
+# ============================================================================
+# STEP 2: CREATE COMPREHENSIVE UNIFIED DATAFRAME
+# ============================================================================
+```{r}
+# Step 1: Mark which eQTLs are in your study
+your_ids <- your_data_prep$Chr_ChrPos_Pheno
+ref_ids <- ref_data_prep$Chr_ChrPos_Pheno
+
+# Step 2: Start with ALL eQTLs from reference
+all_eqtls <- ref_data_prep %>%
+  mutate(
+    In_your_study = Chr_ChrPos_Pheno %in% your_ids,
+    Category = ifelse(In_your_study, "SHARED", "REFERENCE-ONLY")
+  )
+
+# Step 3: Add YOUR data for SHARED eQTLs via left_join
+all_eqtls <- all_eqtls %>%
+  left_join(
+    your_data_prep %>% dplyr::select(Chr_ChrPos_Pheno, Your_neglog10p, Your_thr_neglog10p, 
+                                     Your_distance_above_threshold, Your_SnpWeight),  # <-- add here
+    by = "Chr_ChrPos_Pheno"
+  )
+
+# Step 4: Create YOUR-ONLY eQTLs (in your data but NOT in reference)
+your_only_ids <- setdiff(your_ids, ref_ids)
+your_only_data <- your_data_prep %>%
+  filter(Chr_ChrPos_Pheno %in% your_only_ids) %>%
+  mutate(
+    Category = "YOUR-ONLY",
+    In_your_study = TRUE,
+    Ref_neglog10p = NA,
+    Ref_thr_neglog10p = NA,
+    Ref_distance_above_threshold = NA,
+    Ref_SnpWeight = NA                  # <-- add here
+  ) %>%
+  dplyr::select(Chr_ChrPos_Pheno, Ref_neglog10p, Ref_thr_neglog10p, Ref_distance_above_threshold,
+                Ref_SnpWeight,                    # <-- add here
+                Your_neglog10p, Your_thr_neglog10p, Your_distance_above_threshold,
+                Your_SnpWeight,                   # <-- add here
+                Pheno, Chr, ChrPos, PValue, thr_perm, Category, In_your_study)
+# Step 5: Combine all three categories
+unified_data <- bind_rows(all_eqtls, your_only_data)
+
+cat("Total eQTLs in unified dataset: ", nrow(unified_data), "\n\n")
+
+cat("Categories:\n")
+cat("  SHARED (in both studies): ", sum(unified_data$Category == "SHARED"), "\n")
+cat("  REFERENCE-ONLY (in reference, not you): ", sum(unified_data$Category == "REFERENCE-ONLY"), "\n")
+cat("  YOUR-ONLY (in you, not reference): ", sum(unified_data$Category == "YOUR-ONLY"), "\n\n")
+```
+```{r}
+library(ggplot2)
+library(dplyr)
+library(scales)
+
+# ── 1. Build summary dataframe ────────────────────────────────────────────────
+unified_summary <- data.frame(
+  Category = c("SHARED", "Caudel_et_al_Only", "My_analysis_Only"),
+  Count    = c(
+    sum(unified_data$Category == "SHARED"),
+    sum(unified_data$Category == "REFERENCE-ONLY"),
+    sum(unified_data$Category == "YOUR-ONLY")
+  )
+) %>%
+  mutate(Category = factor(Category,
+                           levels = c("SHARED", "Caudel_et_al_Only", "My_analysis_Only")))
+
+# ── 2. Compute totals for title ───────────────────────────────────────────────
+n_reference  <- sum(unified_data$Category %in% c("SHARED", "REFERENCE-ONLY"))
+n_reproduced <- sum(unified_data$Category %in% c("SHARED", "YOUR-ONLY"))
+n_unified    <- nrow(unified_data)
+
+# ── 3. Colors ─────────────────────────────────────────────────────────────────
+category_colors <- c(
+  "SHARED"             = "#4DAC26",   # publication-friendly green (replaces base "green")
+  "Caudel_et_al_Only"  = "#8B2500",
+  "My_analysis_Only"   = "#2171B5"
+)
+
+# ── 4. Clean x-axis labels (avoids overlap without rotation) ──────────────────
+x_labels <- c(
+  "SHARED"             = "Shared",
+  "Caudel_et_al_Only"  = "Caudal\net al. only",
+  "My_analysis_Only"   = "This study\nonly"
+)
+
+# ── 5. Plot ───────────────────────────────────────────────────────────────────
+p_unified <- ggplot(unified_summary, aes(x = Category, y = Count, fill = Category)) +
+  geom_bar(stat = "identity", width = 0.55,
+           color = "white", linewidth = 0.4) +
+  geom_text(aes(label = scales::comma(Count)),
+            vjust = -0.6, size = 4.5,
+            color = "black", fontface = "bold") +
+  scale_fill_manual(values = category_colors) +
+  scale_x_discrete(labels = x_labels) +
+  scale_y_continuous(
+    labels = scales::comma,
+    expand = expansion(mult = c(0, 0.18))
+  ) +
+  labs(
+    title   = paste0("Unified SNP-eQTL dataset (n = ", scales::comma(n_unified), ")"),
+    x       = NULL,
+    y       = "Number of SNP-eQTLs",
+    caption = "Shared: eQTLs recovered in both this study and Caudal et al."
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    plot.title         = element_text(size = 13, face = "bold", color = "black",
+                                      hjust = 0.5, margin = margin(b = 4)),
+    axis.text.x        = element_text(size = 12, color = "black", lineheight = 1.1),
+    axis.text.y        = element_text(size = 12, color = "black"),
+    axis.title.y       = element_text(size = 13, color = "black", face = "bold",
+                                      margin = margin(r = 10)),
+    plot.caption       = element_text(size = 9, color = "grey30", hjust = 0,
+                                      margin = margin(t = 8)),
+    legend.position    = "none",
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.4),
+    panel.grid.minor.y = element_blank(),
+    axis.line          = element_line(color = "black", linewidth = 0.5),
+    axis.ticks         = element_line(color = "black", linewidth = 0.5),
+    plot.margin        = margin(14, 18, 12, 14)
+  )
+
+p_unified
+
+# ── 6. Save as TIFF ───────────────────────────────────────────────────────────
+ggsave(
+  filename    = "../../results/publication/unified_snp_eqtl_71_sc_bulk_paper.tiff",
+  plot        = p_unified,
+  device      = "tiff",
+  width       = 4.5,
+  height      = 4.5,
+  units       = "in",
+  dpi         = 300,
+  compression = "lzw"
+)
+
+message("Saved: unified_snp_eqtl.tiff")
+```
+# ============================================================================
+# STEP 3: SUMMARY STATISTICS BY CATEGORY
+# ============================================================================
+```{r}
+cat("STEP 3: Summary Statistics by Category\n")
+cat("──────────────────────────────────────\n\n")
+
+# SHARED eQTLs
+shared_df <- unified_data %>% filter(Category == "SHARED")
+cat("SHARED eQTLs (n=", nrow(shared_df), "):\n")
+cat("  Your -log10(p-value) - Mean: ", round(mean(shared_df$Your_neglog10p, na.rm=T), 3),
+    " | Median: ", round(median(shared_df$Your_neglog10p, na.rm=T), 3),
+    " | SD: ", round(sd(shared_df$Your_neglog10p, na.rm=T), 3), "\n")
+cat("  Reference -log10(p-value) - Mean: ", round(mean(shared_df$Ref_neglog10p, na.rm=T), 3),
+    " | Median: ", round(median(shared_df$Ref_neglog10p, na.rm=T), 3),
+    " | SD: ", round(sd(shared_df$Ref_neglog10p, na.rm=T), 3), "\n")
+cat("  Your distance above threshold - Mean: ", round(mean(shared_df$Your_distance_above_threshold, na.rm=T), 3), "\n")
+cat("  Reference distance above threshold - Mean: ", round(mean(shared_df$Ref_distance_above_threshold, na.rm=T), 3), "\n\n")
+
+# REFERENCE-ONLY eQTLs
+ref_only_df <- unified_data %>% filter(Category == "REFERENCE-ONLY")
+cat("REFERENCE-ONLY eQTLs (n=", nrow(ref_only_df), "):\n")
+cat("  Reference -log10(p-value) - Mean: ", round(mean(ref_only_df$Ref_neglog10p, na.rm=T), 3),
+    " | Median: ", round(median(ref_only_df$Ref_neglog10p, na.rm=T), 3),
+    " | SD: ", round(sd(ref_only_df$Ref_neglog10p, na.rm=T), 3), "\n")
+cat("  Reference distance above threshold - Mean: ", round(mean(ref_only_df$Ref_distance_above_threshold, na.rm=T), 3), "\n\n")
+
+# YOUR-ONLY eQTLs
+your_only_df <- unified_data %>% filter(Category == "YOUR-ONLY")
+cat("YOUR-ONLY eQTLs (n=", nrow(your_only_df), "):\n")
+cat("  Your -log10(p-value) - Mean: ", round(mean(your_only_df$Your_neglog10p, na.rm=T), 3),
+    " | Median: ", round(median(your_only_df$Your_neglog10p, na.rm=T), 3),
+    " | SD: ", round(sd(your_only_df$Your_neglog10p, na.rm=T), 3), "\n")
+cat("  Your distance above threshold - Mean: ", round(mean(your_only_df$Your_distance_above_threshold, na.rm=T), 3), "\n\n")
+
+```
+# ============================================================================
+# STEP 4: -log10(p-value) CORRELATION ANALYSIS (SHARED ONLY)
+# ============================================================================
+```{r}
+
+# Remove NAs for correlation
+shared_clean <- shared_df %>%
+  filter(!is.na(Your_neglog10p) & !is.na(Ref_neglog10p))
+
+cor_neglog10p_shared <- cor(shared_clean$Your_neglog10p, shared_clean$Ref_neglog10p, method="pearson")
+cor_test_shared <- cor.test(shared_clean$Your_neglog10p, shared_clean$Ref_neglog10p, method="pearson")
+
+cat("SHARED eQTLs -log10(p-value) Correlation:\n")
+cat("  Pearson r: ", round(cor_neglog10p_shared, 4), "\n")
+cat("  p-value: ", format(cor_test_shared$p.value, scientific=TRUE), "\n")
+cat("  95% CI: [", round(cor_test_shared$conf.int[1], 4), ", ", 
+    round(cor_test_shared$conf.int[2], 4), "]\n\n")
+
+if (cor_neglog10p_shared > 0.90) {
+  cat("✓✓✓ NEARLY PERFECT correlation\n")
+  cat("    Your and reference detect SAME signals with same strength\n\n")
+} else if (cor_neglog10p_shared > 0.80) {
+  cat("✓✓ VERY STRONG correlation\n")
+  cat("    Your and reference detect SAME signals\n\n")
+} else if (cor_neglog10p_shared > 0.70) {
+  cat("✓ STRONG correlation\n")
+  cat("    Your and reference detect mostly same signals\n\n")
+} else {
+  cat("Moderate correlation\n")
+  cat("    Some differences in signal strength\n\n")
+}
+```
+# ============================================================================
+# STEP 5: THRESHOLD PROXIMITY - ALL CATEGORIES
+# ============================================================================
+```{r}
+cat("Distance above threshold (how far from failing):\n\n")
+
+cat("SHARED:\n")
+cat("  Your distance - Mean: ", round(mean(shared_df$Your_distance_above_threshold, na.rm=T), 3),
+    " | Median: ", round(median(shared_df$Your_distance_above_threshold, na.rm=T), 3), "\n")
+cat("  Ref distance - Mean: ", round(mean(shared_df$Ref_distance_above_threshold, na.rm=T), 3),
+    " | Median: ", round(median(shared_df$Ref_distance_above_threshold, na.rm=T), 3), "\n\n")
+
+cat("REFERENCE-ONLY:\n")
+cat("  Ref distance - Mean: ", round(mean(ref_only_df$Ref_distance_above_threshold, na.rm=T), 3),
+    " | Median: ", round(median(ref_only_df$Ref_distance_above_threshold, na.rm=T), 3), "\n\n")
+
+cat("YOUR-ONLY:\n")
+cat("  Your distance - Mean: ", round(mean(your_only_df$Your_distance_above_threshold, na.rm=T), 3),
+    " | Median: ", round(median(your_only_df$Your_distance_above_threshold, na.rm=T), 3), "\n\n")
+```
+
+# ============================================================================
+# STEP 7: COMPARISON TABLE
+# ============================================================================
+```{r}
+comparison_table <- data.frame(
+  Category = c("SHARED", "REFERENCE-ONLY", "YOUR-ONLY"),
+  Count = c(nrow(shared_df), nrow(ref_only_df), nrow(your_only_df)),
+  Your_Mean_neglog10p = c(round(mean(shared_df$Your_neglog10p, na.rm=T), 3),
+                    "N/A",
+                    round(mean(your_only_df$Your_neglog10p, na.rm=T), 3)),
+  Ref_Mean_neglog10p = c(round(mean(shared_df$Ref_neglog10p, na.rm=T), 3),
+                   round(mean(ref_only_df$Ref_neglog10p, na.rm=T), 3),
+                   "N/A"),
+  Your_Mean_Distance = c(round(mean(shared_df$Your_distance_above_threshold, na.rm=T), 3),
+                         "N/A",
+                         round(mean(your_only_df$Your_distance_above_threshold, na.rm=T), 3)),
+  Ref_Mean_Distance = c(round(mean(shared_df$Ref_distance_above_threshold, na.rm=T), 3),
+                        round(mean(ref_only_df$Ref_distance_above_threshold, na.rm=T), 3),
+                        "N/A")
+)
+
+print(comparison_table)
+cat("\n")
+
+```
+```{r}
+library(ggplot2)
+library(tidyverse)
+
+# ── Color scheme ──────────────────────────────────────────────────────────────
+category_colors <- c(
+  "SHARED"             = "green3",
+  "Caudel_et_al_Only"  = "skyblue",
+  "My_analysis_Only"   = "orange"
+)
+
+clean_labels <- c(
+  "SHARED"             = "Shared",
+  "Caudel_et_al_Only"  = "Caudal et al. only",
+  "My_analysis_Only"   = "This study only"
+)
+
+# ── Prepare data ──────────────────────────────────────────────────────────────
+shared_df    <- unified_data %>% filter(Category == "SHARED")
+ref_only_df  <- unified_data %>% filter(Category == "REFERENCE-ONLY")
+your_only_df <- unified_data %>% filter(Category == "YOUR-ONLY")
+
+# ── Median annotation dataframes ─────────────────────────────────────────────
+means_1a <- data.frame(
+  Source     = c("SHARED", "Caudel_et_al_Only", "My_analysis_Only"),
+  median_val = c(
+    median(shared_df$Your_neglog10p,    na.rm = TRUE),
+    median(ref_only_df$Ref_neglog10p,   na.rm = TRUE),
+    median(your_only_df$Your_neglog10p, na.rm = TRUE)
+  )
+)
+
+means_1b <- data.frame(
+  Source     = c("SHARED", "Caudel_et_al_Only", "My_analysis_Only"),
+  median_val = c(
+    median(shared_df$Ref_neglog10p,     na.rm = TRUE),
+    median(ref_only_df$Ref_neglog10p,   na.rm = TRUE),
+    median(your_only_df$Your_neglog10p, na.rm = TRUE)
+  )
+)
+
+# ── Shared theme ──────────────────────────────────────────────────────────────
+shared_theme <- theme_minimal(base_size = 16) +
+  theme(
+    plot.title      = element_blank(),
+    plot.subtitle   = element_blank(),
+    axis.title.x    = element_text(size = 14, color = "grey20", margin = margin(t = 8)),
+    axis.title.y    = element_text(size = 14, color = "grey20", margin = margin(r = 8)),
+    axis.text.x     = element_text(size = 13, color = "grey20"),
+    axis.text.y     = element_text(size = 13, color = "grey20"),
+    legend.position = "right",
+    legend.title    = element_text(size = 13, face = "bold"),
+    legend.text     = element_text(size = 12),
+    legend.key.size = unit(0.6, "cm"),
+    plot.margin     = margin(20, 16, 12, 12)
+  )
+
+# ── Function to build base plot ───────────────────────────────────────────────
+build_density_plot <- function(plot_data, means_df) {
+  ggplot(plot_data, aes(x = neglog10p_value, fill = Source, color = Source)) +
+    geom_density(alpha = 0.4, linewidth = 0.8) +
+    geom_vline(data = means_df,
+               aes(xintercept = median_val, color = Source),
+               linetype = "dashed", linewidth = 1, alpha = 0.9) +
+    geom_text(data = means_df,
+              aes(x     = median_val,
+                  y     = Inf,
+                  label = paste0(clean_labels[Source], "\nmedian=", round(median_val, 2)),
+                  color = Source,
+                  vjust = c(1.3, 3.8, 6.3)),
+              hjust       = -0.07,
+              size        = 4,
+              fontface    = "bold",
+              show.legend = FALSE) +
+    scale_fill_manual(values = category_colors, labels = clean_labels) +
+    scale_color_manual(values = category_colors, labels = clean_labels) +
+    labs(
+      x     = expression(-log[10](italic(p)-value)),
+      y     = "Density",
+      fill  = "Category",
+      color = "Category"
+    ) +
+    shared_theme
+}
+
+# ── Plot data ─────────────────────────────────────────────────────────────────
+plot_data_a <- bind_rows(
+  shared_df    %>% filter(!is.na(Your_neglog10p)) %>%
+    mutate(neglog10p_value = Your_neglog10p, Source = "SHARED"),
+  ref_only_df  %>% filter(!is.na(Ref_neglog10p))  %>%
+    mutate(neglog10p_value = Ref_neglog10p,  Source = "Caudel_et_al_Only"),
+  your_only_df %>% filter(!is.na(Your_neglog10p)) %>%
+    mutate(neglog10p_value = Your_neglog10p, Source = "My_analysis_Only")
+) %>% mutate(Source = factor(Source, levels = c("SHARED", "Caudel_et_al_Only", "My_analysis_Only")))
+
+plot_data_b <- bind_rows(
+  shared_df    %>% filter(!is.na(Ref_neglog10p))  %>%
+    mutate(neglog10p_value = Ref_neglog10p,  Source = "SHARED"),
+  ref_only_df  %>% filter(!is.na(Ref_neglog10p))  %>%
+    mutate(neglog10p_value = Ref_neglog10p,  Source = "Caudel_et_al_Only"),
+  your_only_df %>% filter(!is.na(Your_neglog10p)) %>%
+    mutate(neglog10p_value = Your_neglog10p, Source = "My_analysis_Only")
+) %>% mutate(Source = factor(Source, levels = c("SHARED", "Caudel_et_al_Only", "My_analysis_Only")))
+
+# ============================================================================
+# FIGURE 1A & 1B
+# ============================================================================
+p_dist1a <- build_density_plot(plot_data_a, means_1a)
+p_dist1b <- build_density_plot(plot_data_b, means_1b)
+
+print(p_dist1a)
+print(p_dist1b)
+
+# ============================================================================
+# SAVE AS TIFF
+# ============================================================================
+plots_to_save <- list(
+  "plot_dist1a" = p_dist1a,
+  "plot_dist1b" = p_dist1b
+)
+
+for (nm in names(plots_to_save)) {
+  ggsave(
+    filename    = paste0("../../results/publication/", nm, ".tiff"),
+    plot        = plots_to_save[[nm]],
+    device      = "tiff",
+    width       = 11,
+    height      = 6,
+    units       = "in",
+    dpi         = 300,
+    compression = "lzw"
+  )
+  message("Saved: ", nm, ".tiff")
+}
+```
+```{r}
+
+```
+
+
+```{r}
+library(ggplot2)
+library(tidyverse)
+library(scales)
+
+# ── Color scheme ──────────────────────────────────────────────────────────────
+category_colors <- c(
+  "SHARED"      = "green3",
+  "BulkRNAseq"  = "skyblue",
+  "scRNAseq"    = "orange"
+)
+
+clean_labels <- c(
+  "SHARED"      = "Shared",
+  "BulkRNAseq"  = "Bulk RNA-seq only",
+  "scRNAseq"    = "scRNA-seq only"
+)
+
+# ── Prepare data ──────────────────────────────────────────────────────────────
+unified_renamed <- unified_data %>%
+  mutate(Category = recode(Category,
+                           "REFERENCE-ONLY" = "BulkRNAseq",
+                           "YOUR-ONLY"      = "scRNAseq"))
+
+# ============================================================================
+# PLOT 1: BOXPLOT + JITTER
+# ============================================================================
+plot1_data <- unified_renamed %>%
+  mutate(
+    neglog10p = case_when(
+      Category == "SHARED"      ~ (Ref_neglog10p + Your_neglog10p) / 2,
+      Category == "BulkRNAseq"  ~ Ref_neglog10p,
+      Category == "scRNAseq"    ~ Your_neglog10p
+    ),
+    Category = factor(Category, levels = c("BulkRNAseq", "SHARED", "scRNAseq"))
+  ) %>%
+  filter(!is.na(neglog10p))
+
+summary_stats <- plot1_data %>%
+  group_by(Category) %>%
+  summarise(
+    n      = n(),
+    median = median(neglog10p),
+    mean   = mean(neglog10p),
+    .groups = "drop"
+  )
+
+p1 <- ggplot(plot1_data,
+             aes(x = Category, y = neglog10p, color = Category, fill = Category)) +
+  geom_boxplot(
+    alpha         = 0.15,
+    width         = 0.5,
+    outlier.shape = NA
+  ) +
+  geom_jitter(
+    width = 0.2,
+    alpha = 0.35,
+    size  = 1.5
+  ) +
+  stat_summary(
+    fun   = mean,
+    geom  = "point",
+    shape = 18,
+    size  = 5,
+    color = "white"
+  ) +
+  geom_text(
+    data        = summary_stats,
+    aes(x       = Category,
+        y       = -0.5,
+        label   = paste0("n=", scales::comma(n), "\nmedian=", round(median, 1))),
+    inherit.aes = FALSE,
+    size        = 4,
+    color       = "black",
+    fontface    = "bold",
+    vjust       = 1
+  ) +
+  scale_color_manual(values = category_colors, labels = clean_labels) +
+  scale_fill_manual(values  = category_colors, labels = clean_labels) +
+  scale_x_discrete(labels = clean_labels) +
+  scale_y_continuous(expand = expansion(mult = c(0.15, 0.08))) +
+  labs(
+    x       = NULL,
+    y       = expression(-log[10](italic(p)-value)),
+    caption = "Shared: average \u2212log\u2081\u2080(p) of both studies.  Bulk RNA-seq / scRNA-seq only: single study value."
+  ) +
+  theme_minimal(base_size = 16) +
+  theme(
+    legend.position    = "none",
+    panel.grid.major.x = element_blank(),
+    plot.title         = element_blank(),
+    plot.subtitle      = element_blank(),
+    plot.caption       = element_text(size = 10, color = "grey30"),
+    axis.text.x        = element_text(size = 14, color = "black", lineheight = 1.1),
+    axis.text.y        = element_text(size = 14, color = "black"),
+    axis.title.y       = element_text(size = 15, color = "black", face = "bold",
+                                      margin = margin(r = 8)),
+    plot.margin        = margin(12, 16, 12, 12)
+  )
+
+print(p1)
+
+ggsave(
+  filename    = "../../results/publication/plot1_signal_strength_by_category.tiff",
+  plot        = p1,
+  device      = "tiff",
+  width       = 9,
+  height      = 7,
+  units       = "in",
+  dpi         = 300,
+  compression = "lzw"
+)
+message("Saved: plot1_signal_strength_by_category.tiff")
+
+# ============================================================================
+# PLOT 2: SCATTER — scRNA-seq vs. Bulk RNA-seq -log10(p)
+# ============================================================================
+plot2_data <- unified_renamed %>%
+  mutate(
+    x_val    = if_else(is.na(Ref_neglog10p),  0, Ref_neglog10p),
+    y_val    = if_else(is.na(Your_neglog10p), 0, Your_neglog10p),
+    Category = factor(Category, levels = c("BulkRNAseq", "scRNAseq", "SHARED"))
+  )
+
+axis_limit <- max(c(plot2_data$x_val, plot2_data$y_val), na.rm = TRUE) * 1.05
+n_shared   <- sum(plot2_data$Category == "SHARED")
+n_scrna    <- sum(plot2_data$Category == "scRNAseq")
+n_bulk     <- sum(plot2_data$Category == "BulkRNAseq")
+
+p2 <- ggplot(plot2_data,
+             aes(x = x_val, y = y_val, color = Category)) +
+  geom_abline(slope = 1, intercept = 0,
+              linetype = "dashed", color = "grey60", linewidth = 0.7) +
+  geom_point(
+    data  = plot2_data %>% filter(Category != "SHARED"),
+    alpha = 0.4,
+    size  = 1.8
+  ) +
+  geom_point(
+    data  = plot2_data %>% filter(Category == "SHARED"),
+    alpha = 0.6,
+    size  = 2
+  ) +
+  scale_color_manual(
+    values = category_colors,
+    labels = c(
+      "SHARED"      = paste0("Shared (n=", scales::comma(n_shared), ")"),
+      "BulkRNAseq"  = paste0("Bulk RNA-seq only (n=", scales::comma(n_bulk), ")"),
+      "scRNAseq"    = paste0("scRNA-seq only (n=", scales::comma(n_scrna), ")")
+    )
+  ) +
+  coord_fixed(ratio = 1,
+              xlim  = c(0, axis_limit),
+              ylim  = c(0, axis_limit)) +
+  labs(
+    x     = expression(bold("Bulk RNA-seq") ~ -log[10](italic(p)-value)),
+    y     = expression(bold("scRNA-seq") ~ -log[10](italic(p)-value)),
+    color = NULL
+  ) +
+  theme_minimal(base_size = 16) +
+  theme(
+    plot.title      = element_blank(),
+    plot.subtitle   = element_blank(),
+    axis.text.x     = element_text(size = 14, color = "black"),
+    axis.text.y     = element_text(size = 14, color = "black"),
+    axis.title.x    = element_text(size = 15, color = "black", face = "bold",
+                                   margin = margin(t = 8)),
+    axis.title.y    = element_text(size = 15, color = "black", face = "bold",
+                                   margin = margin(r = 8)),
+    legend.position = "bottom",
+    legend.title    = element_blank(),
+    legend.text     = element_text(size = 12, color = "black"),
+    legend.key.size = unit(0.6, "cm"),
+    plot.margin     = margin(12, 16, 12, 12)
+  )
+
+print(p2)
+
+ggsave(
+  filename    = "../../results/publication/plot2_scatter_scRNAseq_vs_bulk.tiff",
+  plot        = p2,
+  device      = "tiff",
+  width       = 9,
+  height      = 8,
+  units       = "in",
+  dpi         = 300,
+  compression = "lzw"
+)
+message("Saved: plot2_scatter_scRNAseq_vs_bulk.tiff")
+```
+```{r}
+library(ggplot2)
+library(tidyverse)
+library(scales)
+
+# ── Color scheme ──────────────────────────────────────────────────────────────
+category_colors <- c(
+  "SHARED"      = "green3",
+  "BulkRNAseq"  = "skyblue",
+  "scRNAseq"    = "orange"
+)
+
+# ============================================================================
+# PLOT 3: SCATTER — scRNA-seq vs. Bulk RNA-seq Effect Size (SnpWeight)
+# ============================================================================
+plot3_data <- unified_renamed %>%
+  mutate(
+    x_val    = if_else(is.na(Ref_SnpWeight),  0, Ref_SnpWeight),
+    y_val    = if_else(is.na(Your_SnpWeight), 0, Your_SnpWeight),
+    Category = factor(Category,
+                      levels = c("BulkRNAseq", "scRNAseq", "SHARED"))  # match unified_renamed
+  )
+
+axis_abs_max <- max(abs(c(plot3_data$x_val, plot3_data$y_val)), na.rm = TRUE) * 1.05
+n_shared <- sum(plot3_data$Category == "SHARED")
+n_scrna  <- sum(plot3_data$Category == "scRNAseq")
+n_bulk   <- sum(plot3_data$Category == "BulkRNAseq")
+
+p3 <- ggplot(plot3_data,
+             aes(x = x_val, y = y_val, color = Category)) +
+  geom_abline(slope =  1, intercept = 0,
+              linetype = "dashed", color = "grey60", linewidth = 0.7) +
+  geom_abline(slope = -1, intercept = 0,
+              linetype = "dotted", color = "grey80", linewidth = 0.5) +
+  geom_hline(yintercept = 0, color = "grey85", linewidth = 0.4) +
+  geom_vline(xintercept = 0, color = "grey85", linewidth = 0.4) +
+  geom_point(
+    data  = plot3_data %>% filter(Category != "SHARED"),
+    alpha = 0.4, size = 1.8
+  ) +
+  geom_point(
+    data  = plot3_data %>% filter(Category == "SHARED"),
+    alpha = 0.6, size = 2
+  ) +
+  scale_color_manual(
+    values = category_colors,
+    labels = c(
+      "SHARED"      = paste0("Shared (n=", scales::comma(n_shared), ")"),
+      "BulkRNAseq"  = paste0("Bulk RNA-seq only (n=", scales::comma(n_bulk), ")"),
+      "scRNAseq"    = paste0("scRNA-seq only (n=", scales::comma(n_scrna), ")")
+    )
+  ) +
+  coord_fixed(ratio = 1,
+              xlim  = c(-axis_abs_max, axis_abs_max),
+              ylim  = c(-axis_abs_max, axis_abs_max)) +
+  labs(
+    x     = expression(bold("Bulk RNA-seq  SnpWeight  ") * (beta)),
+    y     = expression(bold("scRNA-seq  SnpWeight  ") * (beta)),
+    color = NULL
+  ) +
+  theme_minimal(base_size = 16) +
+  theme(
+    plot.title      = element_blank(),
+    plot.subtitle   = element_blank(),
+    axis.text.x     = element_text(size = 14, color = "black"),
+    axis.text.y     = element_text(size = 14, color = "black"),
+    axis.title.x    = element_text(size = 15, color = "black", face = "bold",
+                                   margin = margin(t = 8)),
+    axis.title.y    = element_text(size = 15, color = "black", face = "bold",
+                                   margin = margin(r = 8)),
+    legend.position = "bottom",
+    legend.title    = element_blank(),
+    legend.text     = element_text(size = 12, color = "black"),
+    legend.key.size = unit(0.6, "cm"),
+    plot.margin     = margin(12, 16, 12, 12)
+  )
+
+print(p3)
+
+ggsave(
+  filename    = "../../results/publication/plot3_scatter_effect_size_snpweight_sc_bulk.tiff",
+  plot        = p3,
+  device      = "tiff",
+  width       = 9,
+  height      = 8,
+  units       = "in",
+  dpi         = 300,
+  compression = "lzw"
+)
+message("Saved: plot3_scatter_effect_size_snpweight_sc_bulk_downsampled.tiff")
+
+```

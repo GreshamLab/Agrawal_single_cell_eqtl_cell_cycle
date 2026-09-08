@@ -1,0 +1,197 @@
+---
+title: "Step3.effect-size-correlation-bulk-vs-single-cell"
+output: html_document
+---
+Testing: all sc2glu-tested SNPs vs. bulk's significant calls (does bulk's significant signal for a gene hold up, directionally and quantitatively, when re-examined in sc2glu, whether or not sc2glu itself calls it significant)
+
+"of all eQTLs tested in sc2glu per phenotype, how many are found in bulk's significant eQTL list and do they show effect size and sign concordance"
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+library(tidyverse)
+
+# resolve dplyr masking
+bind_rows <- dplyr::bind_rows
+count     <- dplyr::count
+select    <- dplyr::select
+filter    <- dplyr::filter
+```
+
+
+```{r}
+#pan transcriptome
+pan_transcriptome <- read.csv("/scratch/aa9679/SingleCell_cerevisiae/Gene_exp_analysis/pan_transcriptome/data/downloaded_data_from_pan_transcriptome_paper/GWAS_combined_lgcCorr_ldPruned_noBonferroni_20221207.tab", header=TRUE)
+# #create a new column where we concatenate ChrPos and Pheno and call it ChrPos_Pheno
+pan_transcriptome$Chr_ChrPos_Pheno <- paste0(pan_transcriptome$Chr, "_",
+                                                    pan_transcriptome$ChrPos, "_",
+                                                    pan_transcriptome$Pheno)
+#filter out the snp eQTLs detected
+snp_pan_transcriptome <- pan_transcriptome[pan_transcriptome$subtype == "SNP", ]
+snp_pan_transcriptome
+
+head(snp_pan_transcriptome)
+#effect size column is SnpWeight
+```
+```{r}
+save_my_plot <- function(plot, name, width = 5, height = 5, out_dir = "../results") {
+  dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+  ggsave(file.path(out_dir, paste0(name, ".pdf")), plot, width = width, height = height, units = "in")
+  ggsave(file.path(out_dir, paste0(name, ".png")), plot, width = width, height = height, units = "in", dpi = 300)
+  invisible(NULL)
+}
+```
+
+
+```{r}
+library(tidyverse)
+
+PATHS_sc2glu <- list(
+  SNPs = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2/fastlmm/results/results_SNPs_968_with_double_id_final_filtered_for_ncount_less_than_5_run2/"
+)
+
+# ============================================================
+# STEP 1 — genes tested in sc2glu = gene subfolders under SNPs dir
+# ============================================================
+sc2glu_tested_genes <- list.dirs(PATHS_sc2glu$SNPs, recursive = FALSE, full.names = FALSE)
+cat("Genes with a sc2glu SNP association file:", length(sc2glu_tested_genes), "\n")
+
+# ============================================================
+# STEP 2 — reader for one gene's full (all-SNPs-tested) file
+# ============================================================
+read_sc2glu_gene_tests <- function(gene, snps_dir) {
+  f <- file.path(snps_dir, gene, paste0(gene, ".first_assoc.txt"))
+  if (!file.exists(f)) return(NULL)
+  tryCatch({
+    read.table(f, header = TRUE, sep = "\t", stringsAsFactors = FALSE, quote = "") %>%
+      transmute(SNP, Beta_sc = SnpWeight, P_sc = PValue, Gene = gene)
+  }, error = function(e) NULL)
+}
+
+# ============================================================
+# STEP 3 — bulk (Caudal / pan-transcriptome) side
+# SNP ids already match sc2glu's own SNP column format
+# ("rs_chromosomeN_pos"), and the effect-size column in both
+# datasets is SnpWeight — no reformatting or renaming needed.
+# ============================================================
+bulk_snps <- snp_pan_transcriptome %>%
+  transmute(SNP, Beta_bulk = SnpWeight, P_bulk = PValue, Gene = Pheno)
+
+# ============================================================
+# STEP 4 — retrieve + join, gene by gene
+# NOTE ON SCALE: reads one file per gene (potentially thousands).
+# Test on a subset first:  sc2glu_tested_genes <- head(sc2glu_tested_genes, 25)
+# ============================================================
+all_tested_concordance <- map_dfr(seq_along(sc2glu_tested_genes), function(i) {
+  gene <- sc2glu_tested_genes[i]
+  if (i %% 200 == 0) cat(sprintf("  [%d/%d genes]\n", i, length(sc2glu_tested_genes)))
+
+  sc_gene <- read_sc2glu_gene_tests(gene, PATHS_sc2glu$SNPs)
+  if (is.null(sc_gene) || nrow(sc_gene) == 0) return(NULL)
+
+  bulk_gene <- bulk_snps %>% filter(Gene == gene)
+  if (nrow(bulk_gene) == 0) return(NULL)
+
+  inner_join(sc_gene, bulk_gene %>% select(SNP, Beta_bulk, P_bulk), by = "SNP")
+})
+
+cat("\nTotal matched SNP x gene pairs (sc2glu tested, found in bulk):",
+    nrow(all_tested_concordance), "\n")
+cat("Genes contributing at least one matched SNP:",
+    n_distinct(all_tested_concordance$Gene), "\n")
+
+
+# ============================================================
+# STEP 5 — effect size concordance statistics (generic, reusable)
+# ============================================================
+calculate_effect_size_concordance <- function(df, beta1_col, beta2_col,
+                                               cond1_name, cond2_name,
+                                               n_perms = 5000) {
+  beta1 <- df[[beta1_col]]
+  beta2 <- df[[beta2_col]]
+  n     <- length(beta1)
+
+  same_sign <- sign(beta1) == sign(beta2)
+  n_concord <- sum(same_sign, na.rm = TRUE)
+  sign_conc <- n_concord / n
+
+  obs_r   <- cor(beta1, beta2, method = "pearson",  use = "complete.obs")
+  obs_rho <- cor(beta1, beta2, method = "spearman", use = "complete.obs")
+
+  binom_res <- binom.test(n_concord, n, p = 0.5, alternative = "greater")
+
+  perm_sign <- replicate(n_perms, {
+    perm_beta2 <- sample(beta2)
+    sum(sign(beta1) == sign(perm_beta2), na.rm = TRUE) / n
+  })
+  perm_r <- replicate(n_perms, {
+    perm_beta2 <- sample(beta2)
+    cor(beta1, perm_beta2, method = "pearson", use = "complete.obs")
+  })
+
+  cat(sprintf("\n%s vs %s — effect size concordance (n = %d SNP x gene pairs)\n",
+              cond1_name, cond2_name, n))
+  cat(sprintf("  Sign concordance: %.1f%% (binomial p = %.3e)\n",
+              100 * sign_conc, binom_res$p.value))
+  cat(sprintf("  Pearson r:    %.4f (permutation p = %.4f)\n",
+              obs_r, sum(perm_r >= obs_r) / n_perms))
+  cat(sprintf("  Spearman rho: %.4f\n", obs_rho))
+
+  list(data = df, n = n, n_concordant = n_concord, sign_conc = sign_conc,
+       obs_r = obs_r, obs_rho = obs_rho, binom_result = binom_res,
+       perm_sign = perm_sign, perm_r = perm_r,
+       perm_p_sign = sum(perm_sign >= sign_conc) / n_perms,
+       perm_p_r = sum(perm_r >= obs_r) / n_perms)
+}
+
+sc_bulk_stats <- calculate_effect_size_concordance(
+  all_tested_concordance, "Beta_sc", "Beta_bulk",
+  cond1_name = "sc2glu (all tested)", cond2_name = "Bulk (Caudal 2024)"
+)
+
+# ============================================================
+# STEP 6 — plots (uses save_plot() already defined in this file)
+# ============================================================
+fig_effect_scatter <- ggplot(sc_bulk_stats$data, aes(x = Beta_sc, y = Beta_bulk)) +
+  geom_point(aes(color = sign(Beta_sc) == sign(Beta_bulk)), alpha = 0.3, size = 1.2) +
+  geom_smooth(method = "lm", se = FALSE, color = "black", linewidth = 0.8) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey50") +
+  geom_hline(yintercept = 0, color = "grey80", linewidth = 0.3) +
+  geom_vline(xintercept = 0, color = "grey80", linewidth = 0.3) +
+  scale_color_manual(values = c(`TRUE` = "#27AE60", `FALSE` = "#E74C3C"),
+                      labels = c(`TRUE` = "Concordant", `FALSE` = "Discordant"),
+                      name = "Direction") +
+  annotate("text", x = -Inf, y = Inf, hjust = -0.05, vjust = 1.3,
+           label = sprintf("Pearson r = %.3f\nSpearman rho = %.3f\nSign concordance = %.1f%%\nn = %d",
+                            sc_bulk_stats$obs_r, sc_bulk_stats$obs_rho,
+                            100 * sc_bulk_stats$sign_conc, sc_bulk_stats$n),
+           size = 3.6, fontface = "bold") +
+  labs(title = "Effect size concordance: sc2glu (all tested) vs. Bulk (Caudal 2024)",
+       x = "Effect size beta, sc2glu", y = "Effect size beta, bulk") +
+  theme_classic(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", size = 13, hjust = 0.5),
+        legend.position = "right")
+
+save_my_plot(fig_effect_scatter, "SC2GLU_vs_Bulk_effect_size_concordance", width = 6.5, height = 5.5)
+
+perm_df <- data.frame(sign_conc = sc_bulk_stats$perm_sign, pearson_r = sc_bulk_stats$perm_r)
+
+fig_null_sign <- ggplot(perm_df, aes(x = sign_conc)) +
+  geom_histogram(bins = 50, fill = "grey70", color = "white", linewidth = 0.2) +
+  geom_vline(xintercept = sc_bulk_stats$sign_conc, color = "#E74C3C", linewidth = 1.1) +
+  geom_vline(xintercept = 0.5, linetype = "dashed", color = "black") +
+  labs(title = "Sign concordance — permutation null", x = "Sign concordance", y = "Frequency") +
+  theme_classic(base_size = 11)
+
+fig_null_r <- ggplot(perm_df, aes(x = pearson_r)) +
+  geom_histogram(bins = 50, fill = "grey70", color = "white", linewidth = 0.2) +
+  geom_vline(xintercept = sc_bulk_stats$obs_r, color = "#27AE60", linewidth = 1.1) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "black") +
+  labs(title = "Pearson r — permutation null", x = "Pearson r", y = "Frequency") +
+  theme_classic(base_size = 11)
+
+save_my_plot(fig_null_sign, "SC2GLU_vs_Bulk_null_sign_concordance", width = 5, height = 4)
+save_my_plot(fig_null_r,    "SC2GLU_vs_Bulk_null_pearson_r",        width = 5, height = 4)
+```
+

@@ -1,0 +1,422 @@
+---
+title: "1.Gene-expression-correlation-sc2%glu-pan-transcriptome"
+author: "Akriti Agrawal"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+library(tidyverse)
+library(DESeq2)
+
+# resolve dplyr masking
+bind_rows <- dplyr::bind_rows
+count     <- dplyr::count
+select    <- dplyr::select
+filter    <- dplyr::filter
+```
+
+
+
+```{r}
+# ============================================================
+# Config
+# ============================================================
+PATHS <- list(
+  BULK_TPM = "/scratch/aa9679/SingleCell_cerevisiae/Gene_exp_analysis/pan_transcriptome/data/969_count_annotated_merged_tpm_before_any_subfiltering.txt",
+  SC       = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2/fastlmm/data/pheno_data/pseudobulked_sc2glu_before_any_filtering.csv",
+  ANNOT    = "/scratch/aa9679/SingleCell_cerevisiae/Gene_exp_analysis/yeast_custom_annotations.csv"
+)
+OUT_DIR <- "../results"
+dir.create(OUT_DIR, showWarnings = FALSE, recursive = TRUE)
+
+# ============================================================
+# Helpers
+# ============================================================
+read_pseudobulk <- function(path, sep = "\t") {
+  if (!file.exists(path)) stop("File not found: ", path)
+  read.csv(path, sep = sep, row.names = 1, header = TRUE, check.names = FALSE)
+}
+
+deseq_normalize <- function(mat, label = "") {
+  m   <- round(as.matrix(mat))
+  dds <- DESeqDataSetFromMatrix(
+    countData = m,
+    colData   = data.frame(row.names = colnames(m), condition = factor(colnames(m))),
+    design    = ~ 1
+  )
+  dds <- tryCatch(
+    estimateSizeFactors(dds),
+    error = function(e) {
+      message(label, ": standard size factors failed, using type = 'poscounts'")
+      estimateSizeFactors(dds, type = "poscounts")
+    }
+  )
+  as.data.frame(counts(dds, normalized = TRUE))
+}
+
+convert_to_orf <- function(mat, annot_path) {
+  annot <- read.csv(annot_path, stringsAsFactors = FALSE)
+  common_to_orf <- annot %>%
+    filter(!is.na(gene_name), !is.na(gene_id)) %>%
+    distinct(gene_name, gene_id) %>%
+    deframe()
+  ids    <- rownames(mat)
+  is_orf <- grepl("^Y[A-Z]{2}\\d{3}[WC](-[A-Z])?$", ids)
+  orf_ids <- ifelse(
+    is_orf, ids,
+    ifelse(ids %in% names(common_to_orf), common_to_orf[ids], ids)
+  )
+  dup <- duplicated(orf_ids)
+  if (any(dup)) {
+    cat("Dropping", sum(dup), "rows with duplicate ORF IDs after conversion\n")
+    mat     <- mat[!dup, , drop = FALSE]
+    orf_ids <- orf_ids[!dup]
+  }
+  rownames(mat) <- orf_ids
+  stopifnot(!any(duplicated(rownames(mat))))
+  mat
+}
+
+pub_theme <- theme_classic(base_size = 9) +
+  theme(
+    axis.title = element_text(size = 12, face = "bold", color = "black"),
+    axis.text  = element_text(size = 11, color = "black"),
+    axis.line  = element_line(linewidth = 0.4, color = "black"),
+    axis.ticks = element_line(linewidth = 0.35, color = "black"),
+    panel.grid       = element_blank(),
+    plot.background  = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA)
+  )
+
+# Saves a plot without ever touching the interactive graphics device —
+# ggsave opens its own device internally, so this sidesteps the
+# "invalid 'filename'" console-printing error entirely.
+save_plot <- function(plot, name, width = 5, height = 5) {
+  ggsave(file.path(OUT_DIR, paste0(name, ".pdf")), plot, width = width, height = height)
+  png_path <- file.path(OUT_DIR, paste0(name, ".png"))
+  ggsave(png_path, plot, width = width, height = height, dpi = 300)
+  message("Saved: ", png_path, " (open this file to view the plot)")
+  invisible(png_path)
+}
+```
+
+```{r}
+# ============================================================
+# Load + normalize expression matrices
+# ============================================================
+bulk_tpm      <- read_pseudobulk(PATHS$BULK_TPM)                 # already TPM, length-corrected — leave as is
+sc_pseudobulk <- read_pseudobulk(PATHS$SC, sep = ",")
+sc_pseudobulk <- convert_to_orf(sc_pseudobulk, PATHS$ANNOT)
+sc_norm       <- deseq_normalize(sc_pseudobulk, "sc 2% glucose")  # DESeq2 size-factor normalized, no length correction needed (3' UMI)
+
+shared_genes   <- intersect(rownames(bulk_tpm), rownames(sc_norm))
+shared_strains <- intersect(colnames(bulk_tpm), colnames(sc_norm))
+cat("Shared genes:", length(shared_genes), " | Shared strains:", length(shared_strains), "\n")
+
+bulk_sub <- bulk_tpm[shared_genes, shared_strains]
+sc_sub   <- sc_norm[shared_genes, shared_strains]
+```
+"does gene X rank above gene Y in both platforms, whether by mean?"
+Layer 1a concordance (both platforms agree it's a highly-expressed gene)
+```{r}
+# ============================================================
+# LAYER 1a — Global rank concordance
+# ============================================================
+bulk_mean <- rowMeans(bulk_sub)
+sc_mean   <- rowMeans(sc_sub)
+
+global_spearman <- cor(bulk_mean, sc_mean, method = "spearman")
+cat("Layer 1a — Global Spearman r (mean expression, bulk vs sc):", round(global_spearman, 3), "\n")
+
+global_df <- data.frame(gene = shared_genes, x = rank(bulk_mean), y = rank(sc_mean))
+
+fig_global <- ggplot(global_df, aes(x, y)) +
+  geom_point(alpha = 0.1, size = 0.3, shape = 16, color = "grey30") +
+  annotate("text", x = Inf, y = -Inf,
+           label = paste0("Spearman r = ", round(global_spearman, 3)),
+           hjust = 1.1, vjust = -0.8, size = 4, fontface = "bold") +
+  coord_fixed() +
+  labs(x = "Bulk TPM (rank)", y = "sc DESeq2-normalized (rank)",
+       title = "Layer 1a: Global expression-rank concordance") +
+  pub_theme
+
+save_plot(fig_global, "Layer1a_global_concordance")
+```
+Addressing: "for this one gene, does strain A being high and strain B being low in bulk match strain A being high and strain B being low in sc?"
+```{r}
+# ============================================================
+# LAYER 1b — Per-gene pattern concordance
+# ============================================================
+gene_cor <- sapply(shared_genes, function(g) {
+  cor(as.numeric(bulk_sub[g, ]), as.numeric(sc_sub[g, ]),
+      method = "pearson", use = "complete.obs")
+})
+
+gene_cor_df <- data.frame(gene = shared_genes, correlation = gene_cor) %>%
+  mutate(cor_category = case_when(
+    correlation >= 0.7 ~ "high (>=0.7)",
+    correlation >= 0.4 ~ "moderate (0.4-0.7)",
+    correlation <  0.4 ~ "low (<0.4)",
+    TRUE               ~ NA_character_
+  ))
+
+cat("Layer 1b — per-gene correlation summary:\n")
+cat("  High (r>=0.7):    ", sum(gene_cor_df$correlation >= 0.7, na.rm = TRUE), "\n")
+cat("  Moderate (0.4-0.7):", sum(gene_cor_df$correlation >= 0.4 & gene_cor_df$correlation < 0.7, na.rm = TRUE), "\n")
+cat("  Low (r<0.4):      ", sum(gene_cor_df$correlation < 0.4, na.rm = TRUE), "\n")
+cat("  NA:               ", sum(is.na(gene_cor_df$correlation)), "\n")
+cat("  Median r:         ", round(median(gene_cor_df$correlation, na.rm = TRUE), 3), "\n")
+
+gene_cor_df <- gene_cor_df %>%
+  mutate(mean_expr_bulk = bulk_mean[gene],
+         mean_expr_sc   = sc_mean[gene],
+         log_mean_expr  = log2(pmax(mean_expr_bulk, mean_expr_sc) + 1))
+
+# ============================================================
+# LAYER 1b — distribution of per-gene correlation, by category
+# ============================================================
+cat_colors <- c(
+  "high (>=0.7)"       = "#2166ac",
+  "moderate (0.4-0.7)" = "#92c5de",
+  "low (<0.4)"         = "#d1e5f0"
+)
+
+# Histogram of per-gene correlation values
+fig_cor_hist <- ggplot(gene_cor_df |> filter(!is.na(cor_category)),
+                        aes(x = correlation, fill = cor_category)) +
+  geom_histogram(bins = 50, color = "white", linewidth = 0.3) +
+  geom_vline(xintercept = c(0.4, 0.7),
+             linetype = "dashed", color = "grey30", linewidth = 0.6) +
+  scale_fill_manual(values = cat_colors) +
+  labs(
+    title = "Per-gene sc vs. bulk expression correlation across strains",
+    x     = "Pearson correlation",
+    y     = "Number of genes",
+    fill  = "Category"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    plot.title      = element_text(size = 13, face = "bold", hjust = 0.5),
+    axis.title      = element_text(size = 12, face = "bold"),
+    axis.text       = element_text(size = 11, color = "black"),
+    legend.position = "bottom"
+  )
+fig_cor_hist
+save_plot(fig_cor_hist, "Layer1b_correlation_histogram", width = 6, height = 4.5)
+
+# Bar plot of gene counts per category
+cor_category_counts <- gene_cor_df |>
+  filter(!is.na(cor_category)) |>
+  dplyr::count(cor_category) |>
+  mutate(cor_category = factor(cor_category,
+           levels = c("high (>=0.7)", "moderate (0.4-0.7)", "low (<0.4)")))
+
+fig_cor_bar <- ggplot(cor_category_counts, aes(x = cor_category, y = n, fill = cor_category)) +
+  geom_col(width = 0.6, show.legend = FALSE) +
+  geom_text(aes(label = n), vjust = -0.4, size = 4, fontface = "bold") +
+  scale_fill_manual(values = cat_colors) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+  labs(
+    title = "Genes by sc vs. bulk expression concordance across strains",
+    x     = "Correlation category",
+    y     = "Number of genes"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    plot.title  = element_text(size = 13, face = "bold", hjust = 0.5),
+    axis.title  = element_text(size = 12, face = "bold"),
+    axis.text   = element_text(size = 11, color = "black"),
+    axis.text.x = element_text(face = "bold")
+  )
+fig_cor_bar
+save_plot(fig_cor_bar, "Layer1b_correlation_barplot", width = 5, height = 4.5)
+```
+"does gene X rank above gene Y in both platforms, whether by variance?"
+Layer 2's variance concordance asks about a gene's spread. whether that gene's expression actually moves around across strains, versus sitting flat
+```{r}
+# ============================================================
+# LAYER 2 — Between-strain variance comparability
+# ============================================================
+var_across <- function(mat, genes, strains) {
+  apply(mat[genes, strains, drop = FALSE], 1, var, na.rm = TRUE)
+}
+
+var_bulk <- var_across(bulk_tpm, shared_genes, shared_strains)
+var_sc   <- var_across(sc_norm,  shared_genes, shared_strains)
+
+variance_spearman <- cor(var_bulk, var_sc, method = "spearman")
+cat("Layer 2 — Spearman r of per-gene variance (bulk vs sc):", round(variance_spearman, 3), "\n")
+
+var_df <- data.frame(
+  gene         = shared_genes,
+  var_bulk     = var_bulk,
+  var_sc       = var_sc,
+  log_var_bulk = log2(var_bulk + 1),
+  log_var_sc   = log2(var_sc + 1)
+)
+
+fig_variance <- ggplot(var_df, aes(x = log_var_bulk, y = log_var_sc)) +
+  geom_point(alpha = 0.15, size = 0.5, color = "darkorange3") +
+  annotate("text", x = Inf, y = -Inf,
+           label = paste0("Spearman r = ", round(variance_spearman, 3)),
+           hjust = 1.1, vjust = -0.8, size = 4, fontface = "bold") +
+  labs(x = "log2(between-strain variance + 1), bulk",
+       y = "log2(between-strain variance + 1), sc",
+       title = "Layer 2: between-strain variance concordance") +
+  pub_theme
+fig_variance
+
+save_plot(fig_variance, "Layer2_variance_concordance")
+```
+This also reconciles cleanly with your strong Layer 1a (0.844) and Layer 2 (0.762) numbers rather than contradicting them, for the reason we discussed: those two tests pool across all ~5,607 genes at once, and are driven by the enormous between-gene spread in expression level and variance magnitude — a property that's easy for any two reasonably sensitive platforms to agree on, even when neither platform is precise enough to reproduce the much subtler within-gene, across-strain fluctuations that 1b is testing. Global concordance tells you the platforms are measuring the same kind of biology in aggregate; it says nothing about whether any individual gene's strain-specific pattern survived the trip through both assays intact — and per your numbers, for most genes it didn't, most plausibly because 71–96 strains just isn't enough data to detect real but modest biological variation over the platform noise for a typical gene, particularly for sc pseudobulk which is thinner per-strain than bulk.
+
+Practically, for the eQTL-sharing question this was always in service of: I'd treat the ~706 genes with moderate-or-better Layer 1b correlation (and ideally cross-checked against Layer 2 — genes that also show concordant variance magnitude) as the set where cross-platform eQTL replication is a meaningful thing to ask about. For the other ~87%, a failure to replicate an eQTL between bulk and sc is not strong evidence about the underlying biology — it's more likely a measurement-reproducibility ceiling, and comparing eQTL calls across the full 5,607-gene set without that stratification would probably make real biological non-replication indistinguishable from this noise floor. Worth running the joint diagnostic against Layer 2 variance for these specific genes if you haven't yet — if the "low" 4,899 are disproportionately the low-variance genes, that reinforces the power-floor explanation; if they're spread evenly across the variance range, that's a more specific concern about the sc-vs-bulk comparison itself worth digging into further.
+
+```{r}
+#pan transcriptome
+pan_transcriptome <- read.csv("/scratch/aa9679/SingleCell_cerevisiae/Gene_exp_analysis/pan_transcriptome/data/downloaded_data_from_pan_transcriptome_paper/GWAS_combined_lgcCorr_ldPruned_noBonferroni_20221207.tab", header=TRUE)
+# #create a new column where we concatenate ChrPos and Pheno and call it ChrPos_Pheno
+pan_transcriptome$Chr_ChrPos_Pheno <- paste0(pan_transcriptome$Chr, "_",
+                                                    pan_transcriptome$ChrPos, "_",
+                                                    pan_transcriptome$Pheno)
+#filter out the snp eQTLs detected
+snp_pan_transcriptome <- pan_transcriptome[pan_transcriptome$subtype == "SNP", ]
+snp_pan_transcriptome
+
+
+#single cell RNAseq
+all_signif_snps <- read.table("/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2/fastlmm/results/all_signif_SNP_sc2glu_with_double_id_final_filtered_for_ncount_less_than_5_with_threshold.txt", 
+                           header = TRUE, 
+                           sep = "\t", 
+                           stringsAsFactors = FALSE)
+all_signif_snps$Chr_ChrPos_Pheno <- paste0(all_signif_snps$Chr, "_", 
+                                                    all_signif_snps$ChrPos, "_", 
+                                                    all_signif_snps$Pheno)
+
+head(all_signif_snps)
+```
+```{r}
+# --- Find overlaps -----------------------------------------------------------
+your_assocs   <- unique(all_signif_snps$Chr_ChrPos_Pheno)
+their_assocs  <- unique(snp_pan_transcriptome$Chr_ChrPos_Pheno)
+common_assocs <- intersect(your_assocs, their_assocs)
+cat("Total common associations:", length(common_assocs), "\n")
+
+parse_genes <- function(assoc_vec) unique(sub(".*_", "", assoc_vec))
+genes_common_assocs <- parse_genes(common_assocs)
+cat("Unique genes in common associations:", length(genes_common_assocs), "\n")
+
+# --- Sanity check: do these gene IDs actually exist in gene_cor_df? ----------
+# gene_cor_df$gene is ORF IDs (post-conversion in Layer 1b). If Pheno in the
+# eQTL tables is a gene SYMBOL rather than ORF ID, this join will silently
+# come back mostly/entirely empty rather than erroring — worth checking before
+# trusting the results below.
+n_matched <- sum(genes_common_assocs %in% gene_cor_df$gene)
+cat("Shared-eQTL genes matched in gene_cor_df:", n_matched, "of", length(genes_common_assocs), "\n")
+
+# ============================================================
+# Bar plot — total eQTLs per dataset vs. shared
+# ============================================================
+eqtl_counts <- data.frame(
+  dataset = factor(c("Single-cell\n(sc 2% glucose)", "Bulk\n(Caudal 2024)", "Shared"),
+                    levels = c("Single-cell\n(sc 2% glucose)", "Bulk\n(Caudal 2024)", "Shared")),
+  n = c(length(your_assocs), length(their_assocs), length(common_assocs))
+)
+
+eqtl_colors <- c(
+  "Single-cell\n(sc 2% glucose)" = "#4E79A7",
+  "Bulk\n(Caudal 2024)"          = "#E15759",
+  "Shared"                       = "#59A14F"
+)
+
+pct_of_sc   <- round(100 * length(common_assocs) / length(your_assocs), 1)
+pct_of_bulk <- round(100 * length(common_assocs) / length(their_assocs), 1)
+
+fig_eqtl_counts <- ggplot(eqtl_counts, aes(x = dataset, y = n, fill = dataset)) +
+  geom_col(width = 0.6, show.legend = FALSE) +
+  geom_text(aes(label = n), vjust = -0.4, size = 4.5, fontface = "bold") +
+  scale_fill_manual(values = eqtl_colors) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
+  labs(
+    title    = "Significant eQTL associations: single-cell vs. bulk",
+    subtitle = paste0("Shared associations = ", pct_of_sc, "% of sc, ", pct_of_bulk, "% of bulk"),
+    x = NULL, y = "Number of significant associations"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    plot.title    = element_text(size = 13, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 10, hjust = 0.5, color = "grey40"),
+    axis.title    = element_text(size = 12, face = "bold"),
+    axis.text     = element_text(size = 11, color = "black")
+  )
+fig_eqtl_counts
+save_plot(fig_eqtl_counts, "eQTL_counts_sc_bulk_shared", width = 5.5, height = 4.5)
+
+# --- Look up correlation and category for common genes -----------------------
+overlap_cor_common <- gene_cor_df |>
+  filter(gene %in% genes_common_assocs, !is.na(correlation)) |>
+  arrange(desc(correlation)) |>
+  mutate(overlap_set = "sc vs bulk (common_assocs)")
+
+message("\n--- Common association genes and their sc-bulk correlation ---")
+print(overlap_cor_common)
+
+message("\nCategory breakdown — common associations:")
+overlap_cor_common |>
+  dplyr::count(cor_category) |>
+  mutate(pct = round(100 * n / sum(n), 1)) |>
+  print()
+
+message("Min correlation:    ", round(min(overlap_cor_common$correlation,    na.rm = TRUE), 3))
+message("Median correlation: ", round(median(overlap_cor_common$correlation, na.rm = TRUE), 3))
+message("Max correlation:    ", round(max(overlap_cor_common$correlation,    na.rm = TRUE), 3))
+
+# --- Does eQTL sharing enrich for higher sc-bulk correlation? ----------------
+# Compares the shared-eQTL genes' correlation distribution to the genome-wide
+# background (gene_cor_df) — this is the direct test of "concordant genes are
+# more likely to yield overlapping eQTLs."
+wt_enrich <- wilcox.test(overlap_cor_common$correlation, gene_cor_df$correlation,
+                          alternative = "greater")
+cat("\nWilcoxon (shared-eQTL genes vs. genome-wide background), one-sided greater: p =",
+    format(wt_enrich$p.value, scientific = TRUE), "\n")
+cat("Median — shared-eQTL genes:", round(median(overlap_cor_common$correlation), 3),
+    " | genome-wide:", round(median(gene_cor_df$correlation, na.rm = TRUE), 3), "\n")
+
+# --- Bar plot of correlation for each shared eQTL gene ----------------------
+cat_colors <- c(
+  "high (>=0.7)"       = "#2166ac",
+  "moderate (0.4-0.7)" = "#92c5de",
+  "low (<0.4)"         = "#d1e5f0"
+)
+
+fig_overlap_bar <- ggplot(overlap_cor_common,
+       aes(x = reorder(gene, correlation), y = correlation, fill = cor_category)) +
+  geom_col(width = 0.6) +
+  geom_hline(yintercept = 0.7,  linetype = "dashed", color = "gray30", linewidth = 0.5) +
+  geom_hline(yintercept = 0.35, linetype = "dashed", color = "gray60", linewidth = 0.5) +
+  geom_text(aes(label = round(correlation, 3)), hjust = -0.15, size = 3.5) +
+  scale_fill_manual(values = cat_colors) +
+  scale_y_continuous(limits = c(0, 1.1), expand = expansion(mult = c(0, 0.1))) +
+  coord_flip() +
+  labs(x = "Gene", y = "Pearson correlation (sc vs bulk across strains)", fill = "Category") +
+  theme_classic(base_size = 12) +
+  theme(
+    plot.title      = element_text(size = 13, face = "bold", hjust = 0.5),
+    axis.title      = element_text(size = 12, face = "bold"),
+    axis.text       = element_text(size = 11, color = "black"),
+    legend.position = "bottom"
+  )
+fig_overlap_bar
+save_plot(fig_overlap_bar, "Shared_eQTL_gene_correlation",
+          width = 6, height = max(3, 0.25 * nrow(overlap_cor_common)))
+```
+# effect size correlation for all the snps that are tested in sc2%glucose (single cell run), what is the effect size concordance and sign concordance with bulk: 
+
