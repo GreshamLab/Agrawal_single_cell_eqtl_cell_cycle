@@ -23,17 +23,20 @@ Figure.5/   Cell cycle phase and cell cycle time assignment for single cells, an
 - Additional experiment summary tables and supplementary QC figures.
 
 ### Figure 2 — Differential gene expression by strain and clade
-Pseudobulk differential expression between strains and clades, GO over-representation and gene set enrichment analysis, and regulon-level expression (e.g. GAL, NCR, stress response genes), with per-condition supplementary analyses.
+- Pseudobulk differential expression between strains and clades,
+- GO over-representation and gene set enrichment analysis, and regulon-level expression (e.g. GAL, NCR, stress response genes), with per-condition supplementary analyses.
 
 ### Figure 3 — eQTL mapping in YPD
-- Genotype preparation (custom yeast annotations, VCF processing, PLINK LD clumping) for SNPs, indels, structural variants, and CNVs.
+- Genotype preparation (custom yeast annotations, VCF processing, PLINK LD clumping) for SNPs, indels, and structural variants
 - Pseudobulk expression preparation and linear mixed-model eQTL mapping (`fastlmm`/pseudobulk pipeline).
 - Cis/trans classification and effect-size analysis of eQTLs by variant type.
 - Raw single-cell validation of top eQTL hits (violin/scatter plots per variant).
 - Reproducibility of eQTL mapping between biological replicates and conditions.
 
 ### Figure 4 — eQTL mapping across conditions
-Repeats the Figure 3 eQTL mapping pipeline for fluconazole and SC2Glu conditions, compares eQTL sharing and effect-size concordance across conditions, and validates single-cell (SC2Glu) results against bulk RNA-seq.
+- Repeats the Figure 3 eQTL mapping pipeline for fluconazole and SC2Glu conditions, 
+- Compares eQTL sharing and effect-size concordance across conditions, and
+- Validates single-cell (SC2Glu) results against bulk RNA-seq.
 
 ### Figure 5 — Cell cycle assignment and cell-cycle-resolved analysis
 - Assignment of discrete cell cycle phase to single cells from normalized expression data.
