@@ -1,0 +1,5 @@
+"test","pearson_r","spearman_r"
+"sc2glu vs YPD: run 1 vs run 2 (replicates)",0.711656942220256,0.587096919669632
+"Flu vs YPD: 16 ug/ml (run 1) vs 8 ug/ml (run 2)",0.196189931854981,0.113776482572811
+"Batch effect: YPD.2 - YPD.1 vs sc2glu.2 - sc2glu.1",-0.264831063141437,-0.295095352241256
+"Batch YPD.2 - YPD.1 vs dose Flu.2 (8) - Flu.1 (16)",0.0905563084248226,0.113587603577152
