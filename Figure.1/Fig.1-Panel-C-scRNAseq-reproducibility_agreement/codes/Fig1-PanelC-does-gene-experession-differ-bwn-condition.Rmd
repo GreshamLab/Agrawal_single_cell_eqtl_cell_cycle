@@ -1,0 +1,893 @@
+---
+title: "Fig.1 Panel C — does gene expression differ between conditions?"
+output: html_document
+---
+
+Question: do YPD, fluconazole and synthetic complete 2% glucose (sc2glu) induce
+different gene expression programs, i.e. do the conditions separate samples in
+a low-dimensional (PCA) space?
+
+Each point is one strain's pseudobulk expression profile in one dataset
+(strain x dataset). If conditions drive distinct programs, points should
+cluster by condition; if replicates are reproducible, replicate 1 and
+replicate 2 of the same condition should overlap.
+
+Six datasets, each its own 10x run:
+
+- YPD.1, YPD.2: true replicates.
+- sc2glu.1, sc2glu.2: true replicates. sc2glu.1 is small (~1,700 cells after
+  doublet removal), so it is the noisiest dataset.
+- Flu.1 (16 ug/ml fluconazole) and Flu.2 (8 ug/ml): **not** replicates. They
+  are two doses, each a single run, so they are treated as two separate
+  conditions (Fluconazole_16, Fluconazole_8). Dose and batch are confounded
+  between them.
+
+Three analyses:
+
+1. Replicate 1: YPD.1 + sc2glu.1, plus both fluconazole doses (Flu.1, Flu.2)
+2. Replicate 2: YPD.2 + sc2glu.2, plus both fluconazole doses (Flu.1, Flu.2)
+3. All datasets: all six, four conditions (YPD, Fluconazole_16,
+   Fluconazole_8, sc2glu). Do the YPD and sc2glu replicates overlap, and do
+   the two fluconazole doses separate?
+
+The fluconazole datasets have no replicate, so the same Flu.1 and Flu.2 samples
+appear in analyses 1 and 2; only the YPD and sc2glu replicate changes. They are
+drawn with their own point shape ("No replicate").
+
+Input: pseudobulk matrices before the "reliable transcripts" filter
+(`pseudobulk_<dataset>_without_filtering_transcripts.txt`), so every dataset is
+processed the same way and genes such as ERG11 are kept.
+
+Method: raw pseudobulk counts are combined on shared genes and shared strains,
+lowly expressed genes are removed (>= 10 counts in >= 25% of samples),
+counts are variance-stabilized with DESeq2 `vst(blind = TRUE)` (the design is
+not used, so condition labels do not influence the transform), and PCA is run on
+the top 500 most variable genes. Separation is quantified with PERMANOVA
+(`vegan::adonis2`, Euclidean distance on the same 500 genes) and mean silhouette
+width by condition on PC1–PC10.
+
+Caveat: every dataset is a separate 10x run, so condition is confounded with
+batch. The YPD and sc2glu replicates show how big batch effects alone are:
+condition separation only means something if it is much larger than replicate
+separation. There is no fluconazole replicate, so for fluconazole this check
+is not available.
+
+Differential expression between the conditions is in
+`Fig1-PanelC-DE-between-conditions-unfiltered-transcripts.Rmd`.
+
+```{r setup, include=FALSE}
+# Default chunk options: show code and messages, hide warnings,
+# 6 x 5 inch figures at 300 dpi (print quality)
+knitr::opts_chunk$set(echo = TRUE, message = TRUE, warning = FALSE,
+                      fig.width = 6, fig.height = 5, dpi = 300)
+```
+
+```{r}
+library(tidyverse)        # data wrangling (dplyr, tidyr, purrr) and plotting (ggplot2)
+library(DESeq2)           # size-factor normalization and variance-stabilizing transform
+library(patchwork)        # combine several ggplots into one figure
+library(cluster)          # silhouette width
+library(vegan)            # PERMANOVA (adonis2)
+library(ggrepel)          # gene labels that do not overlap
+library(clusterProfiler)  # GO enrichment
+library(org.Sc.sgd.db)    # yeast gene annotation (ORF <-> gene name, GO terms)
+
+# AnnotationDbi (loaded with org.Sc.sgd.db) masks dplyr's select/filter;
+# force the dplyr versions so the tidyverse code below works
+select <- dplyr::select
+filter <- dplyr::filter  # often masked too
+```
+
+# Configuration
+
+```{r config}
+# Root folder that holds one sub-folder per dataset
+BASE <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all"
+
+# Pseudobulk count matrix for each dataset (genes x strains, counts summed
+# over all cells of a strain). Names of this list are used as dataset labels.
+PATHS <- list(
+  YPD.1    = file.path(BASE, "YPD.1/fastlmm/data/pheno_data/pseudobulk_YPD.1_without_filtering_transcripts.txt"),
+  YPD.2    = file.path(BASE, "YPD.2/fastlmm/data/pheno_data/pseudobulk_YPD.2_without_filtering_transcripts.txt"),
+  Flu.1    = file.path(BASE, "Flu.1/fastlmm/data/pheno_data/pseudobulk_flu.1_without_filtering_transcripts.txt"),
+  Flu.2    = file.path(BASE, "Flu.2/fastlmm/data/pheno_data/pseudobulk_flu.2_without_filtering_transcripts.txt"),
+  sc2glu.1 = file.path(BASE, "sc2glu.1/fastlmm/data/pheno_data/pseudobulk_sc2glu.1_only_without_filtering_transcripts.txt"),
+  sc2glu.2 = file.path(BASE, "sc2glu.2/fastlmm/data/pheno_data/pseudobulk_sc2glu.2_only_without_filtering_transcripts.txt")
+)
+
+# Table mapping common gene names (gene_name) to ORF IDs (gene_id)
+ANNOT <- "/scratch/aa9679/SingleCell_cerevisiae/Gene_exp_analysis/yeast_custom_annotations.csv"
+
+# Analysis parameters
+MIN_COUNT   <- 10    # expression filter: >= MIN_COUNT counts ...
+MIN_FRAC    <- 0.25  # ... in >= MIN_FRAC of the samples in the analysis
+N_TOP_GENES <- 500   # most variable genes used for PCA / PERMANOVA
+N_PCS_SIL   <- 10    # PCs used for silhouette width
+
+# All figures and tables are written here (created if missing)
+OUT_DIR <- "../results"
+dir.create(OUT_DIR, showWarnings = FALSE, recursive = TRUE)
+```
+
+# Load
+
+```{r load}
+# Read one tab-separated pseudobulk file: first column = gene IDs (row names),
+# header = strain names. check.names = FALSE keeps strain names exactly as
+# written (R would otherwise replace characters such as "-").
+read_pseudobulk <- function(path, sep = "\t") {
+  if (!file.exists(path)) {
+    stop("File not found: ", path, "\n  (getwd(): ", getwd(), ")")
+  }
+  read.csv(path, sep = sep, row.names = 1, header = TRUE, check.names = FALSE)
+}
+
+# Read all six datasets into a named list: raw$YPD.1, raw$Flu.2, ...
+raw <- lapply(PATHS, read_pseudobulk)
+
+# Print the size of each matrix as a sanity check
+for (nm in names(raw)) {
+  cat(sprintf("%-9s %5d genes x %4d strains\n", nm, nrow(raw[[nm]]), ncol(raw[[nm]])))
+}
+```
+
+All matrices mix ORF IDs and common gene names; convert everything to ORF IDs
+so genes match across datasets (same conversion as the Panel C/D Rmd).
+
+```{r orf_conversion}
+all_custom_gene_annotations <- read.csv(ANNOT, stringsAsFactors = FALSE)
+
+# Named vector: names = common gene names, values = ORF IDs
+# (e.g. common_to_orf["ERG11"] = "YHR007C")
+common_to_orf <- all_custom_gene_annotations %>%
+  filter(!is.na(gene_name), !is.na(gene_id)) %>%
+  distinct(gene_name, gene_id) %>%
+  deframe()
+
+# Rename the rows of one matrix to ORF IDs
+to_orf <- function(mat, label) {
+  ids    <- rownames(mat)
+  # Does the ID already look like a systematic ORF name (e.g. YHR007C, YLR154C-G)?
+  is_orf <- grepl("^Y[A-Z]{2}\\d{3}[WC](-[A-Z])?$", ids)
+  # Keep ORFs as is; translate common names; leave unknown names unchanged
+  orf    <- ifelse(is_orf, ids,
+                   ifelse(ids %in% names(common_to_orf), common_to_orf[ids], ids))
+  # Two rows can end up with the same ORF (e.g. the gene was listed under both
+  # its ORF and its common name); keep the first and drop the rest
+  dup <- duplicated(orf)
+  cat(sprintf("%-9s converted %4d names to ORFs | dropped %d duplicates\n",
+              label, sum(!is_orf & orf != ids), sum(dup)))
+  mat <- mat[!dup, , drop = FALSE]
+  rownames(mat) <- orf[!dup]
+  mat
+}
+
+# Apply to every dataset (imap passes the dataset name as `label`)
+raw <- imap(raw, to_orf)
+# Stop if any matrix still has duplicate gene IDs
+stopifnot(all(map_lgl(raw, ~ !any(duplicated(rownames(.x))))))
+```
+
+# Shared genes and strains
+
+The same genes and strains are used in all three analyses, so the plots are
+directly comparable and differences are not driven by which strains overlap.
+
+```{r shared}
+# Genes / strains present in all six datasets
+shared_genes   <- Reduce(intersect, lapply(raw, rownames))
+shared_strains <- Reduce(intersect, lapply(raw, colnames))
+cat("Genes shared across all datasets:  ", length(shared_genes),   "\n")
+cat("Strains shared across all datasets:", length(shared_strains), "\n")
+
+# ORF -> common name for labelling
+# (falls back to the ORF ID when the gene has no common name)
+gene_label <- function(orfs) {
+  nm <- suppressMessages(AnnotationDbi::mapIds(org.Sc.sgd.db, keys = orfs, keytype = "ORF",
+                                                column = "GENENAME", multiVals = "first"))
+  coalesce(unname(nm), orfs)
+}
+```
+
+# PCA function
+
+```{r pca_fn}
+# Condition and replicate of each dataset, joined onto the samples below.
+# Flu.1 (16 ug/ml) and Flu.2 (8 ug/ml) are different doses, not replicates:
+# each is its own condition with no replicate.
+dataset_info <- tribble(
+  ~dataset,   ~condition,       ~replicate,
+  "YPD.1",    "YPD",            "Replicate 1",
+  "YPD.2",    "YPD",            "Replicate 2",
+  "Flu.1",    "Fluconazole_16", "No replicate",
+  "Flu.2",    "Fluconazole_8",  "No replicate",
+  "sc2glu.1", "sc2glu",         "Replicate 1",
+  "sc2glu.2", "sc2glu",         "Replicate 2"
+)
+CONDITION_LEVELS <- c("YPD", "Fluconazole_16", "Fluconazole_8", "sc2glu")
+
+# Run the full pipeline (combine -> filter -> normalize -> PCA -> statistics)
+# on a set of datasets. `datasets` = names from PATHS, `label` = printed title.
+# Returns a list with PC scores, % variance, summary stats and gene loadings.
+# min_frac / n_top / n_pcs_sil default to the global parameters; they are only
+# changed in the parameter-sensitivity section at the end.
+condition_pca <- function(datasets, label, min_frac = MIN_FRAC,
+                          n_top = N_TOP_GENES, n_pcs_sil = N_PCS_SIL) {
+  cat("\n---", label, "---\n")
+
+  # 1. Combine datasets side by side.
+  # raw counts: genes x (strain | dataset)
+  # Each column is one sample = one strain in one dataset, e.g. "strainA|YPD.1"
+  counts <- do.call(cbind, lapply(datasets, function(ds) {
+    m <- as.matrix(raw[[ds]][shared_genes, shared_strains])
+    colnames(m) <- paste(shared_strains, ds, sep = "|")
+    m
+  }))
+  # DESeq2 needs integer counts
+  counts <- round(counts)
+  # 2. Expression filter: keep genes with >= MIN_COUNT counts in at least
+  # min_frac of the samples (removes genes that are mostly zero / noise)
+  counts <- counts[rowSums(counts >= MIN_COUNT) >= min_frac * ncol(counts), , drop = FALSE]
+
+  # 3. Sample table: split "strain|dataset" back into two columns and add
+  # condition and replicate from dataset_info
+  meta <- tibble(sample = colnames(counts)) %>%
+    separate(sample, into = c("strain", "dataset"), sep = "\\|", remove = FALSE) %>%
+    left_join(dataset_info, by = "dataset") %>%
+    mutate(condition = factor(condition, levels = CONDITION_LEVELS),
+           condition = droplevels(condition),
+           replicate = factor(replicate),
+           dataset   = factor(dataset, levels = datasets))
+
+  # 4. Normalization. design = ~ 1 means no condition information is used:
+  # the transform is unsupervised, so it cannot create condition separation.
+  dds <- DESeqDataSetFromMatrix(
+    countData = counts,
+    colData   = data.frame(meta, row.names = meta$sample),
+    design    = ~ 1
+  )
+  # Size factors correct for sequencing depth (number of cells x reads per
+  # strain). The default method fails if every gene has a zero in some sample;
+  # "poscounts" ignores zeros and works in that case.
+  dds <- tryCatch(
+    estimateSizeFactors(dds),
+    error = function(e) {
+      message(label, ": standard size factors failed, using type = 'poscounts'")
+      estimateSizeFactors(dds, type = "poscounts")
+    }
+  )
+  # Variance-stabilizing transform: log2-like scale on which low- and
+  # high-expressed genes have similar variance, so PCA is not dominated by a
+  # few very highly expressed genes. blind = TRUE ignores the design.
+  vsd <- assay(vst(dds, blind = TRUE))
+
+  # 5. PCA on the n_top genes that vary most across samples
+  top_genes <- head(order(apply(vsd, 1, var), decreasing = TRUE), min(n_top, nrow(vsd)))
+  x   <- t(vsd[top_genes, ])      # samples x genes
+  # center = TRUE subtracts each gene's mean; scale. = FALSE keeps the vst
+  # scale, so genes that vary more contribute more
+  pca <- prcomp(x, center = TRUE, scale. = FALSE)
+  # % of total variance explained by each PC (used in the axis labels)
+  var_expl <- 100 * pca$sdev^2 / sum(pca$sdev^2)
+
+  cat("Samples:", nrow(x), "| genes after expression filter:", nrow(counts),
+      "| genes used for PCA:", ncol(x), "\n")
+  cat(sprintf("PC1 = %.1f%%, PC2 = %.1f%% variance\n", var_expl[1], var_expl[2]))
+
+  # 6. Statistics
+  # how strongly does condition separate samples?
+  # PERMANOVA: fraction of the between-sample distance explained by condition
+  # (R2) and a permutation p-value (999 shuffles of the condition labels)
+  perm <- adonis2(dist(x) ~ condition, data = meta, permutations = 999)
+  # Silhouette width per sample (-1 to 1): how much closer a sample is to its
+  # own condition than to the nearest other condition, on PC1 to PC<n_pcs_sil> (default 10).
+  # Mean near 1 = tight separate clusters; near 0 = conditions overlap.
+  sil  <- silhouette(as.integer(meta$condition),
+                     dist(pca$x[, seq_len(min(n_pcs_sil, ncol(pca$x)))]))
+  cat(sprintf("PERMANOVA (condition): R2 = %.3f, p = %.3g\n",
+              perm$R2[1], perm$`Pr(>F)`[1]))
+  cat(sprintf("Mean silhouette width (condition, PC1-%d): %.3f\n",
+              n_pcs_sil, mean(sil[, "sil_width"])))
+
+  # 7. Return everything the plots and later sections need
+  list(
+    # sample table + PC1-PC5 coordinates (one row per point on the PCA plot)
+    scores   = bind_cols(meta, as_tibble(pca$x[, 1:5])),
+    var_expl = var_expl,
+    # one-row summary of this analysis
+    stats    = tibble(analysis        = label,
+                      n_samples       = nrow(x),
+                      n_strains       = length(unique(meta$strain)),
+                      n_genes         = ncol(x),
+                      PC1_pct         = var_expl[1],
+                      PC2_pct         = var_expl[2],
+                      permanova_R2    = perm$R2[1],
+                      permanova_p     = perm$`Pr(>F)`[1],
+                      mean_silhouette = mean(sil[, "sil_width"])),
+    loadings = pca$rotation[, 1:5],   # genes x PCs, for the PC-loading / GO check
+    # transformed data and sample table, reused for the nested PERMANOVA
+    x = x, meta = meta
+  )
+}
+```
+
+# Plot theme and function
+
+```{r theme}
+# Shared publication style: white background, no grid, Arial, black axes
+pub_theme <- theme_classic(base_size = 15, base_family = "Arial") +
+  theme(
+    axis.title = element_text(size = 15, face = "bold", color = "black",
+                              family = "Arial"),
+    axis.text  = element_text(size = 15, color = "black", family = "Arial"),
+    axis.line  = element_line(linewidth = 0.4, color = "black"),
+    axis.ticks = element_line(linewidth = 0.35, color = "black"),
+    panel.grid       = element_blank(),
+    plot.background  = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    legend.text      = element_text(size = 13),
+    legend.title     = element_text(size = 13, face = "bold")
+  )
+
+# Color = condition, point shape = replicate
+# (16 = filled circle, 2 = open triangle, 15 = filled square for the unreplicated Flu doses;
+#  the open triangle lets overlapping replicate 1 points show through)
+# (two shades for the fluconazole doses: dark red = 16 ug/ml, orange = 8 ug/ml)
+condition_colors <- c(
+  "YPD"            = "#4E79A7",
+  "Fluconazole_16" = "#C0392B",
+  "Fluconazole_8"  = "#F28E2B",
+  "sc2glu"         = "#59A14F"
+)
+replicate_shapes <- c("Replicate 1" = 16, "Replicate 2" = 2, "No replicate" = 15)
+
+# Save one plot to OUT_DIR as vector PDF (cairo keeps Arial embedded) and 300 dpi TIFF
+save_plot <- function(p, name, width, height) {
+  ggsave(file.path(OUT_DIR, paste0(name, ".pdf")), p,
+         width = width, height = height, units = "in", device = cairo_pdf)
+  ggsave(file.path(OUT_DIR, paste0(name, ".tiff")), p,
+         width = width, height = height, units = "in", dpi = 300,
+         device = "tiff", compression = "lzw")
+}
+
+# PC1 vs PC2 scatter for one condition_pca() result
+plot_pca <- function(res, title) {
+  s <- res$stats
+  ggplot(res$scores, aes(x = PC1, y = PC2, color = condition, shape = replicate)) +
+    # show.legend = TRUE: draw legend keys for every shape/color in the scale limits,
+    # even ones absent from this panel, so all panels share one legend
+    geom_point(alpha = 0.5, size = 1.6, stroke = 0.6, show.legend = TRUE) +
+    # 95% normal-data ellipse around each condition's points
+    stat_ellipse(aes(group = condition), linewidth = 0.5, show.legend = FALSE) +
+    scale_color_manual(values = condition_colors) +
+    # limits = both replicates, so the legend is identical across panels
+    scale_shape_manual(values = replicate_shapes, limits = names(replicate_shapes)) +
+    # shape keys in neutral grey (color is shown by the Condition legend)
+    guides(shape = guide_legend(override.aes = list(color = "grey30", alpha = 1))) +
+    # PERMANOVA and silhouette results in the top-left corner
+    annotate("text", x = -Inf, y = Inf,
+             label = sprintf("PERMANOVA R^2 = %.2f, p = %.3g\nsilhouette = %.2f",
+                             s$permanova_R2, s$permanova_p, s$mean_silhouette),
+             hjust = -0.05, vjust = 1.2, size = 3.5) +
+    labs(title = title,
+         x = sprintf("PC1 (%.1f%%)", res$var_expl[1]),
+         y = sprintf("PC2 (%.1f%%)", res$var_expl[2]),
+         color = "Condition", shape = "Replicate") +
+    pub_theme
+}
+```
+
+# Analysis 1 — replicate 1: YPD.1, sc2glu.1 + both fluconazole doses
+
+```{r pca_set1}
+# PCA on YPD.1, sc2glu.1, Flu.1 (16 ug/ml) and Flu.2 (8 ug/ml)
+res_set1 <- condition_pca(c("YPD.1", "Flu.1", "Flu.2", "sc2glu.1"),
+                          "Replicate 1: YPD.1 + Flu.1 + Flu.2 + sc2glu.1")
+p_set1   <- plot_pca(res_set1, "Replicate 1: YPD.1, Flu 16, Flu 8, sc2glu.1")
+p_set1
+```
+
+# Analysis 2 — replicate 2: YPD.2, sc2glu.2 + both fluconazole doses
+
+```{r pca_set2}
+# PCA on YPD.2, sc2glu.2, Flu.1 (16 ug/ml) and Flu.2 (8 ug/ml)
+res_set2 <- condition_pca(c("YPD.2", "Flu.1", "Flu.2", "sc2glu.2"),
+                          "Replicate 2: YPD.2 + Flu.1 + Flu.2 + sc2glu.2")
+p_set2   <- plot_pca(res_set2, "Replicate 2: YPD.2, Flu 16, Flu 8, sc2glu.2")
+p_set2
+```
+
+# Analysis 3 — all datasets: do replicates overlap, do the doses separate?
+
+All six datasets, four conditions. Replicates of YPD and of sc2glu should
+overlap (circles vs triangles of the same colour). The two fluconazole doses
+are separate conditions (dark red = 16 ug/ml, orange = 8 ug/ml); how far apart
+they sit reflects dose plus batch, which cannot be separated.
+
+Beyond the plot, for each strain we compare the PCA distance between its two
+YPD (or sc2glu) replicates with its distance to another condition in the same
+run, and with its distance between the two fluconazole doses. A nested
+PERMANOVA splits the variance into condition and replicate-within-condition.
+
+```{r pca_all, fig.width = 7}
+# PCA on all six datasets together (four conditions)
+res_all <- condition_pca(names(raw), "All: YPD.1 + YPD.2 + Flu.1 + Flu.2 + sc2glu.1 + sc2glu.2")
+p_all   <- plot_pca(res_all, "All datasets")
+p_all
+```
+
+Points of different conditions overlap in the plot above, which hides whether
+the replicates agree. The same PCA (same coordinates) is split into one panel
+per condition below: each panel shows that condition's samples coloured by
+replicate, on top of all other samples in grey.
+
+```{r pca_all_by_condition, fig.width = 14, fig.height = 4.5}
+replicate_colors <- c("Replicate 1" = "#1F4E79", "Replicate 2" = "#E67E22",
+                      "No replicate" = "grey25")
+
+plot_pca_by_condition <- function(res, title) {
+  # all samples without the condition column, so they appear in every panel
+  bg <- res$scores %>% select(-condition)
+  ggplot(res$scores, aes(x = PC1, y = PC2)) +
+    geom_point(data = bg, color = "grey85", size = 1) +
+    geom_point(aes(color = replicate, shape = replicate), alpha = 0.7, size = 1.8,
+               stroke = 0.7, show.legend = TRUE) +
+    facet_wrap(~ condition, nrow = 1) +
+    scale_color_manual(values = replicate_colors, limits = names(replicate_colors)) +
+    scale_shape_manual(values = replicate_shapes, limits = names(replicate_shapes)) +
+    labs(title = title,
+         x = sprintf("PC1 (%.1f%%)", res$var_expl[1]),
+         y = sprintf("PC2 (%.1f%%)", res$var_expl[2]),
+         color = "Replicate", shape = "Replicate") +
+    pub_theme +
+    theme(strip.background = element_blank(),
+          strip.text = element_text(size = 13, face = "bold"))
+}
+
+p_all_by_cond <- plot_pca_by_condition(res_all, "All datasets, one panel per condition")
+p_all_by_cond
+
+# condition vs replicate-within-condition
+# Nested PERMANOVA: R2 of "condition" = variance explained by the four
+# conditions (the two Flu doses count as separate conditions);
+# R2 of "condition:replicate" = variance explained by replicate (batch) within
+# YPD and sc2glu (the Flu conditions have one replicate each, so they add
+# nothing to this term). If condition R2 >> replicate R2, the condition effect
+# is larger than the batch effect.
+perm_nested <- adonis2(dist(res_all$x) ~ condition / replicate,
+                       data = res_all$meta, permutations = 999, by = "terms")
+perm_nested
+
+# per-strain distances in PC1-PC2 space
+# Reshape to one row per strain with columns PC1_YPD.1, PC2_YPD.1, PC1_Flu.1, ...
+pc_wide <- res_all$scores %>%
+  select(strain, dataset, PC1, PC2) %>%
+  pivot_wider(names_from = dataset, values_from = c(PC1, PC2))
+
+# Euclidean distance in PC1-PC2 between the same strain in dataset a and dataset b
+# (returns one value per strain)
+pc_dist <- function(a, b) {
+  sqrt((pc_wide[[paste0("PC1_", a)]] - pc_wide[[paste0("PC1_", b)]])^2 +
+       (pc_wide[[paste0("PC2_", a)]] - pc_wide[[paste0("PC2_", b)]])^2)
+}
+
+# Comparisons to make:
+#   "same condition"  = replicate 1 vs replicate 2 of YPD or sc2glu (batch effect only)
+#   "Flu dose"        = Flu.1 (16 ug/ml) vs Flu.2 (8 ug/ml) (dose + batch, not a replicate pair)
+#   "diff. condition" = two conditions within one run (condition effect)
+dist_pairs <- tribble(
+  ~a,         ~b,         ~kind,
+  "YPD.1",    "YPD.2",    "same condition",
+  "sc2glu.1", "sc2glu.2", "same condition",
+  "Flu.1",    "Flu.2",    "Flu dose",
+  "YPD.1",    "Flu.1",    "diff. condition",
+  "YPD.2",    "Flu.2",    "diff. condition",
+  "YPD.1",    "sc2glu.1", "diff. condition",
+  "YPD.2",    "sc2glu.2", "diff. condition"
+)
+
+# Compute the per-strain distances for every comparison (long table:
+# one row per strain per comparison)
+strain_dists <- pmap_dfr(dist_pairs, function(a, b, kind) {
+  tibble(comparison = sprintf("%s vs %s\n(%s)", a, b, kind), kind = kind, dist = pc_dist(a, b))
+}) %>%
+  # keep the comparisons in the order of dist_pairs on the x axis
+  mutate(comparison = fct_inorder(comparison))
+
+# Median distance per comparison
+knitr::kable(
+  strain_dists %>% group_by(comparison) %>%
+    summarise(n_strains = n(), median_dist = median(dist), .groups = "drop"),
+  digits = 2, caption = "Per-strain distance in PC1-PC2 space"
+)
+
+# Boxplot of the distances (each dot = one strain); light grey = same
+# condition, orange = Flu 16 vs 8 ug/ml, dark grey = different condition
+p_dist <- ggplot(strain_dists, aes(x = comparison, y = dist, fill = kind)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.15, alpha = 0.4, size = 0.8) +
+  scale_fill_manual(values = c("same condition" = "grey90", "Flu dose" = "#F9C08A",
+                               "diff. condition" = "grey60"),
+                    guide = "none") +
+  labs(x = NULL, y = "Same-strain distance (PC1-PC2)") +
+  pub_theme +
+  theme(axis.text.x = element_text(size = 10, angle = 45, hjust = 1))
+p_dist
+```
+
+# Summary and save
+
+```{r save, fig.width = 14, fig.height = 11}
+# One row of statistics per analysis
+pca_stats <- bind_rows(res_set1$stats, res_set2$stats, res_all$stats)
+knitr::kable(pca_stats, digits = 3, caption = "Condition separation per analysis")
+
+# Combined figure: top row = replicate 1 | replicate 2, bottom row = all datasets | distance boxplot
+# (all PCA panels use the same color and shape scales, so their legends are merged into one)
+fig_pca <- (p_set1 | p_set2) /
+  (p_all | p_dist) + plot_layout(guides = "collect")
+fig_pca
+
+# Save the combined figure
+save_plot(fig_pca, "Fig1C_condition_PCA", width = 14, height = 11)
+
+# Save each panel on its own
+save_plot(p_set1, "Fig1C_PCA_replicate1",          width = 7, height = 5.5)
+save_plot(p_set2, "Fig1C_PCA_replicate2",          width = 7, height = 5.5)
+save_plot(p_all,  "Fig1C_PCA_all_datasets",        width = 7, height = 5.5)
+save_plot(p_all_by_cond, "Fig1C_PCA_all_datasets_by_condition", width = 14, height = 4.5)
+save_plot(p_dist, "Fig1C_per_strain_PC_distances", width = 7, height = 5.5)
+
+write.csv(pca_stats, file.path(OUT_DIR, "Fig1C_condition_PCA_summary_stats.csv"),
+          row.names = FALSE)
+```
+
+# Ergosterol gene set
+
+Genes annotated to GO:0006696 "ergosterol biosynthetic process" (including
+child terms) in SGD; highlighted in the batch check below.
+
+```{r ergosterol_set}
+# GOALL = genes annotated to the term or any of its child terms
+erg_set <- AnnotationDbi::select(org.Sc.sgd.db, keys = "GO:0006696", keytype = "GOALL",
+                                 columns = c("ORF", "GENENAME")) %>%
+  filter(!is.na(ORF)) %>%
+  # one row per gene (a gene can be returned once per evidence code)
+  distinct(orf = ORF, gene_name = GENENAME) %>%
+  # use the ORF ID as the name for genes without a common name
+  mutate(gene_name = coalesce(gene_name, orf)) %>%
+  arrange(gene_name)
+
+# How many ergosterol genes survived into the shared gene set, and which are missing
+cat("Ergosterol genes (GO:0006696):", nrow(erg_set),
+    "| in shared gene set:", sum(erg_set$orf %in% shared_genes), "\n")
+cat("Missing from shared gene set:",
+    paste(erg_set$gene_name[!erg_set$orf %in% shared_genes], collapse = ", "), "\n")
+```
+
+# Batch reproducibility of the condition effect
+
+Condition and batch are confounded (each dataset is its own 10x run), but the
+replicates allow some checks:
+
+- **sc2glu vs YPD**: a true replicate check. If the sc2glu effect is
+  biological, sc2glu.1 - YPD.1 (run 1) should look like sc2glu.2 - YPD.2 (run 2).
+  A batch artefact would not reproduce.
+- **Fluconazole vs YPD**: Flu.1 - YPD.1 is the 16 ug/ml response (run 1) and
+  Flu.2 - YPD.2 is the 8 ug/ml response (run 2). These are **not** replicates:
+  a high correlation means a shared fluconazole response at both doses, and
+  differences can come from dose or from batch.
+- **Batch signature**: is the batch effect (YPD.2 - YPD.1) shared with
+  sc2glu.2 - sc2glu.1, i.e. a systematic "run 2" signature? And how much of the
+  Flu 8 - Flu 16 difference looks like that batch signature?
+
+log2FC here is paired within strain (log2 normalized counts, test - ref) and
+averaged over the shared strains; genes with mean log2 expression <= 2 are
+dropped. The run 1 and run 2 estimates share no dataset, so their correlation
+is not inflated by shared noise.
+
+```{r batch_repro, fig.width = 16, fig.height = 5.5}
+# Combine all six datasets (shared genes x shared strains); same column
+# naming "strain|dataset" as in condition_pca(), but no expression filter here
+counts_all <- round(do.call(cbind, lapply(names(raw), function(ds) {
+  m <- as.matrix(raw[[ds]][shared_genes, shared_strains])
+  colnames(m) <- paste(shared_strains, ds, sep = "|")
+  m
+})))
+# DESeq2 object only for normalization (design = ~ 1, no model fitted)
+dds_all <- DESeqDataSetFromMatrix(
+  counts_all,
+  data.frame(row.names = colnames(counts_all),
+             dataset   = rep(names(raw), each = length(shared_strains))),
+  design = ~ 1
+)
+# Depth-normalize, then log2(count + 1)
+dds_all  <- estimateSizeFactors(dds_all, type = "poscounts")
+log_norm <- log2(counts(dds_all, normalized = TRUE) + 1)
+# Keep genes with mean log2 expression > 2 (fold changes of very low genes are noise)
+expressed <- rownames(log_norm)[rowMeans(log_norm) > 2]
+cat("Expressed genes used:", length(expressed), "\n")
+
+# Per-gene log2 fold change of `test` over `ref`: compute test - ref for each
+# strain separately (paired), then average over strains
+paired_lfc <- function(test, ref) {
+  rowMeans(log_norm[expressed, paste(shared_strains, test, sep = "|")] -
+           log_norm[expressed, paste(shared_strains, ref,  sep = "|")])
+}
+
+# One row per gene, one column per comparison; flag ergosterol genes
+batch_lfc <- tibble(
+  gene      = expressed,
+  flu16     = paired_lfc("Flu.1",    "YPD.1"),     # Flu 16 ug/ml effect (run 1)
+  flu8      = paired_lfc("Flu.2",    "YPD.2"),     # Flu 8 ug/ml effect (run 2)
+  sc_b1     = paired_lfc("sc2glu.1", "YPD.1"),     # sc2glu effect, run 1
+  sc_b2     = paired_lfc("sc2glu.2", "YPD.2"),     # sc2glu effect, run 2
+  batch_YPD = paired_lfc("YPD.2",    "YPD.1"),     # batch effects (true replicates)
+  batch_sc  = paired_lfc("sc2glu.2", "sc2glu.1"),
+  dose_Flu  = paired_lfc("Flu.2",    "Flu.1")      # 8 vs 16 ug/ml: dose + batch
+) %>%
+  left_join(erg_set %>% select(gene = orf, gene_name), by = "gene") %>%
+  mutate(is_erg = !is.na(gene_name))
+
+# Pearson and Spearman correlation across genes between two log2FC columns
+cor_row <- function(test, a, b) {
+  tibble(test = test,
+         pearson_r  = cor(batch_lfc[[a]], batch_lfc[[b]]),
+         spearman_r = cor(batch_lfc[[a]], batch_lfc[[b]], method = "spearman"))
+}
+# Row 1: high r = sc2glu effect reproduces across runs (true replicates).
+# Row 2: high r = shared fluconazole response at 16 and 8 ug/ml (not a replicate test).
+# Row 3: high r = a shared "run 2 vs run 1" batch signature.
+# Row 4: high r = the Flu 8 vs 16 difference looks like that batch signature,
+#        i.e. it is at least partly batch rather than dose.
+batch_stats <- bind_rows(
+  cor_row("sc2glu vs YPD: run 1 vs run 2 (replicates)",          "sc_b1",     "sc_b2"),
+  cor_row("Flu vs YPD: 16 ug/ml (run 1) vs 8 ug/ml (run 2)",     "flu16",     "flu8"),
+  cor_row("Batch effect: YPD.2 - YPD.1 vs sc2glu.2 - sc2glu.1",  "batch_YPD", "batch_sc"),
+  cor_row("Batch YPD.2 - YPD.1 vs dose Flu.2 (8) - Flu.1 (16)",  "batch_YPD", "dose_Flu")
+)
+knitr::kable(batch_stats, digits = 3, caption = "Do condition effects reproduce across runs and doses?")
+
+# Overall size of each effect: the spread (SD) of log2FC across genes.
+# Compare condition effects (flu*, sc_*) with batch effects (batch_*) and the
+# Flu dose difference (dose_Flu).
+knitr::kable(
+  batch_lfc %>% summarise(across(c(flu16, flu8, sc_b1, sc_b2, batch_YPD, batch_sc, dose_Flu), sd)),
+  digits = 3, caption = "Size of each effect: SD of per-gene log2FC"
+)
+
+# Ergosterol genes (expected fluconazole targets): do they go up at both doses?
+knitr::kable(
+  batch_lfc %>% filter(is_erg) %>%
+    select(gene, gene_name, flu16, flu8, dose_Flu, batch_YPD) %>%
+    arrange(desc(flu16)),
+  digits = 2, caption = "Ergosterol genes: Flu vs YPD log2FC per dose, dose difference and YPD batch effect"
+)
+
+# Scatter of one log2FC column against another (each dot = one gene);
+# ergosterol genes in red and labelled, Pearson r in the corner
+batch_scatter <- function(xcol, ycol, xlab, ylab) {
+  r <- cor(batch_lfc[[xcol]], batch_lfc[[ycol]])
+  ggplot(batch_lfc, aes(.data[[xcol]], .data[[ycol]])) +
+    geom_hline(yintercept = 0, linewidth = 0.3, color = "grey50") +
+    geom_vline(xintercept = 0, linewidth = 0.3, color = "grey50") +
+    # other genes first (grey, underneath), then ergosterol genes on top
+    geom_point(data = ~ filter(.x, !is_erg), size = 0.5, alpha = 0.3, color = "grey40", shape = 16) +
+    geom_point(data = ~ filter(.x, is_erg), size = 1.8, color = "#E15759") +
+    geom_text_repel(data = ~ filter(.x, is_erg), aes(label = gene_name),
+                    size = 3, color = "#E15759", max.overlaps = 30) +
+    annotate("text", x = -Inf, y = Inf, label = sprintf("Pearson r = %.2f", r),
+             hjust = -0.1, vjust = 1.5, size = 4, fontface = "bold") +
+    # same scale on x and y, so the diagonal is a true 1:1 line
+    coord_fixed() +
+    labs(x = xlab, y = ylab) +
+    pub_theme +
+    theme(axis.title = element_text(size = 12), axis.text = element_text(size = 11))
+}
+
+# Three panels: sc2glu effect run 1 vs run 2 | Flu effect 16 vs 8 ug/ml |
+# batch effect YPD vs batch effect sc2glu
+p_batch_sc   <- batch_scatter("sc_b1", "sc_b2",
+                              "log2FC sc2glu.1 / YPD.1 (run 1)", "log2FC sc2glu.2 / YPD.2 (run 2)")
+p_batch_flu  <- batch_scatter("flu16", "flu8",
+                              "log2FC Flu 16 ug/ml / YPD.1 (run 1)", "log2FC Flu 8 ug/ml / YPD.2 (run 2)")
+p_batch_runs <- batch_scatter("batch_YPD", "batch_sc",
+                              "log2FC YPD.2 / YPD.1 (batch effect)", "log2FC sc2glu.2 / sc2glu.1 (batch effect)")
+p_batch <- p_batch_sc | p_batch_flu | p_batch_runs
+p_batch
+
+# Save figure, correlation table and per-gene log2FC table
+ggsave(file.path(OUT_DIR, "Fig1C_batch_reproducibility.pdf"), p_batch,
+       width = 16, height = 5.5, units = "in", device = cairo_pdf)
+# ... and each scatter on its own
+save_plot(p_batch_sc,   "Fig1C_batch_sc2glu_run1_vs_run2",   width = 6, height = 6)
+save_plot(p_batch_flu,  "Fig1C_batch_flu16_vs_flu8",         width = 6, height = 6)
+save_plot(p_batch_runs, "Fig1C_batch_YPD_vs_sc2glu_batch",   width = 6, height = 6)
+write.csv(batch_stats, file.path(OUT_DIR, "Fig1C_batch_reproducibility_stats.csv"), row.names = FALSE)
+write.csv(batch_lfc, file.path(OUT_DIR, "Fig1C_batch_reproducibility_log2FC.csv"), row.names = FALSE)
+```
+
+# What drives the PCs? PC loadings and GO enrichment
+
+If the PCs reflect biology, the genes that load most strongly on them should
+belong to coherent pathways (e.g. sterol / drug response for fluconazole); a
+technical axis usually loads on ribosomal, mitochondrial or otherwise generic
+highly expressed genes. For the all-datasets PCA, the 50 genes with the most
+positive and the 50 with the most negative loading on PC1 and PC2 are tested for
+GO biological-process enrichment. The background is the 500 genes the PCA used,
+since only those can have a loading.
+
+```{r pc_loadings}
+# Number of genes taken from each end ("pole") of each PC
+N_LOAD_GENES <- 50
+
+# which datasets sit at each end of each PC
+# (tells you how to read the GO results: e.g. if Flu datasets have high PC1,
+# the "PC1 positive" genes are higher in Flu)
+knitr::kable(
+  res_all$scores %>% group_by(dataset) %>%
+    summarise(mean_PC1 = mean(PC1), mean_PC2 = mean(PC2), .groups = "drop"),
+  digits = 1, caption = "Mean PC score per dataset (all-datasets PCA)"
+)
+
+# Sort genes by loading; most negative 50 = "negative" pole, most positive 50 = "positive" pole
+loading_lists <- list()
+for (pc in c("PC1", "PC2")) {
+  l <- sort(res_all$loadings[, pc])
+  loading_lists[[paste(pc, "negative")]] <- names(head(l, N_LOAD_GENES))
+  loading_lists[[paste(pc, "positive")]] <- names(tail(l, N_LOAD_GENES))
+}
+
+# Save PC1/PC2 loadings of all 500 PCA genes, with common gene names
+loadings_df <- as.data.frame(res_all$loadings[, c("PC1", "PC2")]) %>%
+  rownames_to_column("gene") %>%
+  mutate(gene_name = gene_label(gene), .after = gene)
+write.csv(loadings_df, file.path(OUT_DIR, "Fig1C_PC_loadings_all_datasets.csv"), row.names = FALSE)
+
+# Print the first 15 gene names of each pole for a quick look
+for (nm in names(loading_lists)) {
+  cat(nm, ":", paste(head(gene_label(loading_lists[[nm]]), 15), collapse = ", "), "...\n")
+}
+```
+
+```{r pc_go, fig.width = 10, fig.height = 7}
+# GO biological-process over-representation test for one gene list against
+# `universe` (background). Returns NULL if nothing is significant.
+run_go <- function(genes, universe, label) {
+  ego <- enrichGO(genes, OrgDb = org.Sc.sgd.db, keyType = "ORF", ont = "BP",
+                  universe = universe, pvalueCutoff = 0.05, qvalueCutoff = 0.2,
+                  minGSSize = 5, maxGSSize = 500)
+  if (is.null(ego) || nrow(as.data.frame(ego)) == 0) {
+    cat(label, ": no enriched GO terms\n")
+    return(NULL)
+  }
+  as.data.frame(ego) %>% mutate(gene_list = label)
+}
+
+# Run for all four poles; background = the 500 genes used in the PCA
+pc_go <- bind_rows(imap(loading_lists, ~ run_go(.x, rownames(res_all$loadings), .y)))
+
+# Only report / plot if at least one term is enriched
+if (nrow(pc_go) > 0) {
+  # Top 8 terms (smallest adjusted p) per pole
+  knitr::kable(pc_go %>% group_by(gene_list) %>% slice_min(p.adjust, n = 8, with_ties = FALSE) %>%
+                 select(gene_list, Description, GeneRatio, BgRatio, p.adjust),
+               digits = 4, caption = "Top GO BP terms per PC pole")
+
+  # Dot plot: one panel per pole, x = significance, dot size = number of genes
+  p_pc_go <- pc_go %>%
+    group_by(gene_list) %>% slice_min(p.adjust, n = 8, with_ties = FALSE) %>% ungroup() %>%
+    mutate(Description = str_trunc(Description, 50)) %>%
+    ggplot(aes(x = -log10(p.adjust), y = reorder(Description, -log10(p.adjust)), size = Count)) +
+    geom_point(color = "#4E79A7") +
+    facet_wrap(~ gene_list, scales = "free_y", ncol = 2) +
+    labs(x = "-log10 padj", y = NULL, size = "Genes") +
+    pub_theme +
+    theme(axis.text = element_text(size = 9), axis.title = element_text(size = 12),
+          strip.background = element_blank(), strip.text = element_text(size = 11, face = "bold"))
+  print(p_pc_go)
+
+  # Save the dot plot and the full enrichment table
+  ggsave(file.path(OUT_DIR, "Fig1C_PC_loading_GO.pdf"), p_pc_go,
+         width = 10, height = 7, units = "in", device = cairo_pdf)
+  write.csv(pc_go, file.path(OUT_DIR, "Fig1C_PC_loading_GO.csv"), row.names = FALSE)
+}
+```
+
+# Parameter sensitivity
+
+The analysis parameters (`MIN_FRAC`, `N_TOP_GENES`, `N_PCS_SIL`) are
+conventional defaults (e.g. DESeq2 `plotPCA` uses the top 500 genes), not values
+tuned on this data. Here the PCA / PERMANOVA / silhouette are re-run over a grid
+of values: if conditions separate strongly across the whole grid, the conclusion
+does not depend on the parameter choice.
+
+All three analyses are tested: replicate 1, replicate 2 (each with both
+fluconazole doses) and all datasets (four conditions, the two doses kept separate).
+
+```{r sensitivity, fig.width = 15, fig.height = 9}
+# Values to test (the defaults used above are 0.25, 500 and 10)
+SENS_MIN_FRAC <- c(0.10, 0.25, 0.50)
+SENS_N_TOP    <- c(250, 500, 1000, 2000, Inf)   # Inf = all genes passing the filter
+SENS_N_PCS    <- c(2, 5, 10, 20)
+
+sens_sets <- list(
+  "Replicate 1"          = c("YPD.1", "Flu.1", "Flu.2", "sc2glu.1"),
+  "Replicate 2"          = c("YPD.2", "Flu.1", "Flu.2", "sc2glu.2"),
+  "All datasets"         = names(raw)
+)
+
+# Every combination of analysis x expression filter x number of genes (3 x 3 x 5 = 45 runs)
+sens_grid <- expand_grid(analysis = names(sens_sets),
+                         min_frac = SENS_MIN_FRAC,
+                         n_top    = SENS_N_TOP)
+
+sens_results <- pmap_dfr(sens_grid, function(analysis, min_frac, n_top) {
+  # run the same pipeline as above, hiding its printed output
+  invisible(capture.output(suppressMessages(
+    res <- condition_pca(sens_sets[[analysis]], analysis,
+                         min_frac = min_frac, n_top = n_top)
+  )))
+  # silhouette for each number of PCs, from the same PCA
+  pcs <- prcomp(res$x, center = TRUE, scale. = FALSE)$x
+  sil <- map_dbl(SENS_N_PCS, function(k) {
+    s <- silhouette(as.integer(res$meta$condition),
+                    dist(pcs[, seq_len(min(k, ncol(pcs))), drop = FALSE]))
+    mean(s[, "sil_width"])
+  })
+  tibble(analysis, min_frac, n_top,
+         n_genes      = res$stats$n_genes,
+         PC1_pct      = res$stats$PC1_pct,
+         permanova_R2 = res$stats$permanova_R2,
+         permanova_p  = res$stats$permanova_p,
+         n_pcs_sil    = SENS_N_PCS,
+         silhouette   = sil)
+}) %>%
+  mutate(n_top_label = factor(ifelse(is.infinite(n_top), "all", as.character(n_top)),
+                              levels = c(as.character(SENS_N_TOP[is.finite(SENS_N_TOP)]), "all")),
+         min_frac    = factor(min_frac))
+
+# Range of each statistic per set over the whole grid
+knitr::kable(
+  sens_results %>% group_by(analysis) %>%
+    summarise(R2_min  = min(permanova_R2), R2_max  = max(permanova_R2),
+              p_max   = max(permanova_p),
+              sil_min = min(silhouette),   sil_max = max(silhouette),
+              .groups = "drop"),
+  digits = 3, caption = "Range of PERMANOVA R2 and silhouette across all parameter values"
+)
+
+# PERMANOVA R2 vs number of genes, one line per expression filter
+# (R2 does not depend on the number of PCs, so one row per run is used)
+p_sens_r2 <- sens_results %>%
+  distinct(analysis, min_frac, n_top_label, permanova_R2) %>%
+  ggplot(aes(n_top_label, permanova_R2, color = min_frac, group = min_frac)) +
+  geom_line() + geom_point(size = 2) +
+  facet_wrap(~ analysis) +
+  scale_y_continuous(limits = c(0, 1)) +
+  labs(x = "Most variable genes used", y = "PERMANOVA R2 (condition)",
+       color = "Min. fraction\nof samples") +
+  pub_theme
+
+# Silhouette vs number of PCs at the default expression filter, one line per gene number
+p_sens_sil <- sens_results %>%
+  filter(min_frac == MIN_FRAC) %>%
+  ggplot(aes(n_pcs_sil, silhouette, color = n_top_label, group = n_top_label)) +
+  geom_line() + geom_point(size = 2) +
+  facet_wrap(~ analysis) +
+  scale_x_continuous(breaks = SENS_N_PCS) +
+  scale_y_continuous(limits = c(-0.1, 1)) +
+  labs(x = "PCs used for silhouette", y = "Mean silhouette (condition)",
+       color = "Genes used") +
+  pub_theme
+
+p_sens <- p_sens_r2 / p_sens_sil
+p_sens
+
+save_plot(p_sens_r2,  "Fig1C_parameter_sensitivity_R2",         width = 15, height = 4.5)
+save_plot(p_sens_sil, "Fig1C_parameter_sensitivity_silhouette", width = 15, height = 4.5)
+ggsave(file.path(OUT_DIR, "Fig1C_parameter_sensitivity.pdf"), p_sens,
+       width = 15, height = 9, units = "in", device = cairo_pdf)
+write.csv(sens_results %>% select(-n_top_label),
+          file.path(OUT_DIR, "Fig1C_parameter_sensitivity.csv"), row.names = FALSE)
+```
