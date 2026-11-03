@@ -1,0 +1,600 @@
+---
+title: "Condition-induced genes and their eQTLs: galactose and fluconazole vs YPD"
+author: "Akriti Agrawal"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    theme: flatly
+    code_folding: show
+---
+
+**Question.** mashr (`Fig4.mashr-condition-specific-eQTLs.Rmd`) finds no condition-specific
+eQTLs, most likely because ~55-80 strains give too little power to show that an effect differs
+between conditions genome-wide. This file asks a narrower question with more prior support:
+condition-specific eQTLs are most expected in genes the condition switches on. For example,
+GAL genes are induced in galactose and repressed in glucose (YPD), so variation in GAL gene
+expression, and eQTLs for it, can only show up in galactose.
+
+Three comparisons, each against both YPD replicates (YPD.1, YPD.2):
+
+| Query condition | Dataset | Reference |
+|---|---|---|
+| galactose (synthetic complete + galactose) | scgal.1 | YPD.1, YPD.2 |
+| fluconazole_16ug (16 ug/ml) | Flu.1 | YPD.1, YPD.2 |
+| fluconazole_8ug (8 ug/ml) | Flu.2 | YPD.1, YPD.2 |
+
+Flu.1 and Flu.2 are two doses, not replicates, and are kept separate throughout.
+
+**Two gene sets per comparison.**
+
+1. *Expressed only in the query condition* (Section 2): genes in the query condition's
+   phenotype matrix (`gene_matrix.txt`, the expression-filtered genes used in the GWAS) but in
+   neither YPD replicate's. Their eQTLs are condition-specific by construction: the gene was not
+   tested in YPD. That means "too low to measure in YPD", which is not the same as "no effect in YPD".
+2. *Differentially expressed* (Section 3): genes tested in all three datasets, classified with
+   the pseudobulk DESeq2 results from
+   `Figure.1/.../codes/Fig1-PanelC-DE-between-conditions-unfiltered-transcripts.Rmd`.
+   "Up" = padj < 0.05 and log2FC > 1 (query / YPD) against **both** YPD replicates; "down" the
+   same with log2FC < -1; "not DE" = neither against both; "inconsistent" otherwise.
+
+**Tests.**
+
+- *Gene level* (Section 3): do up-regulated genes more often have an eQTL in the query condition,
+  or gain one (eQTL in the query, none in either YPD replicate), than not-DE genes? Not-DE genes
+  share the same strains, batch and power, so they are the internal control. eQTL detection
+  depends on expression level, so a logistic regression adjusts for mean log2 CPM in the query
+  condition.
+- *Variant level* (Section 4): every query eQTL (lead variant per clump, from the annotation
+  tables) is looked up among *all tested* variants of the same gene in YPD.1 and YPD.2
+  (`first_assoc` files). The difference in effect is tested with
+  z = (beta_query - beta_YPD) / sqrt(SE_query^2 + SE_YPD^2). Many strains are in both datasets,
+  so the two estimates are positively correlated and this z-test is conservative.
+  The YPD.2 eQTLs looked up in YPD.1 give the rate of "differences" expected from batch alone.
+
+Effect sizes are FaST-LMM `SnpWeight` values, compared directly between conditions as in the other
+Fig. 4 Part II files.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(tidyverse)
+source("/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Agrawal_single_cell_eqtl_cell_cycle/shared_code/arial_font.R")  # Arial for all plots, as in Figs 2 and 5
+library(data.table)
+library(parallel)
+library(patchwork)
+library(org.Sc.sgd.db)
+
+bind_rows <- dplyr::bind_rows
+count     <- dplyr::count
+select    <- dplyr::select
+filter    <- dplyr::filter
+first     <- dplyr::first
+rename    <- dplyr::rename
+```
+
+# 1. Datasets and inputs
+
+```{r config}
+ROOT <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all"
+FIG  <- file.path(ROOT, "Agrawal_single_cell_eqtl_cell_cycle")
+OUTPUT_DIR <- "../results/induced_genes_eQTLs"
+dir.create(OUTPUT_DIR, showWarnings = FALSE, recursive = TRUE)
+N_CORES <- as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", "8"))
+
+QUERY <- c(scgal.1 = "galactose", Flu.1 = "fluconazole_16ug", Flu.2 = "fluconazole_8ug")   # Flu.1 = 16, Flu.2 = 8 ug/ml
+REFS  <- c("YPD.1", "YPD.2")
+DATASETS <- c(REFS, names(QUERY))
+
+PADJ_CUT <- 0.05   # DE
+LFC_CUT  <- 1      # DE, |log2FC|
+P_SHARED <- 0.05   # nominal p in YPD for "seen in YPD"
+DIFF_FDR <- 0.05   # BH FDR of the effect-size difference test
+# The Fig. 1 DE for galactose is off-centre: median log2FC(scgal.1 / YPD.1) = +1.04 (Flu.1: -0.02),
+# so most genes are called "up in galactose" by normalisation alone. TRUE re-centres each
+# comparison on its median log2FC before calling DE genes (Section 1).
+CENTRE_LFC <- TRUE
+
+# local/distant annotated, clumped eQTLs (one row per clump lead)
+ANNOT_DIRS <- c(
+  YPD.1   = file.path(FIG, "Figure.3/Fig.3-Panel-A-C-D-cis-and-trans-eqtl-YPD-variant-type/results/YPD.1/annotations"),
+  YPD.2   = file.path(FIG, "Figure.4/Fig.4-YPD.2/results/YPD.2/annotations"),
+  Flu.1   = file.path(FIG, "Figure.4/Fig.4-Flu.1/results/Flu.1/annotations"),
+  Flu.2   = file.path(FIG, "Figure.4/Fig.4-Flu.2/results/Flu.2/annotations"),
+  scgal.1 = file.path(FIG, "Figure.4/Fig.4-scgal.1/results/scgal.1/annotations"))
+ANNOT_FILES <- c(SNPs = "snp", InDels = "indel", SVs = "sv", CNVs = "cnv")
+VARIANTS <- names(ANNOT_FILES)
+
+# genes tested in each GWAS = rows of its phenotype matrix
+PHENO <- c(YPD.1 = "YPD.1/fastlmm", YPD.2 = "YPD.2/fastlmm", Flu.1 = "Flu.1/fastlmm",
+           Flu.2 = "Flu.2/fastlmm", scgal.1 = "scgal.1/fastlmm")
+
+# unfiltered pseudobulk counts, for expression levels (same files as the Fig. 1 DE)
+PSEUDOBULK <- c(
+  YPD.1   = "YPD.1/fastlmm/data/pheno_data/pseudobulk_YPD.1_all_strains_no_cell_filter.txt",
+  YPD.2   = "YPD.2/fastlmm/data/pheno_data/pseudobulk_YPD.2_all_strains_no_cell_filter.txt",
+  Flu.1   = "Flu.1/fastlmm/data/pheno_data/pseudobulk_flu.1_all_strains_no_cell_filter.txt",
+  Flu.2   = "Flu.2/fastlmm/data/pheno_data/pseudobulk_flu.2_all_strains_no_cell_filter.txt",
+  scgal.1 = "scgal.1/fastlmm/data/pheno_data/pseudobulk_scgal.1_all_strains_no_cell_filter.txt")
+GENE_ANNOT <- "/scratch/aa9679/SingleCell_cerevisiae/Gene_exp_analysis/yeast_custom_annotations.csv"
+
+# pseudobulk DESeq2 results, log2FC = query / YPD
+DE_DIR <- file.path(FIG, "Figure.1/Fig.1-Panel-C-scRNAseq-reproducibility_agreement/results/DE_unfiltered")
+de_file <- function(ref, q) file.path(DE_DIR, paste0("DE_", ref, "_vs_", q, ".csv"))
+
+# full GWAS output (first_assoc files) of the YPD replicates, for the look-ups
+SNP_DIR   <- "results_SNPs_96_MAF15_from_969_strains_with_double_id_final_filtered_for_ncount_less_than_5"
+INDEL_DIR <- "results_Indels_96_MAF15_with_double_id_final_filtered_for_ncount_less_than_5"
+CNV_DIR   <- "results_CNVs_with_double_id_is_not_needed_final_filtered_for_ncount_less_than_5_run_from_new_plink_files_no_chr17"   # CNV GWAS re-run without chr17
+SV_DIR    <- "results_SVs_with_double_id_is_not_needed_final_filtered_for_ncount_less_than_5_run_from_new_plink_files"
+gwas_dirs <- function(res, indel_dir = INDEL_DIR) {
+  res <- file.path(ROOT, res)
+  c(SNPs = file.path(res, SNP_DIR), InDels = file.path(res, indel_dir),
+    SVs = file.path(res, SV_DIR), CNVs = file.path(res, CNV_DIR))
+}
+GWAS_DIRS <- list(
+  YPD.1 = gwas_dirs("YPD.1/fastlmm/results",   # YPD.1's InDel run: other folder, same indels.96samples
+                    indel_dir = "results_Indels_with_double_id_final_filtered_for_ncount_less_than_5"),
+  YPD.2 = gwas_dirs("YPD.2/fastlmm/results"))
+
+missing <- c(file.path(rep(ANNOT_DIRS, each = 4), paste0(ANNOT_FILES, "_data_annotated_cis_trans.txt")),
+             file.path(ROOT, PHENO, "data/pheno_data/gene_matrix.txt"), file.path(ROOT, PSEUDOBULK), GENE_ANNOT,
+             unlist(lapply(names(QUERY), function(q) de_file(REFS, q))), unlist(GWAS_DIRS))
+missing <- missing[!file.exists(missing)]
+if (length(missing)) stop("Missing inputs:\n", paste(missing, collapse = "\n"))
+```
+
+```{r load}
+# clumped eQTLs, one row per clump lead
+eqtls <- lapply(setNames(DATASETS, DATASETS), function(cn) bind_rows(imap(ANNOT_FILES, function(f, vt)
+  fread(file.path(ANNOT_DIRS[[cn]], paste0(f, "_data_annotated_cis_trans.txt")), sep = "\t", quote = "",
+        select = c("Pheno", "SNP", "PValue", "SnpWeight", "SnpWeightSE", "local_distant"), data.table = FALSE) %>%
+    transmute(Gene = Pheno, SNP, Variant_Type = vt, P = PValue, Beta = SnpWeight, SE = SnpWeightSE, local_distant))) %>%
+  distinct(Gene, SNP, Variant_Type, .keep_all = TRUE))
+
+tested <- lapply(PHENO, function(d) fread(file.path(ROOT, d, "data/pheno_data/gene_matrix.txt"), select = 1)[[1]])
+
+knitr::kable(tibble(dataset = DATASETS, genes_tested = lengths(tested[DATASETS]),
+                    eQTLs_clumped = sapply(eqtls, nrow),
+                    genes_with_eQTL = sapply(eqtls, function(d) n_distinct(d$Gene))),
+             caption = "Genes tested and clumped eQTLs per dataset")
+
+# ORF <-> common name (pseudobulk matrices mix both; same conversion as the Fig. 1 DE)
+gene_annot <- read.csv(GENE_ANNOT, stringsAsFactors = FALSE) %>%
+  filter(!is.na(gene_name), !is.na(gene_id), gene_name != "")
+common_to_orf <- gene_annot %>% distinct(gene_name, .keep_all = TRUE) %>% select(gene_name, gene_id) %>% deframe()
+orf_to_common <- gene_annot %>% distinct(gene_id, .keep_all = TRUE) %>% select(gene_id, gene_name) %>% deframe()
+gene_label <- function(orfs) {
+  sgd <- suppressMessages(AnnotationDbi::mapIds(org.Sc.sgd.db, keys = orfs, keytype = "ORF",
+                                                column = "GENENAME", multiVals = "first"))
+  coalesce(unname(sgd), unname(orf_to_common[orfs]), orfs)
+}
+
+to_orf <- function(mat) {
+  ids <- rownames(mat)
+  orf <- ifelse(grepl("^Y[A-Z]{2}\\d{3}[WC](-[A-Z])?$", ids) | !ids %in% names(common_to_orf),
+                ids, common_to_orf[ids])
+  mat <- mat[!duplicated(orf), , drop = FALSE]
+  rownames(mat) <- orf[!duplicated(orf)]
+  mat
+}
+
+# mean log2(CPM + 1) across strains, per dataset
+log2cpm <- lapply(PSEUDOBULK, function(p) {
+  m <- to_orf(as.matrix(read.csv(file.path(ROOT, p), sep = "\t", row.names = 1, check.names = FALSE)))
+  rowMeans(log2(t(t(m) / colSums(m)) * 1e6 + 1))
+})
+
+# positive-control gene sets: galactose metabolism for galactose, ergosterol biosynthesis for fluconazole
+go_orfs <- function(go) AnnotationDbi::select(org.Sc.sgd.db, keys = go, keytype = "GOALL", columns = "ORF") %>%
+  filter(!is.na(ORF)) %>% pull(ORF) %>% unique()
+CONTROL_SETS <- list(galactose = go_orfs("GO:0006012"), ergosterol = go_orfs("GO:0006696"))
+CONTROL_FOR  <- c(scgal.1 = "galactose", Flu.1 = "ergosterol", Flu.2 = "ergosterol")
+```
+
+```{r gene-table}
+# DESeq2 log2FC of a comparison; with CENTRE_LFC, shifted so the median gene has log2FC 0 and
+# p / padj recomputed from lfcSE (genes DESeq2 filtered out keep padj = NA)
+read_de <- function(ref, q) {
+  d <- read.csv(de_file(ref, q)) %>% select(gene, log2FoldChange, lfcSE, padj)
+  shift <- if (CENTRE_LFC) median(d$log2FoldChange, na.rm = TRUE) else 0
+  d %>% mutate(ref = ref, lfc_shift = shift,
+               log2FoldChange = log2FoldChange - shift,
+               padj = if (CENTRE_LFC) replace(padj, !is.na(padj),
+                                              p.adjust(2 * pnorm(-abs(log2FoldChange[!is.na(padj)] / lfcSE[!is.na(padj)])), "BH"))
+                      else padj)
+}
+de_raw <- bind_rows(lapply(names(QUERY), function(q) bind_rows(lapply(REFS, read_de, q = q)) %>% mutate(query = q)))
+knitr::kable(de_raw %>% group_by(query, ref) %>%
+               summarise(median_log2FC_before = first(lfc_shift), .groups = "drop"),
+             digits = 2, caption = "Median log2FC (query / YPD) in the Fig. 1 DE results, removed when CENTRE_LFC = TRUE")
+
+# DE call against both YPD replicates; NA when DESeq2 gave no padj against one of them
+de_class <- function(q) de_raw %>% filter(query == q) %>%
+  mutate(call = case_when(is.na(padj) ~ NA_character_,
+                          padj < PADJ_CUT & log2FoldChange >  LFC_CUT ~ "up",
+                          padj < PADJ_CUT & log2FoldChange < -LFC_CUT ~ "down",
+                          TRUE ~ "not DE")) %>%
+  group_by(gene) %>%
+  summarise(mean_log2FC = mean(log2FoldChange),
+            DE_class = case_when(n() < length(REFS) | any(is.na(call)) ~ NA_character_,
+                                 all(call == "up")     ~ "up",
+                                 all(call == "down")   ~ "down",
+                                 all(call == "not DE") ~ "not DE",
+                                 TRUE                  ~ "inconsistent"),
+            .groups = "drop")
+
+# one row per gene: eQTLs in the query condition (lead = lowest p) and in each YPD replicate
+eqtl_per_gene <- function(cn) eqtls[[cn]] %>%
+  group_by(Gene) %>%
+  summarise(n_eQTL = n(), n_local = sum(local_distant == "Local", na.rm = TRUE),
+            n_distant = sum(local_distant == "Distant", na.rm = TRUE),
+            lead_SNP = SNP[which.min(P)], lead_type = Variant_Type[which.min(P)],
+            lead_local_distant = local_distant[which.min(P)], lead_P = min(P), .groups = "drop")
+
+EXPR_LEVELS <- c("only in query", "query and both YPD", "both YPD, not query", "other")
+DE_LEVELS   <- c("up", "down", "not DE", "inconsistent")
+
+gene_table <- function(q) {
+  in_q <- tested[[q]]; in_1 <- tested$YPD.1; in_2 <- tested$YPD.2
+  tibble(Gene = Reduce(union, list(in_q, in_1, in_2))) %>%
+    mutate(query = q, query_lab = QUERY[[q]], gene_name = gene_label(Gene),
+           expression_class = factor(case_when(
+             Gene %in% in_q & !Gene %in% in_1 & !Gene %in% in_2 ~ "only in query",
+             Gene %in% in_q &  Gene %in% in_1 &  Gene %in% in_2 ~ "query and both YPD",
+             !Gene %in% in_q & Gene %in% in_1 &  Gene %in% in_2 ~ "both YPD, not query",
+             TRUE ~ "other"), EXPR_LEVELS),
+           log2CPM_query = unname(log2cpm[[q]][Gene]),
+           log2CPM_YPD   = unname((log2cpm$YPD.1[Gene] + log2cpm$YPD.2[Gene]) / 2)) %>%
+    left_join(de_class(q), by = c(Gene = "gene")) %>%
+    left_join(eqtl_per_gene(q), by = "Gene") %>%
+    mutate(DE_class = factor(DE_class, DE_LEVELS),
+           n_eQTL = coalesce(n_eQTL, 0L),
+           eQTL_query = n_eQTL > 0,
+           eQTL_YPD.1 = Gene %in% eqtls$YPD.1$Gene,
+           eQTL_YPD.2 = Gene %in% eqtls$YPD.2$Gene,
+           eQTL_gained = eQTL_query & !eQTL_YPD.1 & !eQTL_YPD.2,   # in the query, in neither YPD replicate
+           eQTL_lost   = !eQTL_query & eQTL_YPD.1 & eQTL_YPD.2,     # in both YPD replicates, not in the query
+           control_set = Gene %in% CONTROL_SETS[[CONTROL_FOR[[q]]]])
+}
+genes <- bind_rows(lapply(names(QUERY), gene_table)) %>%
+  mutate(query_lab = factor(query_lab, QUERY))
+write.csv(genes, file.path(OUTPUT_DIR, "genes_expression_DE_and_eQTLs.csv"), row.names = FALSE)
+
+save_fig <- function(p, name, w, h) {
+  ggsave(file.path(OUTPUT_DIR, paste0(name, ".tiff")), p, width = w, height = h, dpi = 300, compression = "lzw")
+  ggsave(file.path(OUTPUT_DIR, paste0(name, ".png")),  p, width = w, height = h, dpi = 300)
+}
+```
+
+# 2. Genes expressed only in the query condition
+
+```{r only-in-query}
+knitr::kable(genes %>% count(query_lab, expression_class) %>%
+               pivot_wider(names_from = expression_class, values_from = n, values_fill = 0),
+             caption = "Genes by the datasets whose GWAS tested them (passed the expression filter)")
+
+# do genes expressed only in the query have eQTLs as often as genes expressed everywhere?
+only_summary <- genes %>%
+  filter(expression_class %in% c("only in query", "query and both YPD")) %>%
+  group_by(query_lab, expression_class) %>%
+  summarise(n_genes = n(), n_with_eQTL = sum(eQTL_query), pct_with_eQTL = 100 * mean(eQTL_query),
+            n_local = sum(n_local > 0, na.rm = TRUE),
+            median_log2CPM_query = median(log2CPM_query, na.rm = TRUE),
+            median_log2CPM_YPD = median(log2CPM_YPD, na.rm = TRUE), .groups = "drop")
+knitr::kable(only_summary, digits = 2,
+             caption = "eQTLs in the query condition: genes expressed only there vs genes expressed in all three datasets")
+write.csv(only_summary, file.path(OUTPUT_DIR, "only_in_query_summary.csv"), row.names = FALSE)
+
+only_eqtl_genes <- genes %>%
+  filter(expression_class == "only in query", eQTL_query) %>%
+  arrange(query_lab, lead_P) %>%
+  select(query_lab, Gene, gene_name, log2CPM_query, log2CPM_YPD, mean_log2FC, DE_class,
+         n_eQTL, n_local, n_distant, lead_SNP, lead_type, lead_local_distant, lead_P, control_set)
+write.csv(only_eqtl_genes, file.path(OUTPUT_DIR, "only_in_query_genes_with_eQTLs.csv"), row.names = FALSE)
+
+for (q in levels(genes$query_lab)) {
+  print(knitr::kable(only_eqtl_genes %>% filter(query_lab == q) %>% head(30), digits = 3,
+                     caption = paste("Genes expressed only in", q, "(not tested in either YPD replicate) with an eQTL in", q)))
+}
+```
+
+```{r only-in-query-plot, fig.width = 12, fig.height = 4.5}
+# expression in YPD vs the query for every gene tested in the query; genes not tested in YPD highlighted
+p_only <- genes %>%
+  filter(expression_class %in% c("only in query", "query and both YPD")) %>%
+  mutate(group = case_when(expression_class == "query and both YPD" ~ "tested in all three",
+                           eQTL_query ~ "only in query, eQTL", TRUE ~ "only in query, no eQTL")) %>%
+  arrange(group == "tested in all three") %>%
+  ggplot(aes(log2CPM_YPD, log2CPM_query, color = group)) +
+  geom_abline(linetype = "dashed", linewidth = 0.3) +
+  geom_point(data = ~ filter(.x, group == "tested in all three"), size = 0.4, alpha = 0.3) +
+  geom_point(data = ~ filter(.x, group != "tested in all three"), size = 1.1) +
+  scale_color_manual(values = c("tested in all three" = "grey70", "only in query, no eQTL" = "#4E79A7",
+                                "only in query, eQTL" = "#E15759")) +
+  facet_wrap(~ query_lab) +
+  labs(x = "mean log2(CPM + 1), YPD (mean of YPD.1, YPD.2)", y = "mean log2(CPM + 1), query condition", color = NULL) +
+  theme_classic(base_size = 12) +
+  theme(strip.background = element_blank(), strip.text = element_text(face = "bold"), legend.position = "bottom")
+p_only
+save_fig(p_only, "Fig_only_in_query_expression", 12, 4.5)
+```
+
+# 3. Differentially expressed genes: more eQTLs where the condition induces expression?
+
+Genes tested in the query condition and both YPD replicates, with a DE call against both YPD
+replicates.
+
+```{r de-summary}
+de_genes <- genes %>% filter(expression_class == "query and both YPD", !is.na(DE_class))
+
+de_summary <- de_genes %>%
+  group_by(query_lab, DE_class) %>%
+  summarise(n_genes = n(),
+            pct_eQTL_query = 100 * mean(eQTL_query),
+            pct_eQTL_YPD.1 = 100 * mean(eQTL_YPD.1),
+            pct_eQTL_YPD.2 = 100 * mean(eQTL_YPD.2),
+            pct_gained     = 100 * mean(eQTL_gained),
+            pct_lost       = 100 * mean(eQTL_lost),
+            median_log2CPM_query = median(log2CPM_query, na.rm = TRUE), .groups = "drop")
+knitr::kable(de_summary, digits = 1,
+             caption = "Genes with an eQTL per DE class. Gained = eQTL in the query, in neither YPD replicate; lost = in both YPD replicates, not in the query")
+write.csv(de_summary, file.path(OUTPUT_DIR, "DE_class_eQTL_summary.csv"), row.names = FALSE)
+```
+
+Fisher's exact test (up or down vs not DE) and logistic regression adjusted for expression in the
+query condition, for two outcomes: any eQTL in the query, and a gained eQTL.
+
+```{r de-tests}
+de_test <- function(d, cls, outcome) {
+  d <- d %>% filter(DE_class %in% c(cls, "not DE"), !is.na(log2CPM_query)) %>%
+    mutate(is_cls = DE_class == cls, y = .data[[outcome]])
+  if (sum(d$is_cls) < 3) return(NULL)
+  ft  <- fisher.test(table(factor(d$is_cls, c(TRUE, FALSE)), factor(d$y, c(TRUE, FALSE))))
+  fit <- summary(glm(y ~ is_cls + log2CPM_query, family = binomial, data = d))$coefficients
+  tibble(DE_class = cls, outcome = outcome, n_class = sum(d$is_cls), n_not_DE = sum(!d$is_cls),
+         pct_class = 100 * mean(d$y[d$is_cls]), pct_not_DE = 100 * mean(d$y[!d$is_cls]),
+         fisher_OR = unname(ft$estimate), fisher_p = ft$p.value,
+         adj_OR = exp(fit["is_clsTRUE", "Estimate"]), adj_p = fit["is_clsTRUE", "Pr(>|z|)"])
+}
+de_tests <- de_genes %>%
+  group_by(query_lab) %>%
+  group_modify(~ bind_rows(lapply(c("up", "down"), function(cls)
+    bind_rows(de_test(.x, cls, "eQTL_query"), de_test(.x, cls, "eQTL_gained"))))) %>%
+  ungroup()
+knitr::kable(de_tests %>% mutate(across(c(fisher_p, adj_p), ~ format(.x, digits = 2))), digits = 2,
+             caption = "Up / down genes vs not-DE genes. adj_OR: logistic regression adjusted for mean log2 CPM in the query condition")
+write.csv(de_tests, file.path(OUTPUT_DIR, "DE_class_eQTL_tests.csv"), row.names = FALSE)
+```
+
+```{r de-plots, fig.width = 13, fig.height = 9}
+DE_COLS <- c(up = "#D6604D", down = "#2166AC", "not DE" = "grey60", inconsistent = "#B07AA1")
+
+p_de_bars <- de_summary %>%
+  select(query_lab, DE_class, n_genes, `eQTL in query` = pct_eQTL_query, `eQTL in YPD.1` = pct_eQTL_YPD.1,
+         `eQTL in YPD.2` = pct_eQTL_YPD.2, `gained in query` = pct_gained) %>%
+  pivot_longer(-c(query_lab, DE_class, n_genes), names_to = "measure", values_to = "pct") %>%
+  mutate(measure = factor(measure, c("eQTL in query", "eQTL in YPD.1", "eQTL in YPD.2", "gained in query"))) %>%
+  ggplot(aes(measure, pct, fill = DE_class)) +
+  geom_col(position = position_dodge(0.85), width = 0.8) +
+  scale_fill_manual(values = DE_COLS) +
+  facet_wrap(~ query_lab) +
+  labs(x = NULL, y = "% of genes", fill = "DE in query vs YPD") +
+  theme_classic(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1), strip.background = element_blank(),
+        strip.text = element_text(face = "bold"))
+
+# % of genes with an eQTL along the fold change (query / YPD); every gene tested in all three datasets
+LFC_BREAKS <- c(-Inf, -2, -1, -0.5, 0.5, 1, 2, Inf)
+p_de_bins <- genes %>%
+  filter(expression_class == "query and both YPD", !is.na(mean_log2FC)) %>%
+  mutate(lfc_bin = cut(mean_log2FC, LFC_BREAKS)) %>%
+  group_by(query_lab, lfc_bin) %>%
+  summarise(n = n(), `eQTL in query` = 100 * mean(eQTL_query),
+            `eQTL in YPD (either replicate)` = 100 * mean(eQTL_YPD.1 | eQTL_YPD.2),
+            `gained in query` = 100 * mean(eQTL_gained), .groups = "drop") %>%
+  pivot_longer(-c(query_lab, lfc_bin, n), names_to = "measure", values_to = "pct") %>%
+  ggplot(aes(lfc_bin, pct, color = measure, group = measure)) +
+  geom_line() + geom_point() +
+  geom_text(data = ~ distinct(.x, query_lab, lfc_bin, n), aes(lfc_bin, -2, label = n),
+            inherit.aes = FALSE, size = 2.6, color = "grey40") +
+  scale_color_manual(values = c("eQTL in query" = "#E15759", "eQTL in YPD (either replicate)" = "#59A14F",
+                                "gained in query" = "#7B3F9E")) +
+  facet_wrap(~ query_lab) +
+  labs(x = "mean log2FC (query / YPD), binned", y = "% of genes", color = NULL,
+       caption = "Numbers: genes per bin") +
+  theme_classic(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1), strip.background = element_blank(),
+        strip.text = element_text(face = "bold"), legend.position = "bottom")
+
+p_de <- p_de_bars / p_de_bins
+p_de
+save_fig(p_de, "Fig_DE_class_eQTLs", 13, 9)
+```
+
+# 4. Effect sizes of query eQTLs in YPD
+
+Every query eQTL is looked up in YPD.1 and YPD.2 (same gene, same variant, any p-value). Cached to
+`lookup_<query>_in_<YPD>.rds`.
+
+Categories per eQTL (both YPD replicates must agree):
+
+- *differs from YPD*: effect difference FDR < 0.05 against both YPD replicates, and the query
+  effect is larger or of opposite sign in both;
+- *shared with YPD*: p < 0.05 and same sign in both YPD replicates;
+- *not tested in YPD*: gene or variant not tested in at least one YPD replicate;
+- *unresolved*: everything else (no evidence either way, the usual low-power outcome).
+
+Query eQTLs are selected for being significant in the query, so their effects are inflated
+(winner's curse) and "differs from YPD" is common even between replicates (YPD.2 eQTLs in
+YPD.1, below). Read each condition's rate against its own not-DE genes, not as an absolute number.
+
+```{r lookup}
+read_first_assoc <- function(path, snps) {
+  if (!file.exists(path)) return(NULL)
+  d <- tryCatch(fread(path, sep = "\t", select = c("SNP", "SnpWeight", "SnpWeightSE", "PValue"), showProgress = FALSE),
+                error = function(e) NULL)
+  if (is.null(d)) NULL else d[SNP %in% snps]
+}
+
+build_lookup <- function(q, ref) {
+  cache <- file.path(OUTPUT_DIR, paste0("lookup_", q, "_in_", ref, ".rds"))
+  if (file.exists(cache)) return(readRDS(cache))
+  jobs <- eqtls[[q]] %>% group_by(Variant_Type, Gene) %>% summarise(snps = list(SNP), .groups = "drop")
+  res <- mclapply(seq_len(nrow(jobs)), function(i) {
+    vt <- jobs$Variant_Type[i]; g <- jobs$Gene[i]
+    d <- read_first_assoc(file.path(GWAS_DIRS[[ref]][[vt]], g, paste0(g, ".first_assoc.txt")), jobs$snps[[i]])
+    if (is.null(d) || nrow(d) == 0) return(NULL)
+    d[, `:=`(Gene = g, Variant_Type = vt)]
+  }, mc.cores = N_CORES)
+  lk <- rbindlist(res) %>% as.data.frame() %>% distinct(Gene, SNP, Variant_Type, .keep_all = TRUE)
+  saveRDS(lk, cache)
+  lk
+}
+
+# query eQTLs vs one reference; also used for the YPD.2-in-YPD.1 replicate control
+compare_to <- function(q, ref) eqtls[[q]] %>%
+  left_join(build_lookup(q, ref) %>% rename(Beta_ref = SnpWeight, SE_ref = SnpWeightSE, P_ref = PValue),
+            by = c("Gene", "SNP", "Variant_Type")) %>%
+  mutate(query = q, ref = ref,
+         z_diff = (Beta - Beta_ref) / sqrt(SE^2 + SE_ref^2),
+         p_diff = 2 * pnorm(-abs(z_diff)),
+         fdr_diff = p.adjust(p_diff, "BH"),
+         larger_in_query = abs(Beta) > abs(Beta_ref) | sign(Beta) != sign(Beta_ref),
+         differs = !is.na(fdr_diff) & fdr_diff < DIFF_FDR & larger_in_query,
+         shared  = !is.na(P_ref) & P_ref < P_SHARED & sign(Beta_ref) == sign(Beta))
+
+pairs_cmp <- bind_rows(lapply(names(QUERY), function(q) bind_rows(lapply(REFS, function(ref) compare_to(q, ref)))))
+rep_cmp   <- compare_to("YPD.2", "YPD.1")   # replicate control
+```
+
+```{r categories}
+CAT_LEVELS <- c("differs from YPD", "shared with YPD", "unresolved", "not tested in YPD")
+
+eqtl_cmp <- pairs_cmp %>%
+  select(query, Gene, SNP, Variant_Type, local_distant, Beta, SE, P, ref, Beta_ref, P_ref, fdr_diff, differs, shared) %>%
+  pivot_wider(names_from = ref, values_from = c(Beta_ref, P_ref, fdr_diff, differs, shared)) %>%
+  mutate(category = factor(case_when(
+           is.na(Beta_ref_YPD.1) | is.na(Beta_ref_YPD.2) ~ "not tested in YPD",
+           differs_YPD.1 & differs_YPD.2                 ~ "differs from YPD",
+           shared_YPD.1 & shared_YPD.2                   ~ "shared with YPD",
+           TRUE                                          ~ "unresolved"), CAT_LEVELS)) %>%
+  left_join(genes %>% select(query, Gene, gene_name, query_lab, expression_class, DE_class, mean_log2FC,
+                             log2CPM_query, log2CPM_YPD, control_set),
+            by = c("query", "Gene"))
+write.csv(eqtl_cmp, file.path(OUTPUT_DIR, "query_eQTLs_effect_in_YPD.csv"), row.names = FALSE)
+
+# replicate control: how often does a YPD.2 eQTL "differ" from YPD.1 (batch alone)? Compare with
+# the single-reference rate of the query conditions against YPD.1.
+single_ref <- bind_rows(pairs_cmp %>% filter(ref == "YPD.1"), rep_cmp) %>%
+  mutate(eQTLs_of = recode(query, !!!QUERY, YPD.2 = "YPD.2 (replicate control)")) %>%
+  group_by(eQTLs_of, looked_up_in = ref) %>%
+  summarise(n_eQTLs = n(), n_tested = sum(!is.na(Beta_ref)),
+            pct_differs = 100 * sum(differs) / n_tested,
+            pct_shared  = 100 * sum(shared) / n_tested, .groups = "drop")
+knitr::kable(single_ref, digits = 1,
+             caption = "eQTLs differing from / shared with YPD.1 (% of tested). The YPD.2 row is the batch-only baseline")
+write.csv(single_ref, file.path(OUTPUT_DIR, "differ_rate_vs_replicate_control.csv"), row.names = FALSE)
+
+# by expression and DE class of the gene
+cat_summary <- eqtl_cmp %>%
+  mutate(gene_class = case_when(expression_class == "only in query" ~ "expressed only in query",
+                                !is.na(DE_class) ~ paste("DE:", DE_class),
+                                TRUE ~ "other")) %>%
+  count(query_lab, gene_class, category) %>%
+  group_by(query_lab, gene_class) %>% mutate(n_eQTLs = sum(n), pct = 100 * n / n_eQTLs) %>% ungroup()
+knitr::kable(cat_summary %>% select(-n) %>% pivot_wider(names_from = category, values_from = pct, values_fill = 0),
+             digits = 1, caption = "Query eQTLs by category (% of eQTLs in that gene class)")
+write.csv(cat_summary, file.path(OUTPUT_DIR, "query_eQTL_categories_by_gene_class.csv"), row.names = FALSE)
+
+# eQTLs of up genes vs not-DE genes: more often different from YPD?
+diff_tests <- eqtl_cmp %>%
+  filter(DE_class %in% c("up", "down", "not DE"), category != "not tested in YPD") %>%
+  group_by(query_lab) %>%
+  group_modify(~ bind_rows(lapply(c("up", "down"), function(cls) {
+    d <- .x %>% filter(DE_class %in% c(cls, "not DE"))
+    if (sum(d$DE_class == cls) < 3) return(NULL)
+    ft <- fisher.test(table(factor(d$DE_class == cls, c(TRUE, FALSE)),
+                            factor(d$category == "differs from YPD", c(TRUE, FALSE))))
+    tibble(DE_class = cls, n_eQTLs_class = sum(d$DE_class == cls), n_eQTLs_not_DE = sum(d$DE_class == "not DE"),
+           pct_differs_class = 100 * mean(d$category[d$DE_class == cls] == "differs from YPD"),
+           pct_differs_not_DE = 100 * mean(d$category[d$DE_class == "not DE"] == "differs from YPD"),
+           fisher_OR = unname(ft$estimate), fisher_p = ft$p.value)
+  }))) %>% ungroup()
+knitr::kable(diff_tests %>% mutate(fisher_p = format(fisher_p, digits = 2)), digits = 2,
+             caption = "Are eQTLs of up / down genes more often different from YPD than eQTLs of not-DE genes?")
+write.csv(diff_tests, file.path(OUTPUT_DIR, "differ_rate_DE_vs_not_DE_tests.csv"), row.names = FALSE)
+```
+
+```{r effect-scatter, fig.width = 13, fig.height = 8.5}
+CAT_COLS <- c("differs from YPD" = "#E15759", "shared with YPD" = "#59A14F", "unresolved" = "grey65")
+
+p_scatter <- eqtl_cmp %>%
+  filter(DE_class %in% c("up", "not DE"), category != "not tested in YPD") %>%
+  mutate(DE_class = recode(DE_class, up = "genes up in query", "not DE" = "not-DE genes")) %>%
+  arrange(category == "unresolved") %>%
+  ggplot(aes(Beta_ref_YPD.1, Beta, color = category)) +
+  geom_hline(yintercept = 0, linewidth = 0.2) + geom_vline(xintercept = 0, linewidth = 0.2) +
+  geom_abline(linetype = "dashed", linewidth = 0.3) +
+  geom_point(size = 0.8, alpha = 0.7) +
+  ggrepel::geom_text_repel(data = ~ filter(.x, control_set | (category == "differs from YPD" & DE_class == "genes up in query")),
+                           aes(label = gene_name), size = 2.4, max.overlaps = 15, show.legend = FALSE) +
+  scale_color_manual(values = CAT_COLS) +
+  facet_grid(DE_class ~ query_lab) +
+  labs(x = "effect in YPD.1", y = "effect in query condition", color = NULL,
+       caption = "Query eQTLs (clump leads). Labelled: positive-control genes, and up-gene eQTLs that differ from YPD") +
+  theme_bw(base_size = 12) +
+  theme(strip.background = element_blank(), strip.text = element_text(face = "bold"), legend.position = "bottom")
+p_scatter
+save_fig(p_scatter, "Fig_query_eQTL_effect_vs_YPD1", 13, 8.5)
+```
+
+# 5. Candidate condition-specific eQTLs
+
+eQTLs of genes that the condition switches on, i.e. expressed only in the query condition
+(Section 2) or up against both YPD replicates (Section 3), that are either not testable in YPD or
+differ in effect from both YPD replicates.
+
+```{r candidates}
+candidates <- eqtl_cmp %>%
+  filter(expression_class == "only in query" | DE_class %in% "up",
+         category %in% c("differs from YPD", "not tested in YPD")) %>%
+  arrange(query_lab, P) %>%
+  select(query_lab, Gene, gene_name, expression_class, DE_class, mean_log2FC, log2CPM_query, log2CPM_YPD,
+         SNP, Variant_Type, local_distant, Beta, P, Beta_ref_YPD.1, P_ref_YPD.1, fdr_diff_YPD.1,
+         Beta_ref_YPD.2, P_ref_YPD.2, fdr_diff_YPD.2, category, control_set)
+knitr::kable(candidates %>% count(query_lab, category), caption = "Candidate condition-specific eQTLs")
+for (q in levels(genes$query_lab)) {
+  print(knitr::kable(candidates %>% filter(query_lab == q) %>% head(30) %>%
+                       select(gene_name, mean_log2FC, SNP, Variant_Type, local_distant, Beta, P,
+                              Beta_ref_YPD.1, Beta_ref_YPD.2, category),
+                     digits = 3, caption = paste("Top candidates,", q)))
+}
+write.csv(candidates, file.path(OUTPUT_DIR, "candidate_condition_specific_eQTLs.csv"), row.names = FALSE)
+```
+
+## Positive-control genes
+
+Galactose metabolism genes (GO:0006012) for galactose and ergosterol biosynthesis genes
+(GO:0006696) for fluconazole: expression, DE call and eQTLs in each dataset.
+
+```{r controls}
+control_genes <- genes %>%
+  filter(control_set) %>%
+  left_join(eqtl_cmp %>% group_by(query, Gene) %>%
+              summarise(categories = paste(sort(unique(as.character(category))), collapse = "; "), .groups = "drop"),
+            by = c("query", "Gene")) %>%
+  arrange(query_lab, desc(mean_log2FC)) %>%
+  select(query_lab, gene_name, Gene, expression_class, DE_class, mean_log2FC, log2CPM_query, log2CPM_YPD,
+         n_eQTL, lead_SNP, lead_local_distant, lead_P, eQTL_YPD.1, eQTL_YPD.2, categories)
+for (q in levels(genes$query_lab)) {
+  print(knitr::kable(control_genes %>% filter(query_lab == q), digits = 2,
+                     caption = paste(CONTROL_FOR[[names(QUERY)[QUERY == q]]], "genes,", q)))
+}
+write.csv(control_genes, file.path(OUTPUT_DIR, "positive_control_genes.csv"), row.names = FALSE)
+```
+
+```{r session}
+sessionInfo()
+```

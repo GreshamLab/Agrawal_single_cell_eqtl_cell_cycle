@@ -1,6 +1,0 @@
-condition,n_strains,n_genes_detected,n_clades_tested,n_degs
-YPD.1,82,5303,23,2310
-YPD.2,81,5249,22,1731
-Flu.1,74,4991,21,511
-Flu.2,67,4980,18,906
-sc2glu.2,65,5688,17,2160

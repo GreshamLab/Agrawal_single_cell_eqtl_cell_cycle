@@ -1,0 +1,142 @@
+---
+title: "Linkage disequilibrium decay in the 96 strains"
+author: "Akriti Agrawal"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    code_folding: show
+---
+
+**Purpose.** Choose the window for grouping linked significant variants into one eQTL signal
+(clumping), and check the cis window, from the LD in *these* 96 strains rather than from studies of
+>1,000 isolates (LD decays faster in larger, less structured samples).
+
+**Method** (as in studies of yeast natural isolates):
+
+1. Genotypes: SNPs with MAF >= 15% in the 96-strain panel (`SNPs.96strains.maf15.plink`).
+2. r² between every pair of SNPs on the same chromosome within `MAX_DIST` bp (squared Pearson
+   correlation of genotypes, missing genotypes set to the SNP mean).
+3. Mean r² in 100-bp distance bins.
+4. Background LD: r² between random SNP pairs on *different* chromosomes. These are physically
+   unlinked, so any correlation comes from population structure (clades); LD decays to this
+   background rather than to 0.
+5. Half-decay distance: the distance at which mean r² falls halfway from its short-distance
+   maximum to the background. Also reported: the share of pairs with r² > 0.6 (the clumping
+   threshold) at each distance.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(tidyverse)
+library(data.table)
+library(BEDMatrix)
+```
+
+```{r config}
+GENO <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/pan_transcriptome_paper/SNPs/SNPs_96_strain_filtering_no_change_name/SNPs_96_strains_MAF15_filtering/SNPs.96strains.maf15.plink"
+OUTPUT_DIR <- "../results/LD_decay"
+dir.create(OUTPUT_DIR, showWarnings = FALSE, recursive = TRUE)
+MAX_DIST <- 100000   # bp
+BIN      <- 100      # bp
+N_BACKGROUND <- 200000
+set.seed(42)
+```
+
+```{r load}
+bim <- fread(paste0(GENO, ".bim"), header = FALSE, col.names = c("chr", "id", "cm", "pos", "a1", "a2"))
+G <- BEDMatrix(paste0(GENO, ".bed"), n = nrow(fread(paste0(GENO, ".fam"), header = FALSE)), p = nrow(bim))
+G <- as.matrix(G[, ])
+# standardise each SNP (missing -> mean), so that r = crossprod / (n - 1)
+Z <- apply(G, 2, function(x) { x[is.na(x)] <- mean(x, na.rm = TRUE); s <- sd(x); if (s > 0) (x - mean(x)) / s else rep(NA_real_, length(x)) })
+keep <- colSums(is.na(Z)) == 0
+Z <- Z[, keep]; bim <- bim[keep]
+n <- nrow(Z)
+knitr::kable(tibble(strains = n, SNPs = ncol(Z), chromosomes = n_distinct(bim$chr)))
+```
+
+```{r pairwise-r2}
+cache <- file.path(OUTPUT_DIR, "ld_binned.rds")
+if (file.exists(cache)) {
+  binned <- readRDS(cache)
+} else {
+  acc <- list()
+  for (ch in unique(bim$chr)) {
+    idx <- which(bim$chr == ch); pos <- bim$pos[idx]; o <- order(pos); idx <- idx[o]; pos <- pos[o]
+    Zc <- Z[, idx, drop = FALSE]
+    for (start in seq(1, length(idx), by = 500)) {
+      a <- start:min(start + 499, length(idx))
+      b_end <- findInterval(pos[max(a)] + MAX_DIST, pos)
+      b <- min(a):b_end
+      r <- crossprod(Zc[, a, drop = FALSE], Zc[, b, drop = FALSE]) / (n - 1)
+      d <- outer(pos[a], pos[b], function(x, y) y - x)
+      ok <- d > 0 & d <= MAX_DIST & outer(a, b, `<`)
+      acc[[length(acc) + 1]] <- data.table(bin = floor(d[ok] / BIN) * BIN, r2 = r[ok]^2)[
+        , .(sum_r2 = sum(r2), n = .N, n_gt06 = sum(r2 > 0.6)), by = bin]
+    }
+  }
+  binned <- rbindlist(acc)[, .(sum_r2 = sum(sum_r2), n = sum(n), n_gt06 = sum(n_gt06)), by = bin][order(bin)]
+  binned[, `:=`(mean_r2 = sum_r2 / n, pct_r2_gt_0.6 = 100 * n_gt06 / n)]
+  saveRDS(binned, cache)
+}
+
+# background: random SNP pairs on different chromosomes
+i <- sample(ncol(Z), N_BACKGROUND, replace = TRUE); j <- sample(ncol(Z), N_BACKGROUND, replace = TRUE)
+diff_chr <- bim$chr[i] != bim$chr[j]
+i <- i[diff_chr]; j <- j[diff_chr]
+bg_r2 <- (colSums(Z[, i] * Z[, j]) / (n - 1))^2
+background <- mean(bg_r2)
+bg_pct06 <- 100 * mean(bg_r2 > 0.6)
+```
+
+```{r half-decay}
+max_r2 <- binned$mean_r2[1]
+half_level <- background + (max_r2 - background) / 2
+sm <- binned %>% mutate(smooth = zoo::rollmean(mean_r2, 5, fill = NA, align = "center"))
+half_dist <- sm$bin[which(sm$smooth <= half_level)[1]]
+at <- function(dd) binned$mean_r2[which.min(abs(binned$bin - dd))]
+pct_at <- function(dd) binned$pct_r2_gt_0.6[which.min(abs(binned$bin - dd))]
+summary_tab <- tibble(
+  measure = c("Mean r2 at < 100 bp (maximum)", "Background mean r2 (different chromosomes)",
+              "Half-decay level", "Half-decay distance (bp)",
+              "Mean r2 at 2 kb", "Mean r2 at 10 kb", "Mean r2 at 50 kb", "Mean r2 at 100 kb",
+              "% pairs r2 > 0.6 at 2 kb", "% pairs r2 > 0.6 at 10 kb", "% pairs r2 > 0.6 at 50 kb",
+              "% pairs r2 > 0.6 on different chromosomes"),
+  value = c(max_r2, background, half_level, half_dist, at(2000), at(10000), at(50000), at(MAX_DIST - BIN),
+            pct_at(2000), pct_at(10000), pct_at(50000), bg_pct06))
+write.csv(summary_tab, file.path(OUTPUT_DIR, "LD_decay_summary.csv"), row.names = FALSE)
+write.csv(binned, file.path(OUTPUT_DIR, "LD_decay_binned.csv"), row.names = FALSE)
+knitr::kable(summary_tab, digits = 3)
+```
+
+```{r plot, fig.width = 12, fig.height = 5}
+p1 <- ggplot(sm, aes(bin / 1000, mean_r2)) +
+  geom_point(size = 0.5, alpha = 0.4, colour = "grey50") +
+  geom_line(aes(y = smooth), colour = "#2C7FB8", linewidth = 1) +
+  geom_hline(yintercept = background, linetype = "dashed") +
+  geom_hline(yintercept = half_level, linetype = "dotted", colour = "#B2182B") +
+  geom_vline(xintercept = half_dist / 1000, linetype = "dotted", colour = "#B2182B") +
+  geom_vline(xintercept = 2, colour = "darkorange") +
+  annotate("text", x = half_dist / 1000, y = max_r2, hjust = -0.1, colour = "#B2182B",
+           label = sprintf("half-decay: %.1f kb", half_dist / 1000)) +
+  annotate("text", x = 2, y = max_r2 * 0.9, hjust = -0.1, colour = "darkorange", label = "current 2-kb window") +
+  annotate("text", x = MAX_DIST / 1000, y = background, hjust = 1, vjust = -0.5, label = "background (different chromosomes)") +
+  labs(title = "LD decay, SNPs, 96 strains", x = "Distance between SNPs (kb)", y = expression("Mean " * r^2 * " (100-bp bins)")) +
+  theme_classic(base_size = 12) + theme(plot.title = element_text(face = "bold", hjust = 0.5))
+p2 <- ggplot(binned, aes(bin / 1000, pct_r2_gt_0.6)) +
+  geom_point(size = 0.5, alpha = 0.4, colour = "grey50") +
+  geom_smooth(se = FALSE, colour = "#2C7FB8", method = "loess", span = 0.1) +
+  geom_hline(yintercept = bg_pct06, linetype = "dashed") +
+  geom_vline(xintercept = 2, colour = "darkorange") +
+  labs(title = expression(bold("Share of SNP pairs with " * r^2 * " > 0.6")), x = "Distance between SNPs (kb)", y = "% of pairs") +
+  theme_classic(base_size = 12) + theme(plot.title = element_text(hjust = 0.5))
+p <- patchwork::wrap_plots(p1, p2)
+print(p)
+ggsave(file.path(OUTPUT_DIR, "Fig_LD_decay_96_strains.tiff"), p, width = 12, height = 5, dpi = 600, compression = "lzw", bg = "white")
+ggsave(file.path(OUTPUT_DIR, "Fig_LD_decay_96_strains.png"), p, width = 12, height = 5, dpi = 150, bg = "white")
+```
+
+```{r session}
+sessionInfo()
+```

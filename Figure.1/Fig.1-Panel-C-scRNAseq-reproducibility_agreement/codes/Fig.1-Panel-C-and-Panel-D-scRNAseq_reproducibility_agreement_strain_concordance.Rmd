@@ -26,17 +26,31 @@ knitr::opts_chunk$set(echo = TRUE, message = TRUE, warning = FALSE,
 library(tidyverse)
 library(DESeq2)
 library(patchwork)
+
+select <- dplyr::select
+filter <- dplyr::filter  # often masked too
 ```
 
 # Configuration
 
 ```{r config}
+# All pseudobulk matrices are raw summed counts over ALL demultiplexed strains:
+# the >5 cells per strain filter is only for the eQTL step. The *_all_strains_no_cell_filter
+# files are made by 0_pseudobulk_no_cell_filter.R (same cell QC as each dataset's pseudobulk Rmd).
 PATHS <- list(
-  YPD1       = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.1/fastlmm/data/pheno_data/pseudobulk_reliable_transcripts_YPD.txt",
-  YPD2       = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.2/fastlmm/data/pheno_data/pseudobulk_reliable_transcripts_YPD.txt",
-  FLU1       = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Flu.1/fastlmm/data/pheno_data/pseudobulk_reliable_transcripts_Flu1.txt",
-  FLU2       = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Flu.2/fastlmm/data/pheno_data/pseudobulk_reliable_transcripts_Flu2.txt",
-  SC         = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2/fastlmm/data/pheno_data/pseudobulked_sc2glu_before_any_filtering.csv",
+  YPD1       = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.1/fastlmm/data/pheno_data/pseudobulk_YPD.1_all_strains_no_cell_filter.txt",
+  YPD2       = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.2/fastlmm/data/pheno_data/pseudobulk_YPD.2_all_strains_no_cell_filter.txt",
+  FLU1       = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Flu.1/fastlmm/data/pheno_data/pseudobulk_flu.1_all_strains_no_cell_filter.txt",
+  FLU2       = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Flu.2/fastlmm/data/pheno_data/pseudobulk_flu.2_all_strains_no_cell_filter.txt",
+  # gene sets of the YPD / Flu panels: the reliable transcripts of each dataset (only their row names are used)
+  YPD1_GENES = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.1/fastlmm/data/pheno_data/pseudobulk_reliable_transcripts_YPD.txt",
+  YPD2_GENES = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.2/fastlmm/data/pheno_data/pseudobulk_reliable_transcripts_YPD.txt",
+  FLU1_GENES = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Flu.1/fastlmm/data/pheno_data/pseudobulk_reliable_transcripts_Flu1.txt",
+  FLU2_GENES = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Flu.2/fastlmm/data/pheno_data/pseudobulk_reliable_transcripts_Flu2.txt",
+  # integrated sc2glu.1 + sc2glu.2 (merge of sc2glu.2/sc2glu.1_and_sc2glu.2_seurat_merged/merged_outputs_from_sc2glu.1_and_sc2glu.2.Rmd)
+  SC         = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2/fastlmm/data/pheno_data/pseudobulked_sc2glu_integrated_all_strains_no_cell_filter.csv",
+  # sc2glu.2 alone (its pseudobulk Rmd has no cell-count filter)
+  SC2_ONLY   = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2/fastlmm/data/pheno_data/pseudobulk_sc2glu.2_only_without_filtering_transcripts.txt",
 
   BULK_TPM   = "/scratch/aa9679/SingleCell_cerevisiae/Gene_exp_analysis/pan_transcriptome/data/969_count_annotated_merged_tpm_before_any_subfiltering.txt",
   BULK_COUNT = "/scratch/aa9679/SingleCell_cerevisiae/Gene_exp_analysis/pan_transcriptome/data/969_count_annotated_merged_before_any_subfiltering.txt",
@@ -84,13 +98,22 @@ YPD1_pseudobulk <- read_pseudobulk(PATHS$YPD1)
 YPD2_pseudobulk <- read_pseudobulk(PATHS$YPD2)
 Flu1_pseudobulk <- read_pseudobulk(PATHS$FLU1)
 Flu2_pseudobulk <- read_pseudobulk(PATHS$FLU2)
+
+# keep each dataset's reliable-transcript gene set
+keep_genes <- function(mat, genes_path) mat[intersect(rownames(read_pseudobulk(genes_path)), rownames(mat)), , drop = FALSE]
+YPD1_pseudobulk <- keep_genes(YPD1_pseudobulk, PATHS$YPD1_GENES)
+YPD2_pseudobulk <- keep_genes(YPD2_pseudobulk, PATHS$YPD2_GENES)
+Flu1_pseudobulk <- keep_genes(Flu1_pseudobulk, PATHS$FLU1_GENES)
+Flu2_pseudobulk <- keep_genes(Flu2_pseudobulk, PATHS$FLU2_GENES)
+
 sc_pseudobulk   <- read_pseudobulk(PATHS$SC, sep = ",")
+sc2_pseudobulk  <- read_pseudobulk(PATHS$SC2_ONLY)
 
 bulk_tpm   <- read_pseudobulk(PATHS$BULK_TPM)
 bulk_count <- read_pseudobulk(PATHS$BULK_COUNT)
 
 for (nm in c("YPD1_pseudobulk", "YPD2_pseudobulk", "Flu1_pseudobulk", "Flu2_pseudobulk",
-             "sc_pseudobulk", "bulk_tpm", "bulk_count")) {
+             "sc_pseudobulk", "sc2_pseudobulk", "bulk_tpm", "bulk_count")) {
   cat(sprintf("%-18s %5d genes x %4d strains\n", nm, nrow(get(nm)), ncol(get(nm))))
 }
 ```
@@ -106,24 +129,30 @@ common_to_orf <- all_custom_gene_annotations %>%
   distinct(gene_name, gene_id) %>%
   deframe()
 
-expr_gene_ids <- rownames(sc_pseudobulk)
-is_orf        <- grepl("^Y[A-Z]{2}\\d{3}[WC](-[A-Z])?$", expr_gene_ids)
+to_orf_rownames <- function(mat) {
+  expr_gene_ids <- rownames(mat)
+  is_orf        <- grepl("^Y[A-Z]{2}\\d{3}[WC](-[A-Z])?$", expr_gene_ids)
 
-expr_orf_ids <- ifelse(
-  is_orf,
-  expr_gene_ids,
-  ifelse(expr_gene_ids %in% names(common_to_orf), common_to_orf[expr_gene_ids], expr_gene_ids)
-)
+  expr_orf_ids <- ifelse(
+    is_orf,
+    expr_gene_ids,
+    ifelse(expr_gene_ids %in% names(common_to_orf), common_to_orf[expr_gene_ids], expr_gene_ids)
+  )
 
-dup <- duplicated(expr_orf_ids)
-if (any(dup)) {
-  cat("Dropping", sum(dup), "rows with duplicate ORF IDs after conversion\n")
-  sc_pseudobulk <- sc_pseudobulk[!dup, , drop = FALSE]
-  expr_orf_ids  <- expr_orf_ids[!dup]
+  dup <- duplicated(expr_orf_ids)
+  if (any(dup)) {
+    cat("Dropping", sum(dup), "rows with duplicate ORF IDs after conversion\n")
+    mat          <- mat[!dup, , drop = FALSE]
+    expr_orf_ids <- expr_orf_ids[!dup]
+  }
+  rownames(mat) <- expr_orf_ids
+
+  stopifnot(!any(duplicated(rownames(mat))))
+  mat
 }
-rownames(sc_pseudobulk) <- expr_orf_ids
 
-stopifnot(!any(duplicated(rownames(sc_pseudobulk))))
+sc_pseudobulk  <- to_orf_rownames(sc_pseudobulk)
+sc2_pseudobulk <- to_orf_rownames(sc2_pseudobulk)
 ```
 
 # Normalize
@@ -134,6 +163,7 @@ YPD2_norm <- deseq_normalize(YPD2_pseudobulk, "YPD.2")
 Flu1_norm <- deseq_normalize(Flu1_pseudobulk, "Flu.1")
 Flu2_norm <- deseq_normalize(Flu2_pseudobulk, "Flu.2")
 sc_norm   <- deseq_normalize(sc_pseudobulk,   "sc SC-2%glu")
+sc2_norm  <- deseq_normalize(sc2_pseudobulk,  "sc2glu.2 only")
 # bulk_tpm is already per-strain normalized and length-corrected; leave it alone.
 
 ```
@@ -144,10 +174,15 @@ Subset to shared genes and strains, `rowMeans` per gene, Spearman on the means,
 `rank()` for the plot axes.
 
 ```{r rank_concordance_fn}
-rank_concordance <- function(mat_x, mat_y, label, xlab, ylab) {
+rank_concordance <- function(mat_x, mat_y, label, xlab, ylab, strains = NULL) {
 
   shared_genes   <- intersect(rownames(mat_x), rownames(mat_y))
   shared_strains <- intersect(colnames(mat_x), colnames(mat_y))
+  # optional fixed strain set (e.g. common to every pair in a set of comparisons)
+  if (!is.null(strains)) {
+    stopifnot(all(strains %in% shared_strains))
+    shared_strains <- strains
+  }
 
   cat("\n---", label, "---\n")
   cat("Shared strains:", length(shared_strains), "\n")
@@ -185,12 +220,56 @@ rank_df    <- bind_rows(lapply(res, `[[`, "df"))    %>% mutate(comparison = fact
 rank_stats <- bind_rows(lapply(res, `[[`, "stats")) %>% mutate(comparison = factor(comparison, levels = lvl))
 ```
 
+# Negative control: condition-mismatched rank concordance
+
+If the high replicate concordance above just reflects that most genes' rank is
+driven by stable, condition-independent baseline expression (highly-expressed
+genes stay highly expressed almost everywhere), comparing *different*
+conditions should still show elevated Spearman r, just lower than matched
+replicates/platforms. Rather than averaging replicates before the cross-condition
+comparison (which could mask replicate-level noise), every YPD replicate is
+compared against every Fluconazole replicate individually, plus each YPD
+replicate against the (single-replicate) synthetic-complete scRNA-seq dataset.
+
+```{r run_negative_control}
+# Same strain set for all six comparisons, so differences in Spearman r are not
+# driven by which strains happen to overlap in each pair.
+neg_control_strains <- Reduce(intersect, lapply(
+  list(YPD1_norm, YPD2_norm, Flu1_norm, Flu2_norm, sc_norm), colnames))
+cat("Strains shared across all negative-control matrices:", length(neg_control_strains), "\n")
+
+neg_control_res <- list(
+  rank_concordance(YPD1_norm, Flu1_norm, "YPD.1 vs Fluconazole.1",
+                   "YPD.1", "Fluconazole.1", strains = neg_control_strains),
+  rank_concordance(YPD1_norm, Flu2_norm, "YPD.1 vs Fluconazole.2",
+                   "YPD.1", "Fluconazole.2", strains = neg_control_strains),
+  rank_concordance(YPD2_norm, Flu1_norm, "YPD.2 vs Fluconazole.1",
+                   "YPD.2", "Fluconazole.1", strains = neg_control_strains),
+  rank_concordance(YPD2_norm, Flu2_norm, "YPD.2 vs Fluconazole.2",
+                   "YPD.2", "Fluconazole.2", strains = neg_control_strains),
+  rank_concordance(YPD1_norm, sc_norm, "YPD.1 vs Synthetic complete",
+                   "YPD.1", "Synthetic complete", strains = neg_control_strains),
+  rank_concordance(YPD2_norm, sc_norm, "YPD.2 vs Synthetic complete",
+                   "YPD.2", "Synthetic complete", strains = neg_control_strains)
+)
+
+neg_control_stats <- bind_rows(lapply(neg_control_res, `[[`, "stats"))
+knitr::kable(neg_control_stats %>% select(-xlab, -ylab), digits = 3,
+             caption = "Negative control: condition-mismatched rank concordance (pairwise replicates)")
+
+write.csv(neg_control_stats %>% select(-xlab, -ylab),
+          file.path(OUT_DIR, "Fig1C_negative_control_summary_stats.csv"), row.names = FALSE)
+```
+
 # Figure 1C — ranked concordance panels
 ```{r theme}
-pub_theme <- theme_classic(base_size = 9, base_family = "Arial") +
+pub_theme <- theme_classic(base_size = 15, base_family = "Arial") +
   theme(
-    axis.title = element_text(size = 12,  face = "bold", color = "black"),
-    axis.text  = element_text(size = 11,  color = "black"),
+    axis.title = element_text(size = 15, face = "bold", color = "black",
+                              family = "Arial"),
+    axis.text  = element_text(size = 15, color = "black", family = "Arial"),
+    axis.text.x = element_text(size = 15, color = "black", family = "Arial",
+                               angle = 90, hjust = 1, vjust = 0.5),
     axis.line  = element_line(linewidth = 0.4, color = "black"),
     axis.ticks = element_line(linewidth = 0.35, color = "black"),
     panel.grid       = element_blank(),
@@ -209,9 +288,10 @@ panel_colors <- c(
 
 global_range <- range(c(rank_df$x, rank_df$y), na.rm = TRUE)
 
-make_panel <- function(cmp) {
-  d <- filter(rank_df,    comparison == cmp)
-  s <- filter(rank_stats, comparison == cmp)
+make_panel <- function(cmp, df = rank_df, stats = rank_stats, rng = global_range) {
+  global_range <- rng
+  d <- filter(df,    comparison == cmp)
+  s <- filter(stats, comparison == cmp)
   ggplot(d, aes(x = x, y = y, color = comparison)) +
     geom_point(alpha = 0.1, size = 0.3, shape = 16) +
     scale_color_manual(values = panel_colors, guide = "none") +
@@ -239,11 +319,94 @@ Scatter plots showing ranked gene expression concordance. For each condition, ge
 ggsave(file.path(OUT_DIR, "Fig1C_rank_concordance.pdf"), fig1c,
        width = 9, height = 3.4, units = "in")
 ggsave(file.path(OUT_DIR, "Fig1C_rank_concordance.tiff"), fig1c,
-       width = 9, height = 3.4, units = "in", dpi = 300,
-       device = "tiff", compression = "lzw")s
+       width = 9, height = 6, units = "in", dpi = 300,
+       device = "tiff", compression = "lzw")
 
 write.csv(rank_stats %>% select(-xlab, -ylab),
           file.path(OUT_DIR, "Fig1C_summary_stats.csv"), row.names = FALSE)
+```
+
+# Synthetic complete vs. Caudal (2024): sc2glu.2 alone vs integrated
+
+The Fig 1C panel above uses the integrated sc2glu.1 + sc2glu.2 dataset. Here the
+same comparison with sc2glu.2 only, next to the integrated version for reference
+(both with all strains, no cell-count filter).
+
+```{r sc2glu2_only_vs_bulk, fig.width = 6.5, fig.height = 3.4}
+sc_bulk_res <- list(
+  rank_concordance(bulk_tpm, sc2_norm, "sc2glu.2 vs. Caudal (2024)",
+                   "Caudal (2024)", "Synthetic complete (sc2glu.2)"),
+  rank_concordance(bulk_tpm, sc_norm, "Integrated sc2glu vs. Caudal (2024)",
+                   "Caudal (2024)", "Synthetic complete (integrated)")
+)
+sc_bulk_lvl   <- c("sc2glu.2 vs. Caudal (2024)", "Integrated sc2glu vs. Caudal (2024)")
+sc_bulk_df    <- bind_rows(lapply(sc_bulk_res, `[[`, "df"))    %>% mutate(comparison = factor(comparison, levels = sc_bulk_lvl))
+sc_bulk_stats <- bind_rows(lapply(sc_bulk_res, `[[`, "stats")) %>% mutate(comparison = factor(comparison, levels = sc_bulk_lvl))
+
+sc_bulk_range <- range(c(sc_bulk_df$x, sc_bulk_df$y), na.rm = TRUE)
+
+make_sc_bulk_panel <- function(cmp) {
+  d <- filter(sc_bulk_df,    comparison == cmp)
+  s <- filter(sc_bulk_stats, comparison == cmp)
+  ggplot(d, aes(x = x, y = y)) +
+    geom_point(alpha = 0.1, size = 0.3, shape = 16,
+               color = panel_colors[["Synthetic complete vs. Caudal (2024)"]]) +
+    annotate("text", x = Inf, y = -Inf,
+             label = paste0("Spearman r = ", round(s$spearman_r, 3),
+                            "\nn = ", s$n_strains, " strains"),
+             hjust = 1.1, vjust = -0.4, size = 4, fontface = "bold") +
+    scale_x_continuous(limits = sc_bulk_range, breaks = seq(0, sc_bulk_range[2], by = 1000),
+                       expand = expansion(mult = 0.02)) +
+    scale_y_continuous(limits = sc_bulk_range, breaks = seq(0, sc_bulk_range[2], by = 1000),
+                       expand = expansion(mult = 0.02)) +
+    coord_fixed() +
+    labs(x = s$xlab, y = s$ylab) +
+    pub_theme
+}
+
+fig1c_sc2glu2 <- wrap_plots(lapply(sc_bulk_lvl, make_sc_bulk_panel), nrow = 1)
+fig1c_sc2glu2
+
+ggsave(file.path(OUT_DIR, "Fig1C_rank_concordance_sc2glu2_only_vs_integrated.pdf"), fig1c_sc2glu2,
+       width = 6.5, height = 3.4, units = "in")
+ggsave(file.path(OUT_DIR, "Fig1C_rank_concordance_sc2glu2_only_vs_integrated.tiff"), fig1c_sc2glu2,
+       width = 6.5, height = 6, units = "in", dpi = 300,
+       device = "tiff", compression = "lzw")
+
+write.csv(sc_bulk_stats %>% select(-xlab, -ylab),
+          file.path(OUT_DIR, "Fig1C_sc2glu2_only_vs_integrated_bulk_stats.csv"), row.names = FALSE)
+```
+
+# Figure 1C — sc2glu.2 only (no integration)
+
+Same three panels as Figure 1C, with panel (iii) using sc2glu.2 alone instead of
+the integrated sc2glu.1 + sc2glu.2 dataset.
+
+```{r fig1c_sc2glu2_only}
+res_sc2 <- list(
+  res[[1]],   # YPD replicates
+  res[[2]],   # Fluconazole replicates
+  rank_concordance(bulk_tpm, sc2_norm, "Synthetic complete vs. Caudal (2024)",
+                   "Caudal (2024)", "Synthetic complete\n(sc2glu.2)")
+)
+rank_df_sc2   <- bind_rows(lapply(res_sc2, `[[`, "df"))    %>% mutate(comparison = factor(comparison, levels = lvl))
+rank_stats_sc2 <- bind_rows(lapply(res_sc2, `[[`, "stats")) %>% mutate(comparison = factor(comparison, levels = lvl))
+range_sc2      <- range(c(rank_df_sc2$x, rank_df_sc2$y), na.rm = TRUE)
+
+fig1c_sc2 <- wrap_plots(lapply(lvl, make_panel, df = rank_df_sc2, stats = rank_stats_sc2,
+                               rng = range_sc2), nrow = 1)
+fig1c_sc2
+
+ggsave(file.path(OUT_DIR, "Fig1C_rank_concordance_sc2glu2_only.pdf"), fig1c_sc2,
+       width = 9, height = 3.4, units = "in", device = cairo_pdf)
+ggsave(file.path(OUT_DIR, "Fig1C_rank_concordance_sc2glu2_only.png"), fig1c_sc2,
+       width = 9, height = 3.4, units = "in", dpi = 300)
+ggsave(file.path(OUT_DIR, "Fig1C_rank_concordance_sc2glu2_only.tiff"), fig1c_sc2,
+       width = 9, height = 6, units = "in", dpi = 300,
+       device = "tiff", compression = "lzw")
+
+write.csv(rank_stats_sc2 %>% select(-xlab, -ylab),
+          file.path(OUT_DIR, "Fig1C_summary_stats_sc2glu2_only.csv"), row.names = FALSE)
 ```
 
 
@@ -385,14 +548,15 @@ knitr::kable(
 ```
 
 ```{r}
+# cairo_pdf: the default pdf device fails on these plots with "invalid font type"
 ggsave(file.path(OUT_DIR, "Fig1D_YPD_strain_concordance.pdf"), fig1d_YPD,
-       width = 4.5, height = 3.5, units = "in")
+       width = 4.5, height = 3.5, units = "in", device = cairo_pdf)
 
 ggsave(file.path(OUT_DIR, "Fig1D_YPD_strain_concordance.tiff"), fig1d_YPD,
        width = 4.5, height = 3.5, units = "in", dpi = 300)
 
 ggsave(file.path(OUT_DIR, "FigS_Flu_strain_concordance.pdf"), figS_Flu,
-       width = 4.5, height = 3.5, units = "in")
+       width = 4.5, height = 3.5, units = "in", device = cairo_pdf)
 ggsave(file.path(OUT_DIR, "FigS_Flu_strain_concordance.tiff"), figS_Flu,
        width = 4.5, height = 3.5, units = "in", dpi = 300,
        device = "tiff", compression = "lzw")

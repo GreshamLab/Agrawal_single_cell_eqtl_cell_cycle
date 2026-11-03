@@ -1,0 +1,42 @@
+# Code-only repository: ignore everything, then allow code and small config files.
+# Data, results, figures and rendered reports stay on the HPC and are not pushed.
+*
+!*/
+!.gitignore
+!*.Rmd
+!*.R
+!*.py
+!*.sh
+!*.sbatch
+!*.md
+!Figure.4/conditions.tsv
+!pipeline/**/*.bash
+!pipeline/**/*.tsv
+
+# outdated or backup code
+OLD_*
+**/OLD_*/
+*.before_*
+*.backup_*
+*backup*
+
+# folders that only hold outputs
+**/results/
+**/result/
+
+# datasets not in the paper (integrated datasets, sc2glu.1 with few cells)
+Figure.4/Fig.4-YPD_integrated/
+Figure.4/Fig.4-Flu_integrated/
+Figure.4/Fig.4-sc2glu_integrated/
+Figure.4/Fig.4-sc2glu.1_only/
+
+# Figure 5: only the harmonic analysis and the YPD.2 comparison make the current figure
+Figure.5/2.cell_cycle_time_assignment_to_single_cells/codes/Fig5.cell_cycle_time_assignment_and_r2.Rmd
+Figure.5/2.cell_cycle_time_assignment_to_single_cells/codes/Fig5.cellcyle_time_assignment_updated.Rmd
+Figure.5/2.cell_cycle_time_assignment_to_single_cells/codes/Fig5-which-genes-are-variable.Rmd
+Figure.5/2.cell_cycle_time_assignment_to_single_cells/codes/go_enrichment.*
+Figure.5/2.cell_cycle_time_assignment_to_single_cells/codes/hhf1_variation_plots.*
+Figure.5/2.cell_cycle_time_assignment_to_single_cells/codes/presentation_marker_plots.*
+Figure.5/2.cell_cycle_time_assignment_to_single_cells/codes/split_half_reliability.*
+Figure.5/2.cell_cycle_time_assignment_to_single_cells/codes/strain_colored_variation_plots.*
+Figure.5/2.cell_cycle_time_assignment_to_single_cells/codes/render_fig5_all.sbatch

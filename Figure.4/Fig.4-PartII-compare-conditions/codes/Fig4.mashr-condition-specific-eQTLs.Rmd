@@ -1,0 +1,1291 @@
+---
+title: "Shared and condition-specific eQTLs across conditions (mashr)"
+author: "Akriti Agrawal"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    theme: flatly
+    code_folding: show
+---
+
+**Question.** Are there condition-specific eQTLs, i.e. genetic variants whose effect on gene
+expression differs between conditions, and which eQTLs are shared?
+
+**Method: mashr** (multivariate adaptive shrinkage; Urbut et al. 2019, *Nature Genetics*). mashr
+takes the effect size (beta) and its standard error (SE) of the same gene-variant pairs in all
+conditions at once, from each condition's FaST-LMM GWAS (`SnpWeight`, `SnpWeightSE` in the
+`first_assoc` files). It
+
+1. learns from the data which sharing patterns are common (e.g. "same effect everywhere",
+   "only in fluconazole", "only in galactose") and how correlated the noise is between conditions
+   (many strains were profiled in several conditions);
+2. re-estimates every effect using these patterns (shrinkage). Noisy estimates from ~55-80 strains
+   are pulled towards the pattern they fit best, which corrects the winner's curse (effects
+   overestimated in the condition where the eQTL was found);
+3. reports, for every eQTL and condition, the **lfsr** (local false sign rate: the probability that
+   the sign of the effect is wrong; lfsr < 0.05 = confidently non-zero, like an FDR), and the
+   posterior effect size.
+
+mashr works on GWAS summary statistics, so conditions may have different strains and numbers of
+strains: fewer strains give larger SEs and more shrinkage. It does not need the strains to be shared.
+
+**Two sets of gene-variant pairs** (the same pairs in every condition, any p-value):
+
+- *Strong set*: one lead variant per gene (lowest p-value) among the eQTLs significant in **at
+  least one** condition of the run. Results are reported for these.
+- *Random set*: a random sample of all tested gene-variant pairs (mostly no effect). Used to learn
+  the noise correlation between conditions and the weights of the sharing patterns without the
+  bias of selecting large effects.
+
+**Runs.** Fluconazole_16ug and fluconazole_8ug are two drug doses, not replicates, and are
+separate conditions. Integrated datasets are left out (they reuse the replicates' cells).
+
+| Run | Conditions |
+|---|---|
+| A (main) | YPD.1, YPD.2, fluconazole_16ug, fluconazole_8ug, synthetic complete (sc2glu.2), galactose |
+
+**Update 2026-10-27:** run C (YPD + fluconazole only, robustness check) is commented out and not
+reported in the paper; its code is kept below as comments. Its cached fit
+(`../results/mashr/mash_C_YPD_flu.rds`) and earlier outputs are left on disk but no longer used.
+
+**Definitions used for the results** (following Urbut et al. 2019):
+
+- *Significant in a condition*: lfsr < 0.05.
+- *Shared by sign*: significant in at least one of two conditions and same sign of the posterior
+  effect in both.
+- *Shared by magnitude*: same sign and posterior effects within a factor of 2 of each other.
+- *Condition-specific (by magnitude)*: significant in that condition, and its posterior effect is
+  **not** shared by magnitude with any other condition of the run (in every other condition it is
+  less than half as large, more than twice as large, or of opposite sign).
+- *Significant in only one condition*: lfsr < 0.05 in that condition and >= 0.05 in all others
+  (a stricter, power-dependent definition, shown for comparison).
+- *Fluconazole-specific*: significant in a fluconazole dose and not shared by magnitude with
+  either YPD replicate.
+
+The YPD.1 vs YPD.2 pair is the built-in reference: replicates of the same condition should share
+almost every eQTL, so sharing between different conditions is read against it.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(tidyverse)
+source("/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Agrawal_single_cell_eqtl_cell_cycle/shared_code/arial_font.R")  # Arial for all plots, as in Figs 2 and 5
+library(data.table)
+library(parallel)
+library(patchwork)
+library(mashr)
+
+bind_rows <- dplyr::bind_rows
+select    <- dplyr::select
+filter    <- dplyr::filter
+rename    <- dplyr::rename
+```
+
+# 1. Datasets and inputs
+
+```{r config}
+ROOT <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all"
+OUTPUT_DIR <- "../results/mashr"
+dir.create(OUTPUT_DIR, showWarnings = FALSE, recursive = TRUE)
+N_CORES <- as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", "16"))
+set.seed(42)
+
+SNP_DIR   <- "results_SNPs_96_MAF15_from_969_strains_with_double_id_final_filtered_for_ncount_less_than_5"
+INDEL_DIR <- "results_Indels_96_MAF15_with_double_id_final_filtered_for_ncount_less_than_5"
+CNV_DIR   <- "results_CNVs_with_double_id_is_not_needed_final_filtered_for_ncount_less_than_5_run_from_new_plink_files_no_chr17"   # CNV GWAS re-run without chr17
+SV_DIR    <- "results_SVs_with_double_id_is_not_needed_final_filtered_for_ncount_less_than_5_run_from_new_plink_files"
+VARIANTS  <- c("SNPs", "InDels", "SVs", "CNVs")
+
+make_cond <- function(res, tag, indel_dir = INDEL_DIR,
+                      indel_file = paste0("all_signif_Indels_", tag, "_96_MAF15_with_double_id_final_filtered_for_ncount_less_than_5_with_threshold.txt")) {
+  res <- file.path(ROOT, res)
+  list(signif = c(
+         SNPs   = file.path(res, paste0("all_signif_SNPs_", tag, "_96_MAF15_from_969_strains_with_double_id_final_filtered_for_ncount_less_than_5_with_threshold.txt")),
+         InDels = file.path(res, indel_file),
+         SVs    = file.path(res, paste0("all_signif_SVs_", tag, "_with_double_id_is_not_needed_final_filtered_for_ncount_less_than_5_run_from_new_plink_files_with_threshold.txt")),
+         CNVs   = file.path(res, paste0("all_signif_CNV_", tag, "_with_double_id_is_not_needed_final_filtered_for_ncount_less_than_5_run_from_new_plink_files_no_chr17_with_threshold.txt"))),
+       dirs = c(SNPs = file.path(res, SNP_DIR), InDels = file.path(res, indel_dir),
+                SVs = file.path(res, SV_DIR), CNVs = file.path(res, CNV_DIR)))
+}
+
+CONDS <- list(
+  YPD.1     = make_cond("YPD.1/fastlmm/results", "YPD.1",   # YPD.1's InDel run: other folder, same indels.96samples
+                        indel_dir  = "results_Indels_with_double_id_final_filtered_for_ncount_less_than_5",
+                        indel_file = "all_signif_Indels_YPD.1_with_double_id_final_filtered_for_ncount_less_than_5_with_threshold.txt"),
+  YPD.2     = make_cond("YPD.2/fastlmm/results", "YPD.2"),
+  Flu_16ug  = make_cond("Flu.1/fastlmm/results", "Flu.1"),     # fluconazole 16 ug/ml
+  Flu_8ug   = make_cond("Flu.2/fastlmm/results", "Flu.2"),     # fluconazole 8 ug/ml
+  sc2glu.2  = make_cond("sc2glu.2/fastlmm_sc2.glu.2_only/results", "sc2glu.2_only"),
+  galactose = make_cond("scgal.1/fastlmm/results", "scgal.1"))
+LABELS <- c(YPD.1 = "YPD.1", YPD.2 = "YPD.2", Flu_16ug = "fluconazole_16ug", Flu_8ug = "fluconazole_8ug",
+            sc2glu.2 = "synthetic complete with glucose", galactose = "synthetic complete with galactose")
+
+RUNS <- list(
+  A_main          = c("YPD.1", "YPD.2", "Flu_16ug", "Flu_8ug", "sc2glu.2", "galactose"))
+  # C_YPD_flu     = c("YPD.1", "YPD.2", "Flu_16ug", "Flu_8ug"))   # run C, not reported (2026-10-27)
+RUN_LABELS <- c(A_main = "A: main (6 conditions)")
+                # C_YPD_flu = "C: YPD + fluconazole (4 conditions)")
+
+missing <- c(unlist(lapply(CONDS, `[[`, "signif")), unlist(lapply(CONDS, `[[`, "dirs")))
+missing <- missing[!file.exists(missing)]
+if (length(missing)) stop("Missing inputs:\n", paste(missing, collapse = "\n"))
+
+# significant eQTLs, one row per gene-variant pair and variant type
+signif <- lapply(CONDS, function(cfg) bind_rows(lapply(VARIANTS, function(vt)
+  fread(cfg$signif[[vt]], sep = "\t", quote = "", data.table = FALSE) %>%
+    transmute(Gene = Source_Phenotype, SNP, Variant_Type = vt, P = PValue, thr = thr_perm))) %>%
+  distinct(Gene, SNP, Variant_Type, .keep_all = TRUE))
+knitr::kable(tibble(condition = LABELS[names(signif)], significant_eQTLs = sapply(signif, nrow),
+                    genes_with_eQTL = sapply(signif, function(d) n_distinct(d$Gene))),
+             caption = "Significant eQTLs per condition (from each condition's GWAS)")
+```
+
+# 2. Strong and random sets
+
+```{r sets}
+# strong set: lead variant (lowest p) per gene among eQTLs significant in >= 1 condition of the run
+lead_per_gene <- function(conds) bind_rows(signif[conds]) %>%
+  group_by(Gene) %>% slice_min(P, n = 1, with_ties = FALSE) %>% ungroup() %>%
+  select(Gene, SNP, Variant_Type)
+strong <- lapply(RUNS, lead_per_gene)
+
+# random set: per variant type, random genes and random variants from YPD.1's full GWAS output
+N_RANDOM_GENES <- 1000; N_VAR_PER_GENE <- 5
+RANDOM_SEED <- 42
+random_cache <- file.path(OUTPUT_DIR, "random_pairs.rds")
+if (file.exists(random_cache)) {
+  random_pairs <- readRDS(random_cache)
+} else {
+  # Reproducible draw: genes are sorted before sampling and every draw has its own fixed seed, so
+  # the same pairs are drawn whatever the earlier random calls, file-listing order or number of
+  # parallel workers (forked workers do not share the parent's random-number stream).
+  # The pairs used in the paper (drawn 2026-10-26 with the earlier code) are in random_pairs.rds;
+  # this code only runs if that file is missing, and would then draw a different, reproducible set.
+  random_pairs <- bind_rows(lapply(seq_along(VARIANTS), function(v) {
+    vt <- VARIANTS[v]; d <- CONDS$YPD.1$dirs[[vt]]
+    genes <- sort(list.dirs(d, full.names = FALSE, recursive = FALSE))
+    set.seed(RANDOM_SEED + v)
+    genes <- sample(genes, min(N_RANDOM_GENES, length(genes)))
+    bind_rows(mclapply(seq_along(genes), function(i) {
+      g <- genes[i]
+      f <- file.path(d, g, paste0(g, ".first_assoc.txt"))
+      if (!file.exists(f)) return(NULL)
+      snps <- tryCatch(sort(fread(f, select = "SNP", showProgress = FALSE)$SNP), error = function(e) NULL)
+      if (!length(snps)) return(NULL)
+      set.seed(RANDOM_SEED + 1e5 * v + i)
+      tibble(Gene = g, SNP = sample(snps, min(N_VAR_PER_GENE, length(snps))), Variant_Type = vt)
+    }, mc.cores = N_CORES))
+  }))
+  saveRDS(random_pairs, random_cache)
+}
+
+knitr::kable(tibble(set = c(paste("strong,", RUN_LABELS[names(strong)]), "random"),
+                    gene_variant_pairs = c(sapply(strong, nrow), nrow(random_pairs))))
+```
+
+# 3. Extract beta and SE in every condition
+
+For every pair of the strong sets and the random set, the effect size and SE are read from each
+condition's full GWAS output (`first_assoc` files), whatever the p-value. Cached per condition
+to `extract_<condition>.rds`.
+
+```{r extract}
+all_pairs <- bind_rows(c(strong, list(random_pairs))) %>% distinct(Gene, SNP, Variant_Type)
+
+extract_condition <- function(cn) {
+  cache <- file.path(OUTPUT_DIR, paste0("extract_", cn, ".rds"))
+  if (file.exists(cache)) return(readRDS(cache))
+  jobs <- all_pairs %>% group_by(Variant_Type, Gene) %>% summarise(snps = list(SNP), .groups = "drop")
+  res <- mclapply(seq_len(nrow(jobs)), function(i) {
+    vt <- jobs$Variant_Type[i]; g <- jobs$Gene[i]
+    f <- file.path(CONDS[[cn]]$dirs[[vt]], g, paste0(g, ".first_assoc.txt"))
+    if (!file.exists(f)) return(NULL)
+    d <- tryCatch(fread(f, select = c("SNP", "SnpWeight", "SnpWeightSE", "PValue"), showProgress = FALSE),
+                  error = function(e) NULL)
+    if (is.null(d)) return(NULL)
+    d <- d[SNP %in% jobs$snps[[i]]]
+    if (!nrow(d)) return(NULL)
+    d[, `:=`(Gene = g, Variant_Type = vt)]
+  }, mc.cores = N_CORES)
+  ex <- rbindlist(res) %>% as.data.frame() %>% distinct(Gene, SNP, Variant_Type, .keep_all = TRUE)
+  saveRDS(ex, cache)
+  ex
+}
+extracted <- lapply(setNames(names(CONDS), names(CONDS)), extract_condition)
+knitr::kable(tibble(condition = LABELS[names(extracted)], pairs_found = sapply(extracted, nrow),
+                    of_total = nrow(all_pairs)))
+```
+
+# 4. Fit mashr
+
+Steps, following the mashr eQTL vignette:
+
+1. Noise correlation between conditions (`estimate_null_correlation_simple`) from the random set.
+2. Data-driven sharing patterns from the strong set: principal components (`cov_pca`) refined by
+   extreme deconvolution (`cov_ed`), plus the canonical patterns (`cov_canonical`: no sharing,
+   condition-specific for each condition, equal effects, simple correlations).
+3. Fit the mixture weights of these patterns on the random set (`mash`).
+4. Apply the fitted model to the strong set (`fixg = TRUE`) to get posterior effects and lfsr.
+
+Missing values (gene-variant pair not tested in a condition) are set to beta = 0 and SE = 1000
+in the strong set, so they carry no information; random-set pairs with any missing value are dropped.
+
+```{r fit}
+make_mats <- function(pairs, conds) {
+  key <- paste(pairs$Gene, pairs$SNP, pairs$Variant_Type, sep = "|")
+  B <- S <- matrix(NA_real_, length(key), length(conds), dimnames = list(key, conds))
+  for (cn in conds) {
+    e <- extracted[[cn]]
+    m <- match(key, paste(e$Gene, e$SNP, e$Variant_Type, sep = "|"))
+    B[, cn] <- e$SnpWeight[m]; S[, cn] <- e$SnpWeightSE[m]
+  }
+  bad <- is.na(B) | is.na(S) | !is.finite(S) | S <= 0
+  list(B = B, S = S, bad = bad)
+}
+
+fit_run <- function(run) {
+  cache <- file.path(OUTPUT_DIR, paste0("mash_", run, ".rds"))
+  if (file.exists(cache)) return(readRDS(cache))
+  conds <- RUNS[[run]]
+  ms <- make_mats(strong[[run]], conds)
+  n_missing_strong <- sum(rowSums(ms$bad) > 0)
+  ms$B[ms$bad] <- 0; ms$S[ms$bad] <- 1e3
+  mr <- make_mats(random_pairs, conds)
+  keep <- rowSums(mr$bad) == 0
+  mr$B <- mr$B[keep, , drop = FALSE]; mr$S <- mr$S[keep, , drop = FALSE]
+
+  d_tmp    <- mash_set_data(mr$B, mr$S)
+  Vhat     <- estimate_null_correlation_simple(d_tmp)
+  d_random <- mash_set_data(mr$B, mr$S, V = Vhat)
+  d_strong <- mash_set_data(ms$B, ms$S, V = Vhat)
+  U_pca <- cov_pca(d_strong, npc = min(5, length(conds) - 1))
+  U_ed  <- cov_ed(d_strong, U_pca)
+  U_c   <- cov_canonical(d_random)
+  m_random <- mash(d_random, Ulist = c(U_ed, U_c), outputlevel = 1)
+  m_strong <- mash(d_strong, g = get_fitted_g(m_random), fixg = TRUE)
+  out <- list(conds = conds, Vhat = Vhat, m_random = m_random, m_strong = m_strong,
+              n_strong = nrow(ms$B), n_missing_strong = n_missing_strong, n_random = nrow(mr$B))
+  saveRDS(out, cache)
+  out
+}
+fits <- lapply(setNames(names(RUNS), names(RUNS)), fit_run)
+
+# Strong-set eQTLs whose lead variant has no local / distant call are dropped from every result
+# below. These are CNVs of non-S288C ("YX") genes placed past an S288C chromosome end: they have no
+# reference position, and the same CNVs are left out of the variant counts (Supplementary Table 1).
+# With the pattern weights fixed (fitted on the random set), mashr computes each strong-set eQTL's
+# posterior on its own, so dropping rows after fitting gives the same results for the other eQTLs.
+ANNOT_DIRS <- c(YPD.1 = "Figure.3/Fig.3-Panel-A-C-D-cis-and-trans-eqtl-YPD-variant-type/results/YPD.1/annotations",
+                YPD.2 = "Figure.4/Fig.4-YPD.2/results/YPD.2/annotations",
+                Flu_16ug = "Figure.4/Fig.4-Flu.1/results/Flu.1/annotations",
+                Flu_8ug = "Figure.4/Fig.4-Flu.2/results/Flu.2/annotations",
+                sc2glu.2 = "Figure.4/Fig.4-sc2glu.2_only/results/sc2glu.2_only/annotations",
+                galactose = "Figure.4/Fig.4-scgal.1/results/scgal.1/annotations")
+ANNOT_FILES <- c(SNPs = "snp", InDels = "indel", SVs = "sv", CNVs = "cnv")
+annot <- bind_rows(lapply(names(ANNOT_DIRS), function(cn) bind_rows(imap(ANNOT_FILES, function(f, vt)
+  fread(file.path(ROOT, "Agrawal_single_cell_eqtl_cell_cycle", ANNOT_DIRS[[cn]], paste0(f, "_data_annotated_cis_trans.txt")),
+        sep = "\t", quote = "", select = c("Pheno", "SNP", "clump_members", "local_distant"), data.table = FALSE) %>%
+    mutate(Variant_Type = vt, dataset = cn)))))
+
+# every clump member gets its clump's call
+ld_calls <- annot %>%
+  mutate(member = strsplit(coalesce(clump_members, SNP), ";")) %>% unnest(member) %>%
+  distinct(Gene = Pheno, SNP = member, Variant_Type, local_distant)
+stopifnot(!any(duplicated(ld_calls %>% select(Gene, SNP, Variant_Type))))   # one call per gene-variant pair
+keep_called <- function(m) {
+  k <- rownames(m$result$PosteriorMean)
+  ok <- paste(k) %in% paste(ld_calls$Gene, ld_calls$SNP, ld_calls$Variant_Type, sep = "|")
+  for (nm in names(m$result)) if (is.matrix(m$result[[nm]])) m$result[[nm]] <- m$result[[nm]][ok, , drop = FALSE]
+  attr(m, "n_dropped") <- sum(!ok)
+  m
+}
+for (r in names(fits)) {
+  fits[[r]]$m_strong <- keep_called(fits[[r]]$m_strong)
+  fits[[r]]$n_dropped_no_call <- attr(fits[[r]]$m_strong, "n_dropped")
+  fits[[r]]$n_strong <- nrow(fits[[r]]$m_strong$result$PosteriorMean)
+}
+knitr::kable(tibble(run = RUN_LABELS[names(fits)],
+                    strong_eQTLs = sapply(fits, `[[`, "n_strong"),
+                    dropped_no_local_distant_call = sapply(fits, `[[`, "n_dropped_no_call"),
+                    strong_with_a_missing_condition = sapply(fits, `[[`, "n_missing_strong"),
+                    random_pairs_used = sapply(fits, `[[`, "n_random"),
+                    log_likelihood_random = sapply(fits, function(f) get_loglik(f$m_random))),
+             caption = "mashr fits")
+```
+
+# 5. Results per run
+
+```{r results-functions}
+lab <- function(x) unname(LABELS[x])
+
+# condition-specific calls from posterior means and lfsr
+specific_calls <- function(f) {
+  pm <- get_pm(f$m_strong); lf <- get_lfsr(f$m_strong); conds <- f$conds
+  sig <- lf < 0.05
+  shared_mag <- function(a, b) sign(a) == sign(b) & abs(a / b) >= 0.5 & abs(a / b) <= 2
+  out <- lapply(conds, function(cn) {
+    others <- setdiff(conds, cn)
+    not_shared <- sapply(others, function(o) !shared_mag(pm[, o], pm[, cn]))
+    tibble(eQTL = rownames(pm), condition = cn, significant = sig[, cn],
+           specific_by_magnitude = sig[, cn] & apply(not_shared, 1, all),
+           significant_only_here = sig[, cn] & rowSums(sig[, others, drop = FALSE]) == 0)
+  })
+  bind_rows(out)
+}
+
+flu_specific <- function(f) {
+  pm <- get_pm(f$m_strong); lf <- get_lfsr(f$m_strong)
+  shared_mag <- function(a, b) sign(a) == sign(b) & abs(a / b) >= 0.5 & abs(a / b) <= 2
+  dose_spec <- function(d) lf[, d] < 0.05 & !shared_mag(pm[, "YPD.1"], pm[, d]) & !shared_mag(pm[, "YPD.2"], pm[, d])
+  tibble(eQTL = rownames(pm),
+         fluconazole_16ug_specific = dose_spec("Flu_16ug"),
+         fluconazole_8ug_specific  = dose_spec("Flu_8ug"),
+         both_doses_specific = dose_spec("Flu_16ug") & dose_spec("Flu_8ug")) %>%
+    separate(eQTL, c("Gene", "SNP", "Variant_Type"), sep = "\\|", remove = FALSE)
+}
+
+sharing_heatmap <- function(mat, title) {
+  d <- as.data.frame(as.table(mat)) %>% setNames(c("c1", "c2", "share")) %>%
+    mutate(c1 = factor(lab(as.character(c1)), lab(rownames(mat))), c2 = factor(lab(as.character(c2)), rev(lab(rownames(mat)))))
+  ggplot(d, aes(c1, c2, fill = share)) + geom_tile(colour = "white") +
+    geom_text(aes(label = sprintf("%.2f", share)), size = 3.4) +
+    scale_fill_gradient(low = "white", high = "#2C7FB8", limits = c(0, 1), name = "Proportion\nshared") +
+    labs(title = title, x = NULL, y = NULL) + theme_minimal(base_size = 11) +
+    theme(axis.text.x = element_text(angle = 35, hjust = 1), plot.title = element_text(face = "bold", hjust = 0.5))
+}
+```
+
+```{r results, results = "asis", fig.width = 15, fig.height = 6.5}
+summary_rows <- list(); flu_sets <- list()
+for (run in names(fits)) {
+  f <- fits[[run]]; conds <- f$conds
+  cat("\n\n## ", RUN_LABELS[[run]], "\n\n", sep = "")
+
+  # mixture weights: which sharing patterns does the data support?
+  pi_hat <- get_estimated_pi(f$m_random)
+  cat("\n**Weights of the sharing patterns** (fitted on the random set; `null` = no effect).\n\n")
+  print(knitr::kable(tibble(pattern = names(pi_hat), weight = round(pi_hat, 4)) %>% arrange(desc(weight)) %>% head(12)))
+
+  # how many conditions is each eQTL significant in?
+  lf <- get_lfsr(f$m_strong)
+  n_sig <- rowSums(lf < 0.05)
+  cat("\n\n**Number of conditions in which each eQTL is significant (lfsr < 0.05)**\n\n")
+  print(knitr::kable(as.data.frame(table(n_conditions_significant = n_sig))))
+
+  # per-condition counts
+  calls <- specific_calls(f)
+  per_cond <- calls %>% group_by(condition) %>%
+    summarise(significant = sum(significant), specific_by_magnitude = sum(specific_by_magnitude),
+              significant_only_here = sum(significant_only_here), .groups = "drop") %>%
+    mutate(pct_specific_by_magnitude = 100 * specific_by_magnitude / significant,
+           condition = factor(condition, conds)) %>% arrange(condition) %>%
+    mutate(condition = lab(as.character(condition)))
+  cat("\n\n**Per condition** (strong-set eQTLs)\n\n")
+  print(knitr::kable(per_cond, digits = 1))
+  summary_rows[[run]] <- per_cond %>% mutate(run = RUN_LABELS[[run]])
+
+  # fluconazole-specific eQTLs
+  fs <- flu_specific(f)
+  flu_sets[[run]] <- fs
+  cat(sprintf("\n\n**Fluconazole-specific eQTLs** (significant in the dose, not shared by magnitude with YPD.1 or YPD.2): fluconazole_16ug %d, fluconazole_8ug %d, both doses %d.\n\n",
+              sum(fs$fluconazole_16ug_specific), sum(fs$fluconazole_8ug_specific), sum(fs$both_doses_specific)))
+
+  # pairwise sharing
+  sh_mag  <- get_pairwise_sharing(f$m_strong, factor = 0.5)
+  sh_sign <- get_pairwise_sharing(f$m_strong, factor = 0)
+  write.csv(sh_mag,  file.path(OUTPUT_DIR, paste0("pairwise_sharing_magnitude_", run, ".csv")))
+  write.csv(sh_sign, file.path(OUTPUT_DIR, paste0("pairwise_sharing_sign_", run, ".csv")))
+  p <- sharing_heatmap(sh_sign, "Shared by sign") + sharing_heatmap(sh_mag, "Shared by magnitude (within 2-fold)") +
+    plot_annotation(title = RUN_LABELS[[run]], theme = theme(plot.title = element_text(face = "bold", hjust = 0.5)))
+  print(p)
+  ggsave(file.path(OUTPUT_DIR, paste0("Fig_pairwise_sharing_", run, ".tiff")), p, width = 15, height = 6.5,
+         dpi = 600, compression = "lzw", bg = "white")
+
+  # per-eQTL table
+  pm <- get_pm(f$m_strong); psd <- get_psd(f$m_strong)
+  colnames(pm)  <- paste0("posterior_beta_", colnames(pm))
+  colnames(lf)  <- paste0("lfsr_", colnames(lf))
+  colnames(psd) <- paste0("posterior_sd_", colnames(psd))
+  tab <- tibble(eQTL = rownames(pm)) %>% separate(eQTL, c("Gene", "SNP", "Variant_Type"), sep = "\\|", remove = FALSE) %>%
+    bind_cols(as_tibble(pm), as_tibble(psd), as_tibble(lf)) %>%
+    mutate(n_conditions_significant = n_sig) %>%
+    left_join(calls %>% filter(specific_by_magnitude) %>% group_by(eQTL) %>%
+                summarise(specific_to = paste(lab(condition), collapse = "; "), .groups = "drop"), by = "eQTL") %>%
+    left_join(fs %>% select(eQTL, fluconazole_16ug_specific, fluconazole_8ug_specific, both_doses_specific), by = "eQTL")
+  write.csv(tab, file.path(OUTPUT_DIR, paste0("mash_results_", run, ".csv")), row.names = FALSE)
+}
+```
+
+# 6. Per-condition summary and key pairwise sharing
+
+Per-condition results and the sharing of the key pairs (YPD replicates, the two fluconazole doses,
+each dose vs each YPD replicate) in run A. The comparison with run C (YPD + fluconazole only) is
+commented out (2026-10-27).
+
+```{r compare-runs, fig.width = 13, fig.height = 6}
+cmp <- bind_rows(summary_rows)
+knitr::kable(cmp %>% select(run, condition, significant, specific_by_magnitude, pct_specific_by_magnitude,
+                            significant_only_here), digits = 1,
+             caption = "Per-condition results")
+write.csv(cmp, file.path(OUTPUT_DIR, "per_condition_summary_all_runs.csv"), row.names = FALSE)
+
+# key pairwise sharing values across runs (by magnitude)
+pairs_of_interest <- list(c("YPD.1", "YPD.2"), c("Flu_16ug", "Flu_8ug"), c("Flu_16ug", "YPD.1"), c("Flu_16ug", "YPD.2"),
+                          c("Flu_8ug", "YPD.1"), c("Flu_8ug", "YPD.2"))
+share_tab <- bind_rows(lapply(names(fits), function(run) {
+  sm <- get_pairwise_sharing(fits[[run]]$m_strong, factor = 0.5)
+  ss <- get_pairwise_sharing(fits[[run]]$m_strong, factor = 0)
+  bind_rows(lapply(pairs_of_interest, function(p) tibble(run = RUN_LABELS[[run]], pair = paste(lab(p[1]), "vs", lab(p[2])),
+                                                         shared_by_sign = ss[p[1], p[2]], shared_by_magnitude = sm[p[1], p[2]])))
+}))
+knitr::kable(share_tab, digits = 2, caption = "Pairwise sharing (first row: YPD replicate reference)")
+write.csv(share_tab, file.path(OUTPUT_DIR, "pairwise_sharing_key_pairs_all_runs.csv"), row.names = FALSE)
+
+# Run C not reported (2026-10-27): overlap of fluconazole-specific eQTLs between runs A and C
+# flu_ids <- lapply(flu_sets, function(fs) list(d16 = fs$eQTL[fs$fluconazole_16ug_specific],
+#                                               d8 = fs$eQTL[fs$fluconazole_8ug_specific],
+#                                               both = fs$eQTL[fs$both_doses_specific]))
+# ov <- bind_rows(lapply(c("d16", "d8", "both"), function(k) tibble(
+#   set = c(d16 = "fluconazole_16ug-specific", d8 = "fluconazole_8ug-specific", both = "specific at both doses")[[k]],
+#   A = length(flu_ids$A_main[[k]]), C = length(flu_ids$C_YPD_flu[[k]]),
+#   A_and_C = length(intersect(flu_ids$A_main[[k]], flu_ids$C_YPD_flu[[k]])))))
+# knitr::kable(ov, caption = "Fluconazole-specific eQTLs: number per run and overlap between runs")
+# write.csv(ov, file.path(OUTPUT_DIR, "fluconazole_specific_overlap_runs.csv"), row.names = FALSE)
+#
+# robust <- intersect(flu_ids$A_main$d16, flu_ids$C_YPD_flu$d16)
+# robust8 <- intersect(flu_ids$A_main$d8, flu_ids$C_YPD_flu$d8)
+# write.csv(tibble(eQTL = c(robust, robust8), dose = c(rep("fluconazole_16ug", length(robust)), rep("fluconazole_8ug", length(robust8)))) %>%
+#             separate(eQTL, c("Gene", "SNP", "Variant_Type"), sep = "\\|", remove = FALSE),
+#           file.path(OUTPUT_DIR, "fluconazole_specific_eQTLs_robust_A_and_C.csv"), row.names = FALSE)
+```
+
+# 7. Dataset quality: cells and sequencing depth per dataset
+
+Expression of each strain is a pseudobulk (sum over its cells). Its precision depends on the number
+of cells per strain and the reads (UMIs) per cell. Because expression is rank-normalised (INT) per
+condition, a noisier dataset gives *smaller* standardised effect sizes even if the true genetic
+effect is the same: measurement noise adds non-genetic variance. Numbers are from the filtered
+single-cell objects used for the pseudobulks (`Na_va_data_subsetted.rds`).
+
+```{r dataset-qc}
+QC_DIRS <- c(YPD.1 = "YPD.1", YPD.2 = "YPD.2", Flu_16ug = "Flu.1", Flu_8ug = "Flu.2", sc2glu.2 = "sc2glu.2", galactose = "scgal.1")
+qc_cache <- file.path(OUTPUT_DIR, "dataset_qc.rds")
+if (file.exists(qc_cache)) {
+  qc <- readRDS(qc_cache)
+} else {
+  qc <- bind_rows(lapply(names(QC_DIRS), function(k) {
+    o <- readRDS(file.path(ROOT, QC_DIRS[[k]], "gene_expression_analysis/output_from_pseudobulk_fastlmm/Na_va_data_subsetted.rds"))
+    m <- o@meta.data; rm(o); gc()
+    ps <- m %>% group_by(strain = SNG.BEST.GUESS) %>% summarise(cells = n(), umi = sum(nCount_RNA), .groups = "drop")
+    tibble(dataset = k, cells = nrow(m), strains = nrow(ps), median_cells_per_strain = median(ps$cells),
+           strains_with_lt20_cells = sum(ps$cells < 20), median_UMI_per_cell = median(m$nCount_RNA),
+           median_genes_per_cell = median(m$nFeature_RNA), median_UMI_per_strain = median(ps$umi))
+  }))
+  saveRDS(qc, qc_cache)
+}
+fA <- fits$A_main
+eff <- apply(abs(get_pm(fA$m_strong)), 2, median)
+qc <- qc %>% mutate(median_abs_posterior_beta_runA = eff[dataset], condition = lab(dataset)) %>%
+  relocate(condition) %>% select(-dataset) %>% arrange(desc(median_UMI_per_strain))
+write.csv(qc, file.path(OUTPUT_DIR, "dataset_qc.csv"), row.names = FALSE)
+knitr::kable(qc, digits = 3, format.args = list(big.mark = ","),
+             caption = "Cells, depth and median effect size per dataset (sorted by UMIs per strain)")
+```
+
+Effect sizes follow sequencing depth: the deepest datasets (YPD.1, YPD.2) have the largest
+standardised effects and the shallowest (fluconazole_16ug, galactose) the smallest. Weaker effects in
+a condition can therefore reflect less precise expression measurement rather than biology.
+
+# 8. Condition-specific eQTLs defined with replicates
+
+Single-dataset calls (Section 5) are dominated by dataset-specific signals (e.g. YPD.2). Here a
+condition-specific eQTL must be supported by all datasets of that condition:
+
+- *YPD-specific*: significant (lfsr < 0.05) in **both** YPD replicates and not shared by magnitude
+  (same sign, within 2-fold) with any other condition.
+- *Fluconazole-specific*: significant at **both** doses and not shared by magnitude with any other
+  condition (YPD replicates, synthetic complete, galactose). In run A this is the same set of genes
+  as "not shared with either YPD replicate" (checked 2026-10-28), so only one call is shown.
+- *Galactose- / synthetic-complete-specific*: significant in that dataset and not shared by
+  magnitude with any other. Each condition has one dataset, so these calls are not confirmed by a
+  replicate.
+- *Replicate noise*: the same rule applied between the two YPD replicates (significant in one, not
+  shared with the other): the number of "specific" calls expected without any change of condition.
+
+```{r replicate-consistent}
+rep_calls <- function(run) {
+  f <- fits[[run]]; pm <- get_pm(f$m_strong); lf <- get_lfsr(f$m_strong); conds <- f$conds
+  sg <- function(c) lf[, c] < 0.05
+  sh <- function(a, b) sign(pm[, a]) == sign(pm[, b]) & abs(pm[, b] / pm[, a]) >= 0.5 & abs(pm[, b] / pm[, a]) <= 2
+  nonY <- setdiff(conds, c("YPD.1", "YPD.2")); nonF <- setdiff(conds, c("Flu_16ug", "Flu_8ug"))
+  out <- list(
+    "YPD-specific (both YPD replicates)" = sg("YPD.1") & sg("YPD.2") & Reduce(`&`, lapply(nonY, function(o) !sh("YPD.1", o) & !sh("YPD.2", o))),
+    # not shared with any other condition; same 9 genes as "not shared with either YPD replicate" in run A
+    "Fluconazole-specific (both doses)" =
+      sg("Flu_16ug") & sg("Flu_8ug") & Reduce(`&`, lapply(nonF, function(o) !sh("Flu_16ug", o) & !sh("Flu_8ug", o))),
+    "Galactose-specific" = if ("galactose" %in% conds)
+      sg("galactose") & Reduce(`&`, lapply(setdiff(conds, "galactose"), function(o) !sh("galactose", o))) else NULL,
+    "Synthetic-complete-specific" = if ("sc2glu.2" %in% conds)
+      sg("sc2glu.2") & Reduce(`&`, lapply(setdiff(conds, "sc2glu.2"), function(o) !sh("sc2glu.2", o))) else NULL,
+    "Replicate noise: significant in YPD.1, not shared with YPD.2" = sg("YPD.1") & !sh("YPD.1", "YPD.2"),
+    "Replicate noise: significant in YPD.2, not shared with YPD.1" = sg("YPD.2") & !sh("YPD.2", "YPD.1"))
+  out <- Filter(Negate(is.null), out)
+  tibble(call = names(out), n = sapply(out, sum), run = RUN_LABELS[[run]])
+}
+rc <- bind_rows(lapply(names(fits), rep_calls)) %>% pivot_wider(names_from = run, values_from = n)
+# y-axis labels of the figures (9.6, 9.6b): the legend says "Condition-specific", so drop "-specific"
+call_axis_label <- function(x) recode(x,
+  "YPD-specific (both YPD replicates)" = "YPD (both replicates)",
+  "Fluconazole-specific (both doses)"  = "Fluconazole (both doses)",
+  "Galactose-specific"                 = "Synthetic complete with galactose",
+  "Synthetic-complete-specific"        = "Synthetic complete with glucose")
+write.csv(rc, file.path(OUTPUT_DIR, "replicate_consistent_condition_specific_calls.csv"), row.names = FALSE)
+knitr::kable(rc, caption = "Condition-specific eQTLs (genes) defined with replicates, vs replicate noise")
+```
+
+# 9. Figures
+
+Figures modelled on Urbut et al. (2019), Figs. 2-4. Run A (six conditions) unless stated. All are
+saved to `results/mashr/` as TIFF (600 dpi) and PNG.
+
+```{r fig-setup}
+COND_COLS <- c("YPD.1" = "#81C784", "YPD.2" = "#2E7D32", "fluconazole_16ug" = "#BA68C8",
+               "fluconazole_8ug" = "#6A1B9A", "synthetic complete with glucose" = "#E53935", "synthetic complete with galactose" = "#F9C80E")
+save_fig <- function(p, name, w, h) {
+  ggsave(file.path(OUTPUT_DIR, paste0(name, ".tiff")), p, width = w, height = h, dpi = 600, compression = "lzw", bg = "white")
+  ggsave(file.path(OUTPUT_DIR, paste0(name, ".png")),  p, width = w, height = h, dpi = 200, bg = "white")
+}
+fA <- fits$A_main
+condsA <- fA$conds
+piA <- get_estimated_pi(fA$m_random)
+UA  <- fA$m_random$fitted_g$Ulist
+```
+
+## 9.1 Weights of the sharing patterns
+
+How common each pattern is among all gene-variant pairs (fitted on the random set). `null` = no
+effect; `ED_*` = patterns learned from the data; `equal_effects` = the same effect in every
+condition; a condition name = an effect in that condition only.
+
+```{r fig-weights, fig.width = 9, fig.height = 5.5}
+w <- tibble(pattern = names(piA), weight = piA) %>%
+  filter(weight > 0) %>%
+  mutate(kind = case_when(pattern == "null" ~ "No effect",
+                          grepl("^ED_", pattern) ~ "Data-driven pattern of sharing",
+                          # only equal_effects of these canonical patterns has a non-zero weight in run A
+                          pattern %in% c("equal_effects", "identity") | grepl("^simple_het", pattern) ~ "Equal effects",
+                          TRUE ~ "One dataset only"),
+         label = ifelse(pattern %in% condsA, paste0(lab(pattern), " only"), pattern),
+         label = fct_reorder(label, weight))
+p <- ggplot(w, aes(weight * 100, label, fill = kind)) +
+  geom_col(colour = "grey30", linewidth = 0.2) +
+  geom_text(aes(label = sprintf("%.2f%%", weight * 100)), hjust = -0.1, size = 3.8) +
+  scale_fill_manual(values = c("No effect" = "grey75", "Data-driven pattern of sharing" = "#2C7FB8",
+                               "Equal effects" = "#41AB5D", "One dataset only" = "#E6550D"), name = NULL) +
+  guides(fill = guide_legend(nrow = 2)) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.18))) +
+  labs(title = "Estimated weights of the sharing patterns (run A)", x = "Weight (%)", y = NULL) +
+  theme_classic(base_size = 13) + theme(plot.title = element_text(face = "bold", hjust = 0.5), legend.position = "bottom",
+                                        axis.text = element_text(colour = "black"))
+print(p); save_fig(p, "Fig_mash_pattern_weights", 9, 5.5)
+```
+
+## 9.2 The main learned sharing patterns
+
+(a) Correlation matrix of the most heavily weighted learned pattern (`ED_PCA_1`). (b-d) Leading
+eigenvector (direction of effects across conditions) of each of the three most heavily weighted
+learned patterns. Each learned pattern is dominated by one direction (its first eigenvector
+explains >80% of its variance; the other eigenvalues are equal and their eigenvectors therefore
+arbitrary), so each pattern is summarised by its leading direction:
+
+- (b) the main pattern: effects of the same sign in all conditions (broad sharing);
+- (c, d) the next patterns: contrasts between conditions, i.e. effects stronger in some conditions
+  than in others. Their weights (in the titles) show how rarely they occur.
+
+```{r fig-patterns, fig.width = 15, fig.height = 9}
+# patterns drawn: ED_PCA_1 and ED_PCA_2 (the two leading patterns learned from the strong set, drawn
+# whatever their weight: ED_PCA_2, the YPD vs synthetic-media contrast, has weight 0 in the seeded
+# fit and in all five random sets of mashr_seed_robustness.R), then any other data-driven pattern
+# with a non-zero weight, up to three in total
+# patterns drawn: data-driven patterns with weight >= 0.01% (only ED_PCA_1 in the seeded fit;
+# ED_PCA_2, the YPD vs synthetic-media contrast, has weight 0 in all five random sets of
+# mashr_seed_robustness.R, and ED_PCA_5 has 0.004%)
+ed <- names(sort(piA[grepl("^ED_", names(piA)) & piA >= 1e-4], decreasing = TRUE))
+ed <- head(ed, 3)
+cm <- cov2cor(UA[[ed[1]]]); dimnames(cm) <- list(lab(condsA), lab(condsA))
+heat <- as.data.frame(as.table(cm)) %>% setNames(c("c1", "c2", "r")) %>%
+  mutate(c1 = factor(c1, lab(condsA)), c2 = factor(c2, rev(lab(condsA))))
+pa <- ggplot(heat, aes(c1, c2, fill = r)) + geom_tile(colour = "white") +
+  geom_text(aes(label = sprintf("%.2f", r)), size = 3.6) +
+  scale_fill_gradient2(low = "#2166AC", mid = "white", high = "#B2182B", limits = c(-1, 1), name = "Correlation") +
+  labs(title = sprintf("(a) Correlation of effects, %s (weight %.1f%%)", ed[1], 100 * piA[ed[1]]), x = NULL, y = NULL) +
+  theme_minimal(base_size = 12) + theme(axis.text.x = element_text(angle = 35, hjust = 1, colour = "black"),
+                                        axis.text.y = element_text(colour = "black"), plot.title = element_text(face = "bold"))
+eig_bar <- function(nm, letter) {
+  e <- eigen(UA[[nm]]); v <- e$vectors[, 1]; if (sum(v) < 0) v <- -v
+  d <- tibble(condition = factor(lab(condsA), lab(condsA)), loading = v)
+  ggplot(d, aes(condition, loading, fill = condition)) + geom_col(colour = "grey30", linewidth = 0.2) +
+    geom_hline(yintercept = 0) + scale_fill_manual(values = COND_COLS, guide = "none") +
+    labs(title = sprintf("(%s) %s: leading eigenvector", letter, nm),
+         subtitle = sprintf("pattern weight %.2f%%; %.0f%% of the pattern's variance", 100 * piA[nm], 100 * e$values[1] / sum(e$values)),
+         x = NULL, y = "Loading") +
+    theme_classic(base_size = 12) + theme(axis.text.x = element_text(angle = 35, hjust = 1, colour = "black"),
+                                          plot.title = element_text(face = "bold"), plot.subtitle = element_text(colour = "grey30"))
+}
+# free(): panel (c) sits under the heatmap; without it its y-axis title is aligned with the heatmap's
+# long condition labels and ends up far from the axis
+eig_rest <- lapply(seq_along(ed)[-1], function(i) eig_bar(ed[i], letters[i + 1]))
+p <- (pa | eig_bar(ed[1], "b"))
+if (length(eig_rest)) p <- p / wrap_plots(eig_rest, nrow = 1)
+print(p); save_fig(p, "Fig_mash_learned_patterns", 15, 9)
+```
+
+### 9.2b Correlation matrix of the data-driven pattern with the largest mash weight
+
+As in Urbut et al. (2019), Fig. 2a: the covariance matrix with the largest mash weight
+(`ED_PCA_1`), shown as correlations between conditions. Same matrix as panel (a) above, as a
+single figure.
+
+```{r fig-top-matrix-heatmap, fig.width = 7.5, fig.height = 6}
+top_ed <- names(which.max(piA[grepl("^ED_", names(piA))]))
+cm_top <- cov2cor(UA[[top_ed]]); dimnames(cm_top) <- list(lab(condsA), lab(condsA))
+heat_top <- as.data.frame(as.table(cm_top)) %>% setNames(c("c1", "c2", "r")) %>%
+  mutate(c1 = factor(c1, lab(condsA)), c2 = factor(c2, rev(lab(condsA))))
+p <- ggplot(heat_top, aes(c1, c2, fill = r)) + geom_tile(colour = "white") +
+  geom_text(aes(label = sprintf("%.2f", r)), size = 4) +
+  scale_fill_gradient2(low = "#2166AC", mid = "white", high = "#B2182B", limits = c(-1, 1), name = "Correlation") +
+  labs(title = sprintf("Correlation of effects, %s (mash weight %.1f%%)", top_ed, 100 * piA[[top_ed]]), x = NULL, y = NULL) +
+  theme_minimal(base_size = 13) + theme(axis.text.x = element_text(angle = 35, hjust = 1, colour = "black"),
+                                        axis.text.y = element_text(colour = "black"), plot.title = element_text(face = "bold", hjust = 0.5),
+                                        panel.grid = element_blank())
+print(p); save_fig(p, "Fig_mash_top_matrix_correlation_heatmap", 7.5, 6)
+```
+
+### 9.2c Publication panels (one file per panel)
+
+The panels of 9.2 as separate figures in the style of the Figure 3 panels
+(`Figure.3/Fig.3-Panel-A-C-D-cis-and-trans-eqtl-YPD-variant-type/codes/Fig3_panel_B_C_D_variant_eqtl_classification.Rmd`:
+`theme_classic`, default font, bold black axis text and titles at 18 pt, black bar outlines, bold
+in-plot labels, x labels at 45 degrees). Dataset names are the same in every panel (`PUB_LAB`).
+Files `Fig_mash_pub_*` in `results/mashr/`:
+
+- `Fig_mash_pub_ED_PCA_1_heatmap`: correlations of the pattern with the largest mash weight (main figure)
+- `Fig_mash_pub_ED_PCA_1_eigenvector`, `Fig_mash_pub_ED_PCA_2_eigenvector`,
+  `Fig_mash_pub_ED_PCA_4_eigenvector`: leading eigenvector of each pattern
+
+All panels are saved at the same size (8.5 x 8 in) so they can be arranged on one sheet with the
+same text size. Titles give the pattern and its mash weight only; the share of each pattern's
+variance carried by its leading eigenvector is in the table below (for the legend).
+- `Fig_mash_pub_supp_ED_PCA_2_ED_PCA_4_heatmaps`: supplementary figure, correlation heatmaps of the
+  next two data-driven patterns (also saved separately as `Fig_mash_pub_ED_PCA_2_heatmap` and
+  `Fig_mash_pub_ED_PCA_4_heatmap`)
+
+```{r fig-patterns-pub}
+# ── Publication theme: same as Figure 3 (Fig3_panel_B_C_D_variant_eqtl_classification.Rmd) ──
+PUB_FONT  <- ""                 # default font, as in Figure 3
+AXIS_SIZE <- 18                 # axis text and titles, bold (Figure 3 AXIS_SIZE)
+PUB_SMALL <- 16                 # legend entries
+PUB_LABEL <- 5.5                # in-plot labels, bold, mm (Figure 3 NLAB_SIZE)
+
+pub_theme <- theme_classic(base_size = 14) +
+  theme(
+    axis.title   = element_text(face = "bold", size = AXIS_SIZE, color = "black"),
+    axis.text    = element_text(face = "bold", size = AXIS_SIZE, color = "black"),
+    plot.title   = element_text(hjust = 0.5, face = "bold", size = AXIS_SIZE),
+    legend.title = element_text(face = "bold", size = PUB_SMALL),
+    legend.text  = element_text(face = "bold", size = PUB_SMALL),
+    plot.background  = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA))
+
+# condition names for the paper (fluconazole doses named by ug/ml)
+PUB_LAB <- c(YPD.1 = "YPD.1", YPD.2 = "YPD.2", Flu_16ug = "fluconazole.16", Flu_8ug = "fluconazole.8",
+             sc2glu.2 = "synthetic complete with glucose", galactose = "synthetic complete with galactose")
+PUB_COLS <- setNames(COND_COLS[lab(condsA)], PUB_LAB[condsA])
+
+# Panels are saved separately but combined on one sheet: every panel gets the same canvas
+# (PANEL_W x PANEL_H in) and the same title format, "<pattern> (weight x%)", so a pattern's heatmap
+# and eigenvector match. The % of variance of the leading eigenvector is printed, not plotted
+# (it belongs in the legend / methods).
+PANEL_W <- 8.5; PANEL_H <- 8
+pattern_title <- function(nm) {
+  w <- 100 * piA[[nm]]
+  sprintf("%s (weight %s%%)", nm, if (w >= 1) sprintf("%.1f", w) else if (w == 0) "0" else sprintf("%.2f", w))
+}
+
+pub_heatmap <- function(nm) {
+  cm <- cov2cor(UA[[nm]]); dimnames(cm) <- list(PUB_LAB[condsA], PUB_LAB[condsA])
+  d <- as.data.frame(as.table(cm)) %>% setNames(c("c1", "c2", "r")) %>%
+    mutate(c1 = factor(c1, PUB_LAB[condsA]), c2 = factor(c2, rev(PUB_LAB[condsA])))
+  ggplot(d, aes(c1, c2, fill = r)) + geom_tile(colour = "white", linewidth = 0.6) +
+    geom_text(aes(label = sprintf("%.2f", r)), size = PUB_LABEL - 0.5, fontface = "bold") +
+    scale_fill_gradient2(low = "#2166AC", mid = "white", high = "#B2182B", limits = c(-1, 1),
+                         breaks = c(-1, -0.5, 0, 0.5, 1), name = "Correlation") +
+    coord_fixed() +
+    labs(title = pattern_title(nm), x = NULL, y = NULL) +
+    pub_theme +
+    theme(axis.line = element_blank(), axis.ticks = element_blank(),
+          axis.text.x = element_text(angle = 45, hjust = 1))
+}
+
+pub_eigen <- function(nm) {
+  e <- eigen(UA[[nm]]); v <- e$vectors[, 1]; if (sum(v) < 0) v <- -v
+  d <- tibble(condition = factor(PUB_LAB[condsA], PUB_LAB[condsA]), loading = v)
+  ggplot(d, aes(condition, loading, fill = condition)) +
+    geom_col(colour = "black", linewidth = 0.4, width = 0.7) +
+    geom_hline(yintercept = 0, linewidth = 0.5) +
+    scale_fill_manual(values = PUB_COLS, guide = "none") +
+    labs(title = pattern_title(nm), x = NULL, y = "Loading (leading eigenvector)") +
+    pub_theme + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+}
+
+for (nm in ed) {
+  p <- pub_heatmap(nm); print(p); save_fig(p, paste0("Fig_mash_pub_", nm, "_heatmap"), PANEL_W, PANEL_H)
+  p <- pub_eigen(nm);   print(p); save_fig(p, paste0("Fig_mash_pub_", nm, "_eigenvector"), PANEL_W, PANEL_H)
+}
+# for the legend / methods: share of each pattern's variance carried by its leading eigenvector
+knitr::kable(tibble(pattern = ed, weight_pct = round(100 * piA[ed], 3),
+                    leading_eigenvector_pct_variance = sapply(ed, function(nm) {
+                      ev <- eigen(UA[[nm]], only.values = TRUE)$values; round(100 * ev[1] / sum(ev), 1) })))
+
+# supplementary figure: correlation heatmaps of the second and third data-driven patterns
+if (length(ed) >= 2) {
+  p <- wrap_plots(lapply(ed[-1], pub_heatmap), nrow = 1) + plot_layout(guides = "collect") +
+    plot_annotation(tag_levels = "a", tag_prefix = "(", tag_suffix = ")") &
+    theme(plot.tag = element_text(size = AXIS_SIZE, face = "bold"))
+  print(p); save_fig(p, paste0("Fig_mash_pub_supp_", paste(ed[-1], collapse = "_"), "_heatmaps"), (length(ed) - 1) * PANEL_W, PANEL_H)
+}
+```
+
+## 9.3 mash uses the learned sharing patterns to inform the effect estimates
+
+For example eQTLs: each coloured dot is the original (raw) GWAS effect estimate in one condition,
+with its 95% interval (±1.96 SE); the black dot is the mashr estimate (posterior mean, ±1.96
+posterior SD). Noisy estimates are pulled towards the shared pattern; precise ones barely move.
+Examples: the most significant eQTL overall, an eQTL with a noisy estimate in a low-depth
+condition, and the strongest fluconazole-specific candidate.
+
+```{r fig-shrinkage-examples, fig.width = 15, fig.height = 5.5}
+pmA <- get_pm(fA$m_strong); psA <- get_psd(fA$m_strong); lfA <- get_lfsr(fA$m_strong)
+raw_mat <- function(keys, what) sapply(condsA, function(cn) {
+  e <- extracted[[cn]]; m <- match(keys, paste(e$Gene, e$SNP, e$Variant_Type, sep = "|")); e[[what]][m] })
+keys <- rownames(pmA)
+B <- raw_mat(keys, "SnpWeight"); S <- raw_mat(keys, "SnpWeightSE")
+rownames(B) <- rownames(S) <- keys
+# example 1: significant in the most conditions (all of them if any), largest effects
+complete <- rowSums(is.na(B)) == 0   # examples must be tested in every condition
+allsig <- which(complete & rowSums(lfA < 0.05) == max(rowSums(lfA[complete, , drop = FALSE] < 0.05)))
+ex1 <- keys[allsig][which.max(rowSums(abs(pmA[allsig, , drop = FALSE])))]
+noisy <- which(complete & rowSums(lfA < 0.05) >= max(2, max(rowSums(lfA < 0.05)) - 1))
+ex2 <- keys[noisy][which.max(abs(B[noisy, "galactose"] - pmA[noisy, "galactose"]))]
+fs <- flu_specific(fA)
+f8 <- intersect(fs$eQTL[fs$fluconazole_8ug_specific], keys[complete])
+ex3 <- if (length(f8)) f8[which.max(abs(pmA[f8, "Flu_8ug"]))] else keys[complete][1]
+ex_plot <- function(k, title) {
+  d <- tibble(condition = factor(lab(condsA), lab(condsA)), raw = B[k, ], raw_se = S[k, ], pm = pmA[k, ], psd = psA[k, ])
+  ggplot(d, aes(y = condition)) +
+    geom_vline(xintercept = 0, colour = "grey70") +
+    geom_errorbarh(aes(xmin = raw - 1.96 * raw_se, xmax = raw + 1.96 * raw_se, colour = condition), height = 0, linewidth = 0.8,
+                   position = position_nudge(y = 0.15)) +
+    geom_point(aes(raw, colour = condition), size = 3, position = position_nudge(y = 0.15)) +
+    geom_errorbarh(aes(xmin = pm - 1.96 * psd, xmax = pm + 1.96 * psd), height = 0, colour = "black", linewidth = 0.8,
+                   position = position_nudge(y = -0.15)) +
+    geom_point(aes(pm), colour = "black", size = 2.5, position = position_nudge(y = -0.15)) +
+    scale_colour_manual(values = COND_COLS, guide = "none") + scale_y_discrete(limits = rev) +
+    labs(title = title, subtitle = gsub("\\|", "  ", k), x = "Effect size (beta)", y = NULL) +
+    theme_classic(base_size = 12) + theme(plot.title = element_text(face = "bold"), plot.subtitle = element_text(size = 9, colour = "grey30"),
+                                          axis.text = element_text(colour = "black"))
+}
+p <- (ex_plot(ex1, sprintf("Shared (significant in %d of %d)", sum(lfA[ex1, ] < 0.05), length(condsA))) | ex_plot(ex2, "Noisy estimate (galactose)") |
+      ex_plot(ex3, "Fluconazole_8ug-specific")) +
+  plot_annotation(caption = "Coloured: raw GWAS estimate +/- 1.96 SE.  Black: mashr estimate +/- 1.96 posterior SD.")
+print(p); save_fig(p, "Fig_mash_shrinkage_examples", 15, 5.5)
+```
+
+## 9.4 Numbers for the text: confirmed and not-confirmed strong-set leads
+
+Strong set = one lead eQTL per gene (lowest P across the six datasets), without the eQTLs that have
+no local / distant call (Section 4). *Confirmed* = lfsr < 0.05 in at least one dataset. Fold below
+threshold = permutation threshold / lead P in the dataset where the lead has its lowest P. Datasets
+with an eQTL = datasets in which the gene has any significant eQTL (any variant).
+
+```{r text-numbers}
+fT <- fits$A_main; lfT <- get_lfsr(fT$m_strong); pmT <- get_pm(fT$m_strong)
+relT <- t(apply(pmT, 1, function(x) x / x[which.max(abs(x))]))
+condsT <- fT$conds
+lead_fold <- bind_rows(signif[condsT]) %>% group_by(Gene, SNP, Variant_Type) %>%
+  slice_min(P, n = 1, with_ties = FALSE) %>% ungroup() %>% transmute(Gene, SNP, Variant_Type, fold = thr / P)
+gene_ds <- bind_rows(lapply(condsT, function(cn) tibble(Gene = unique(signif[[cn]]$Gene), dataset = cn))) %>%
+  count(Gene, name = "n_datasets_with_eQTL")
+txt <- tibble(eQTL = rownames(pmT), confirmed = rowSums(lfT < 0.05) > 0,
+              n_sign = rowSums(relT > 0), n_mag = rowSums(relT >= 0.5)) %>%
+  separate(eQTL, c("Gene", "SNP", "Variant_Type"), sep = "\\|", remove = FALSE) %>%
+  left_join(lead_fold, by = c("Gene", "SNP", "Variant_Type")) %>%
+  left_join(gene_ds, by = "Gene")
+cf <- txt %>% filter(confirmed); nc <- txt %>% filter(!confirmed)
+text_numbers <- tibble(
+  quantity = c("strong-set leads (one per gene)", "dropped: no local / distant call",
+               "confirmed (lfsr < 0.05 in >= 1 dataset)", "not confirmed",
+               "median fold below threshold, not confirmed", "median fold below threshold, confirmed",
+               "not-confirmed genes with an eQTL in >= 2 datasets (%)",
+               "confirmed, same sign in all 6 (n)", "confirmed, same sign in all 6 (%)",
+               "confirmed, sign specific to one dataset (n)",
+               "confirmed, shared by magnitude in all 6 (n)", "confirmed, shared by magnitude in all 6 (%)"),
+  value = c(nrow(txt), fT$n_dropped_no_call, nrow(cf), nrow(nc),
+            median(nc$fold, na.rm = TRUE), median(cf$fold, na.rm = TRUE),
+            100 * mean(nc$n_datasets_with_eQTL >= 2, na.rm = TRUE),
+            sum(cf$n_sign == length(condsT)), 100 * mean(cf$n_sign == length(condsT)),
+            sum(cf$n_sign == 1),
+            sum(cf$n_mag == length(condsT)), 100 * mean(cf$n_mag == length(condsT))))
+knitr::kable(text_numbers, digits = 1, caption = "Numbers for the Results text (run A)")
+write.csv(text_numbers, file.path(OUTPUT_DIR, "text_numbers_strong_set.csv"), row.names = FALSE)
+```
+
+## 9.5 Number of conditions in which eQTLs are shared
+
+For every eQTL significant (lfsr < 0.05) in at least one condition, the number of conditions in which
+its effect is shared with the condition where it is strongest: **by sign** (same sign) and **by
+magnitude** (same sign and at least half as large), as in Urbut et al. (2019), Fig. 4, in all six
+conditions (run A).
+
+```{r fig-sharing-hist, fig.width = 13, fig.height = 8}
+share_counts <- function(f, label) {
+  pm <- get_pm(f$m_strong); lf <- get_lfsr(f$m_strong)
+  pm <- pm[rowSums(lf < 0.05) > 0, , drop = FALSE]
+  rel <- t(apply(pm, 1, function(x) x / x[which.max(abs(x))]))
+  bind_rows(tibble(set = label, definition = "Shared by sign", n = rowSums(rel > 0)),
+            tibble(set = label, definition = "Shared by magnitude (within 2-fold)", n = rowSums(rel >= 0.5)))
+}
+hs <- bind_rows(share_counts(fits$A_main, sprintf("All conditions (run A, %d eQTLs)", sum(rowSums(get_lfsr(fits$A_main$m_strong) < 0.05) > 0)))) %>%
+                # share_counts(fits$C_YPD_flu, sprintf("YPD + fluconazole (run C, %d eQTLs)", ...)): run C not reported
+  mutate(definition = factor(definition, c("Shared by sign", "Shared by magnitude (within 2-fold)")))
+p <- ggplot(hs, aes(n)) + geom_bar(fill = "#2C7FB8", colour = "grey30", linewidth = 0.2) +
+  geom_text(stat = "count", aes(label = after_stat(count)), vjust = -0.3, size = 3.3) +
+  facet_grid(definition ~ set, scales = "free_x", space = "free_x") +
+  scale_x_continuous(breaks = 1:6) + scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
+  labs(title = "Number of conditions in which each eQTL is shared", x = "Number of conditions", y = "Number of eQTLs") +
+  theme_bw(base_size = 12) + theme(plot.title = element_text(face = "bold", hjust = 0.5), strip.text = element_text(face = "bold"))
+print(p); save_fig(p, "Fig_mash_n_conditions_shared", 13, 8)
+write.csv(hs %>% count(set, definition, n_conditions = n), file.path(OUTPUT_DIR, "n_conditions_shared.csv"), row.names = FALSE)
+```
+
+```{r fig-n-significant, fig.width = 9, fig.height = 5}
+ns <- bind_rows(lapply(names(fits), function(r) tibble(run = RUN_LABELS[[r]], n = rowSums(get_lfsr(fits[[r]]$m_strong) < 0.05))))
+p <- ggplot(ns, aes(n)) + geom_bar(fill = "grey60", colour = "grey30", linewidth = 0.2) +
+  geom_text(stat = "count", aes(label = after_stat(count)), vjust = -0.3, size = 3.3) +
+  facet_wrap(~ run, scales = "free_x") + scale_x_continuous(breaks = 0:6) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
+  labs(title = "Number of conditions in which each strong eQTL is significant (lfsr < 0.05)",
+       x = "Number of conditions", y = "Number of eQTLs") +
+  theme_bw(base_size = 12) + theme(plot.title = element_text(face = "bold", hjust = 0.5), strip.text = element_text(face = "bold"))
+print(p); save_fig(p, "Fig_mash_n_conditions_significant", 9, 5)
+```
+
+## 9.6 Condition-specific eQTLs vs replicate noise
+
+Condition-specific calls defined with replicates (Section 8) next to the number of "specific" calls
+between the two YPD replicates (same condition), which is the noise level.
+
+```{r fig-specific-vs-noise, fig.width = 12, fig.height = 5.5}
+rcl <- rc %>% pivot_longer(-call, names_to = "run", values_to = "n") %>% filter(!is.na(n)) %>%
+  mutate(kind = ifelse(grepl("^Replicate noise", call), "Replicate noise (same condition)", "Condition-specific"),
+         call = str_wrap(call_axis_label(call), 38))
+p <- ggplot(rcl, aes(n, fct_rev(factor(call, unique(call))), fill = kind)) +
+  geom_col(colour = "grey30", linewidth = 0.2) + geom_text(aes(label = n), hjust = -0.2, size = 3.5) +
+  facet_wrap(~ run) + scale_fill_manual(values = c("Condition-specific" = "#E6550D", "Replicate noise (same condition)" = "grey60"), name = NULL) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(title = "Condition-specific eQTLs vs differences between two replicates", x = "Number of genes", y = NULL) +
+  theme_bw(base_size = 11) + theme(plot.title = element_text(face = "bold", hjust = 0.5), legend.position = "bottom",
+                                   strip.text = element_text(face = "bold"), axis.text = element_text(colour = "black"))
+print(p); save_fig(p, "Fig_mash_specific_vs_replicate_noise", 12, 5.5)
+```
+
+### 9.6b Publication versions of 9.5 and 9.6
+
+Same data as the figures in 9.5 and 9.6, in the publication theme of 9.2c and at the same panel
+size (`PANEL_W` x `PANEL_H`; the replicate-noise figure is two panels wide for its long labels).
+Files: `Fig_mash_pub_pattern_weights` (9.1), `Fig_mash_pub_n_datasets_significant` (all 4,973 strong-set lead eQTLs; grey bar = not
+significant in any dataset), `Fig_mash_pub_n_datasets_shared_sign`,
+`Fig_mash_pub_n_datasets_shared_magnitude`, `Fig_mash_pub_specific_vs_replicate_noise`. Dataset names
+are those of 9.2c (`PUB_LAB`) in every panel; in the replicate-noise figure the bars are named by
+condition or replicate pair only, since the legend gives the bar type.
+
+```{r fig-sharing-noise-pub}
+pub_share_hist <- function(def, fill) {
+  d <- hs %>% filter(definition == def) %>% count(n, name = "eQTLs") %>%
+    complete(n = 1:length(condsA), fill = list(eQTLs = 0))
+  ggplot(d, aes(factor(n), eQTLs)) +
+    geom_col(fill = fill, colour = "black", linewidth = 0.4, width = 0.7) +
+    geom_text(aes(label = eQTLs), vjust = -0.4, size = PUB_LABEL, fontface = "bold") +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+    labs(title = def, x = "Number of datasets", y = "Number of eQTLs") +
+    pub_theme
+}
+# pattern weights (9.1); data-driven patterns keep their names (as in the heatmap / eigenvector titles)
+# shown: patterns with weight >= 0.01% (ED_PCA_5, 0.004% in the seeded fit, is left out)
+pw <- w %>% filter(weight >= 1e-4) %>%
+  mutate(label = case_when(pattern == "null" ~ "No effect",
+                                     pattern == "equal_effects" ~ "Equal effects",
+                                     pattern %in% condsA ~ paste(PUB_LAB[pattern], "only"),
+                                     TRUE ~ pattern),
+                   label = fct_reorder(label, weight))
+p <- ggplot(pw, aes(weight * 100, label, fill = kind)) +
+  geom_col(colour = "black", linewidth = 0.4, width = 0.7) +
+  geom_text(aes(label = case_when(weight == 0 ~ "0%", weight >= 0.01 ~ sprintf("%.1f%%", weight * 100), TRUE ~ sprintf("%.2f%%", weight * 100))),
+            hjust = -0.15, size = PUB_LABEL, fontface = "bold") +
+  scale_fill_manual(values = c("No effect" = "grey75", "Data-driven pattern of sharing" = "#2C7FB8",
+                               "Equal effects" = "#41AB5D", "One dataset only" = "#E6550D"), name = NULL) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.3))) +
+  scale_y_discrete(labels = function(x) stringr::str_wrap(x, 22)) +   # long dataset names on two lines
+  labs(x = "Weight (%)", y = NULL) +
+  # legend below the plot (inside the panel it covered the lowest y-axis labels)
+  pub_theme + theme(legend.position = "bottom") + guides(fill = guide_legend(nrow = 2))
+print(p); save_fig(p, "Fig_mash_pub_pattern_weights", PANEL_W, PANEL_H)
+
+# number of datasets in which each strong-set lead eQTL is significant (lfsr < 0.05), 0-6
+sig_d <- tibble(n = rowSums(get_lfsr(fits$A_main$m_strong) < 0.05)) %>% count(n, name = "eQTLs") %>%
+  complete(n = 0:length(condsA), fill = list(eQTLs = 0)) %>%
+  mutate(group = ifelse(n == 0, "none", "significant"))
+p <- ggplot(sig_d, aes(factor(n), eQTLs, fill = group)) +
+  geom_col(colour = "black", linewidth = 0.4, width = 0.7) +
+  geom_text(aes(label = eQTLs), vjust = -0.4, size = PUB_LABEL, fontface = "bold") +
+  scale_fill_manual(values = c(none = "grey75", significant = "#2C7FB8"), guide = "none") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+  labs(title = "Significant (lfsr < 0.05)", x = "Number of datasets", y = "Number of eQTLs") +
+  pub_theme
+print(p); save_fig(p, "Fig_mash_pub_n_datasets_significant", PANEL_W, PANEL_H)
+
+p <- pub_share_hist("Shared by sign", "#2C7FB8")
+print(p); save_fig(p, "Fig_mash_pub_n_datasets_shared_sign", PANEL_W, PANEL_H)
+p <- pub_share_hist("Shared by magnitude (within 2-fold)", "#2C7FB8")
+print(p); save_fig(p, "Fig_mash_pub_n_datasets_shared_magnitude", PANEL_W, PANEL_H)
+
+noise_d <- rc %>% pivot_longer(-call, names_to = "run", values_to = "n") %>% filter(!is.na(n)) %>%
+  mutate(kind = ifelse(grepl("^Replicate noise", call), "Replicate noise (same condition)", "Condition-specific"),
+         call = recode(call,
+           "YPD-specific (both YPD replicates)" = "YPD (both replicates)",
+           "Fluconazole-specific (both doses)"  = "fluconazole (both doses)",
+           "Galactose-specific"                 = "synthetic complete with galactose",
+           "Synthetic-complete-specific"        = "synthetic complete with glucose",
+           "Replicate noise: significant in YPD.1, not shared with YPD.2" = "YPD.1, not shared with YPD.2",
+           "Replicate noise: significant in YPD.2, not shared with YPD.1" = "YPD.2, not shared with YPD.1"))
+p <- ggplot(noise_d, aes(n, fct_rev(factor(call, unique(call))), fill = kind)) +
+  geom_col(colour = "black", linewidth = 0.4, width = 0.7) +
+  geom_text(aes(label = n), hjust = -0.2, size = PUB_LABEL, fontface = "bold") +
+  scale_fill_manual(values = c("Condition-specific" = "#E6550D", "Replicate noise (same condition)" = "grey60"), name = NULL) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.12))) +
+  labs(x = "Number of genes", y = NULL) +
+  pub_theme + theme(legend.position = "bottom")
+print(p); save_fig(p, "Fig_mash_pub_specific_vs_replicate_noise", 2 * PANEL_W, PANEL_H)
+```
+
+## 9.7 Effect size follows sequencing depth
+
+```{r fig-depth, fig.width = 7.5, fig.height = 5.5}
+p <- ggplot(qc, aes(median_UMI_per_strain, median_abs_posterior_beta_runA, colour = condition)) +
+  geom_point(size = 4) + ggrepel::geom_text_repel(aes(label = condition), size = 3.8, show.legend = FALSE) +
+  scale_x_log10(labels = scales::label_number(scale_cut = scales::cut_short_scale())) +
+  scale_colour_manual(values = COND_COLS, guide = "none") +
+  labs(title = "Median effect size vs sequencing depth per dataset",
+       x = "Median UMIs per strain (pseudobulk, log scale)", y = "Median |mashr effect| (run A)") +
+  theme_classic(base_size = 12) + theme(plot.title = element_text(face = "bold", hjust = 0.5), axis.text = element_text(colour = "black"))
+print(p); save_fig(p, "Fig_mash_effect_vs_depth", 7.5, 5.5)
+```
+
+# 10. Are the shared eQTLs local or distant?
+
+Every strong-set eQTL significant in at least one condition (run A) gets the local / distant call
+of its lead variant from the per-condition annotation tables (`*_annotated_cis_trans.txt`; local =
+any variant of the clump within 25 kb of the gene, see `README_CURRENT_FILES.md`). A lead variant
+is matched to a clump whether it is the clump lead or a clump member, in any of the six datasets;
+the call is a property of the variant and gene positions, so it is the same in every dataset.
+eQTLs whose lead is a CNV past an S288C chromosome end (non-S288C "YX" genes) have no position and
+therefore no call; they were dropped from the strong-set results right after fitting (Section 4),
+so every count in this report excludes them.
+
+Sharing groups:
+
+- *Significantly shared in all 6*: lfsr < 0.05 in all six datasets **and** shared by magnitude in
+  all six (strictest);
+- *Shared by magnitude in all 6* (as in 9.5), whatever the lfsr;
+- *Shared by magnitude in 2-5*;
+- *Strongest dataset only*: not shared by magnitude with any other dataset.
+
+The background is all clumped eQTLs of each dataset. The strong set keeps one lead variant per
+gene (the lowest p-value), which favours each gene's strongest signal, so compare the sharing
+groups with each other rather than with the background.
+
+```{r local-distant}
+# annotation tables and local / distant calls (ANNOT_DIRS, annot, ld_calls) are read in Section 4
+
+pmA <- get_pm(fA$m_strong); lfA <- get_lfsr(fA$m_strong)
+keep <- rowSums(lfA < 0.05) > 0
+relA <- t(apply(pmA[keep, , drop = FALSE], 1, function(x) x / x[which.max(abs(x))]))
+SHARE_LEVELS <- c("significantly shared in all 6", "shared by magnitude in all 6",
+                  "shared by magnitude in 2-5", "strongest dataset only")
+mash_ld <- tibble(eQTL = rownames(pmA)[keep], n_sig = rowSums(lfA[keep, , drop = FALSE] < 0.05),
+                  n_mag = rowSums(relA >= 0.5), n_sign = rowSums(relA > 0)) %>%
+  separate(eQTL, c("Gene", "SNP", "Variant_Type"), sep = "\\|", remove = FALSE) %>%
+  left_join(ld_calls, by = c("Gene", "SNP", "Variant_Type")) %>%
+  mutate(sharing = factor(case_when(n_mag == ncol(pmA) & n_sig == ncol(pmA) ~ SHARE_LEVELS[1],
+                                    n_mag == ncol(pmA) ~ SHARE_LEVELS[2],
+                                    n_mag > 1 ~ SHARE_LEVELS[3],
+                                    TRUE ~ SHARE_LEVELS[4]), SHARE_LEVELS),
+         Variant_Type = factor(Variant_Type, names(ANNOT_FILES)))
+cat(sprintf("%d significant eQTLs, %d without a local / distant call\n", nrow(mash_ld), sum(is.na(mash_ld$local_distant))))
+
+ld_count <- function(d) d %>% summarise(n = n(), local = sum(local_distant == "Local", na.rm = TRUE),
+                                        distant = sum(local_distant == "Distant", na.rm = TRUE),
+                                        pct_local = 100 * local / (local + distant), .groups = "drop")
+ld_by_sharing <- bind_rows(mash_ld %>% ld_count() %>% mutate(sharing = "all significant eQTLs"),
+                           mash_ld %>% group_by(sharing) %>% ld_count() %>% mutate(sharing = as.character(sharing))) %>%
+  relocate(sharing)
+knitr::kable(ld_by_sharing, digits = 1, caption = "Local vs distant mashr eQTLs by sharing (run A)")
+
+# is each sharing group more often local than all other significant eQTLs?
+ld_tests <- bind_rows(lapply(SHARE_LEVELS[1:2], function(s) {
+  d <- mash_ld %>% filter(!is.na(local_distant))
+  in_s <- if (s == SHARE_LEVELS[2]) d$n_mag == ncol(pmA) else d$sharing == s   # "by magnitude in all 6" includes the strict group
+  ft <- fisher.test(table(factor(in_s, c(TRUE, FALSE)), factor(d$local_distant == "Local", c(TRUE, FALSE))))
+  tibble(group = s, n_group = sum(in_s), pct_local_group = 100 * mean(d$local_distant[in_s] == "Local"),
+         pct_local_rest = 100 * mean(d$local_distant[!in_s] == "Local"),
+         fisher_OR = unname(ft$estimate), fisher_p = ft$p.value)
+}))
+knitr::kable(ld_tests %>% mutate(fisher_p = format(fisher_p, digits = 2)), digits = 2,
+             caption = "Shared eQTLs vs all other significant eQTLs: % local (Fisher's exact test)")
+
+# the other direction: given that an eQTL is local (or distant), how likely is it to be shared?
+# Local effects are usually larger, and a larger effect is easier to call significant in all six
+# datasets, so the logistic regression also adjusts for the eQTL's strongest effect
+# (max |posterior mean / posterior SD| over the six datasets).
+psdA <- get_psd(fA$m_strong)
+mash_ld <- mash_ld %>%
+  mutate(max_abs_z = apply(abs(pmA[keep, , drop = FALSE] / psdA[keep, , drop = FALSE]), 1, max),
+         sig_shared_all6 = sharing == SHARE_LEVELS[1],
+         mag_shared_all6 = n_mag == ncol(pmA))
+
+p_shared <- mash_ld %>% filter(!is.na(local_distant)) %>%
+  pivot_longer(c(sig_shared_all6, mag_shared_all6), names_to = "outcome", values_to = "shared") %>%
+  mutate(outcome = recode(outcome, sig_shared_all6 = "significantly shared in all 6",
+                          mag_shared_all6 = "shared by magnitude in all 6")) %>%
+  group_by(outcome, local_distant) %>%
+  summarise(n = n(), n_shared = sum(shared), pct_shared = 100 * mean(shared),
+            median_max_abs_z = median(max_abs_z), .groups = "drop")
+knitr::kable(p_shared, digits = 1, caption = "P(shared | local) vs P(shared | distant)")
+
+shared_given_ld <- bind_rows(lapply(c("sig_shared_all6", "mag_shared_all6"), function(y) {
+  d <- mash_ld %>% filter(!is.na(local_distant)) %>% mutate(local = local_distant == "Local", shared = .data[[y]])
+  a <- sum(d$shared & d$local); n1 <- sum(d$local); b <- sum(d$shared & !d$local); n0 <- sum(!d$local)
+  log_rr <- log((a / n1) / (b / n0)); se <- sqrt(1 / a - 1 / n1 + 1 / b - 1 / n0)
+  fit <- summary(glm(shared ~ local + log(max_abs_z), family = binomial, data = d))$coefficients
+  tibble(outcome = y, pct_shared_local = 100 * a / n1, pct_shared_distant = 100 * b / n0,
+         relative_risk = exp(log_rr), rr_ci_low = exp(log_rr - 1.96 * se), rr_ci_high = exp(log_rr + 1.96 * se),
+         fisher_p = fisher.test(table(d$local, d$shared))$p.value,
+         adj_OR_local = exp(fit["localTRUE", "Estimate"]), adj_p_local = fit["localTRUE", "Pr(>|z|)"])
+}))
+knitr::kable(shared_given_ld %>% mutate(across(c(fisher_p, adj_p_local), ~ format(.x, digits = 2))), digits = 2,
+             caption = "How much more likely a local eQTL is to be shared than a distant one. adj_OR_local: logistic regression adjusted for log max |z|")
+write.csv(shared_given_ld, file.path(OUTPUT_DIR, "mash_shared_given_local_distant.csv"), row.names = FALSE)
+
+ld_by_type <- mash_ld %>% group_by(sharing, Variant_Type) %>% ld_count()
+knitr::kable(ld_by_type %>% select(sharing, Variant_Type, n, pct_local) %>%
+               pivot_wider(names_from = Variant_Type, values_from = c(n, pct_local)),
+             digits = 1, caption = "Number of eQTLs and % local per sharing group and variant type")
+
+ld_background <- annot %>% group_by(dataset) %>% ld_count()
+knitr::kable(ld_background, digits = 1, caption = "Background: all clumped eQTLs per dataset")
+
+write.csv(mash_ld, file.path(OUTPUT_DIR, "mash_eQTLs_local_distant_A_main.csv"), row.names = FALSE)
+write.csv(bind_rows(ld_by_sharing %>% mutate(table = "by sharing"),
+                    ld_by_type %>% mutate(sharing = as.character(sharing), table = "by sharing and variant type"),
+                    ld_background %>% rename(sharing = dataset) %>% mutate(table = "background, all clumped eQTLs")),
+          file.path(OUTPUT_DIR, "mash_local_distant_summary.csv"), row.names = FALSE)
+write.csv(ld_tests, file.path(OUTPUT_DIR, "mash_local_distant_tests.csv"), row.names = FALSE)
+```
+
+## 10.1 Why mashr has fewer local eQTLs than each dataset
+
+Each dataset's annotation tables count every clump (a gene can have several local and distant
+clumps). The mashr strong set keeps **one variant per gene**: the lowest p-value across all six
+datasets and variant types. A gene with a local eQTL is therefore represented by a distant variant
+whenever one of its distant eQTLs has a lower p-value in any dataset, and it drops out of the
+results when its lead is not significant (lfsr < 0.05) in any dataset after shrinkage. The table
+follows the YPD.1 and YPD.2 local eQTLs through these steps.
+
+```{r local-trace}
+strong_genes <- unique(sub("\\|.*", "", rownames(pmA)))
+local_trace <- bind_rows(lapply(c("YPD.1", "YPD.2"), function(ds) {
+  a <- annot %>% filter(dataset == ds)
+  g <- unique(a$Pheno[a$local_distant %in% "Local"])
+  m <- mash_ld %>% filter(Gene %in% g)
+  tibble(dataset = ds,
+         local_clumps = sum(a$local_distant %in% "Local"),
+         genes_with_local_eQTL = length(g),
+         of_which_also_distant_eQTL = sum(g %in% a$Pheno[a$local_distant %in% "Distant"]),
+         genes_in_mashr_strong_set = sum(g %in% strong_genes),
+         lead_significant_in_mashr = nrow(m),
+         lead_is_local = sum(m$local_distant %in% "Local"),
+         lead_is_distant = sum(m$local_distant %in% "Distant"),
+         local_lead_significantly_shared_all6 = sum(m$local_distant %in% "Local" & m$sharing == SHARE_LEVELS[1]))
+}))
+knitr::kable(local_trace, caption = "Local eQTLs of each YPD replicate, followed into the mashr results (one lead variant per gene)")
+write.csv(local_trace, file.path(OUTPUT_DIR, "mash_local_eQTL_trace_YPD.csv"), row.names = FALSE)
+```
+
+How the distant (left) and local (right) mashr eQTLs are shared. Every bar is a count out of all
+significant eQTLs of that location (top bar); the label gives the count and % of that total.
+
+- *Shared by sign in all 6*: same sign as in the strongest dataset in all six datasets
+- *Shared by magnitude in all 6*: same sign and at least half the strongest effect in all six (includes the next bar)
+- *Significant and shared by magnitude in all 6*: also lfsr < 0.05 in all six (strictest)
+- *Shared by magnitude in 2-5*: shared by magnitude with 1-4 other datasets
+- *Not shared with any other dataset*: significant, but shared by magnitude with no other dataset
+  (previously "strongest dataset only")
+
+The first three bars are nested; the last three plus "shared by magnitude in all 6" add up to the total.
+
+```{r fig-local-distant, fig.width = 14, fig.height = 5.5}
+LD_COLS <- c(Local = "#eb6834", Distant = "#2a78d6")
+SHARE_STEPS <- c("All significant eQTLs", "Shared by sign in all 6", "Shared by magnitude in all 6",
+                 "Significant and shared by magnitude in all 6", "Shared by magnitude in 2-5",
+                 "Not shared with any other dataset")
+ld_steps <- mash_ld %>% filter(!is.na(local_distant)) %>% group_by(local_distant) %>%
+  summarise(`All significant eQTLs` = n(),
+            `Shared by sign in all 6` = sum(n_sign == ncol(pmA)),
+            `Shared by magnitude in all 6` = sum(n_mag == ncol(pmA)),
+            `Significant and shared by magnitude in all 6` = sum(sharing == SHARE_LEVELS[1]),
+            `Shared by magnitude in 2-5` = sum(sharing == SHARE_LEVELS[3]),
+            `Not shared with any other dataset` = sum(sharing == SHARE_LEVELS[4]), .groups = "drop") %>%
+  pivot_longer(-local_distant, names_to = "category", values_to = "n") %>%
+  group_by(local_distant) %>% mutate(pct = 100 * n / n[category == "All significant eQTLs"]) %>% ungroup() %>%
+  mutate(category = factor(category, rev(SHARE_STEPS)))
+knitr::kable(ld_steps %>% pivot_wider(names_from = local_distant, values_from = c(n, pct)), digits = 1,
+             caption = "Sharing of distant and local mashr eQTLs")
+write.csv(ld_steps, file.path(OUTPUT_DIR, "mash_local_distant_sharing_breakdown.csv"), row.names = FALSE)
+
+ld_side <- function(loc) {
+  d <- ld_steps %>% filter(local_distant == loc) %>% mutate(total = category == "All significant eQTLs")
+  ggplot(d, aes(n, category, fill = total)) +
+    geom_col(width = 0.65, colour = "black", linewidth = 0.3) +
+    geom_text(aes(label = ifelse(total, sprintf("%d", n), sprintf("%d (%.0f%%)", n, pct))),
+              hjust = -0.1, size = 4.5, fontface = "bold") +
+    scale_fill_manual(values = c("TRUE" = "grey70", "FALSE" = LD_COLS[[loc]]), guide = "none") +
+    scale_x_continuous(expand = expansion(mult = c(0, 0.3))) +
+    labs(title = sprintf("%s eQTLs (n = %s)", loc, format(max(d$n), big.mark = ",")), x = "Number of eQTLs", y = NULL) +
+    theme_classic(base_size = 14) +
+    theme(axis.text = element_text(face = "bold", colour = "black"), axis.title = element_text(face = "bold"),
+          plot.title = element_text(face = "bold", hjust = 0.5))
+}
+p_dist <- ld_side("Distant"); p_loc <- ld_side("Local")
+p <- p_dist + (p_loc + theme(axis.text.y = element_blank()))
+print(p); save_fig(p, "Fig_mash_local_distant_by_sharing", 14, 5.5)
+save_fig(p_dist, "Fig_mash_local_distant_by_sharing_distant", 9, 5.5)
+save_fig(p_loc, "Fig_mash_local_distant_by_sharing_local", 9, 5.5)
+```
+
+## 10.2 Publication figure: local vs distant eQTLs and sharing by magnitude
+
+(a) Composition of the shared list: local and distant eQTLs among the eQTLs shared by magnitude
+in all six datasets. (b) Yet a local eQTL
+is more likely to be shared by magnitude in all six datasets than a distant one (95% Wilson CI;
+odds ratio from the logistic regression adjusted for effect strength, Section 10). (c) The same
+comparison within bins of effect strength (max |posterior mean / posterior SD| over the six
+datasets): local eQTLs are more often shared at matched strength, so the difference is not only
+because local effects are larger. Numbers = eQTLs per bar / point.
+
+```{r fig-local-distant-pub, fig.width = 25.5, fig.height = 8}
+LD_PUB <- c(Local = "#eb6834", Distant = "#2a78d6")            # local / distant, same in every panel
+LD_TINT <- c(Local = "#f6b9a0", Distant = "#a9c9ef")           # not shared: tint of the same hue
+# same bold publication theme as the other Figure 4 panels, with light grid lines
+theme_pub <- pub_theme + theme(panel.grid.major.y = element_line(colour = "grey92", linewidth = 0.3),
+                               plot.caption = element_text(face = "bold", size = PUB_SMALL - 2, colour = "grey30"))
+
+ldp <- mash_ld %>% filter(!is.na(local_distant)) %>%
+  mutate(local_distant = factor(local_distant, c("Local", "Distant")))
+wilson <- function(x, n) { ci <- prop.test(x, n, correct = FALSE)$conf.int; tibble(lo = 100 * ci[1], hi = 100 * ci[2]) }
+
+# (a) composition of the shared list: local and distant eQTLs among those shared by magnitude in all six
+pa_dat <- ldp %>% filter(mag_shared_all6) %>% count(local_distant) %>%
+  mutate(pct = 100 * n / sum(n))
+pa <- ggplot(pa_dat, aes(n, local_distant, fill = local_distant)) +
+  geom_col(width = 0.6) +
+  geom_text(aes(label = sprintf("%d (%.0f%%)", n, pct)), hjust = -0.1, size = PUB_LABEL, fontface = "bold") +
+  scale_fill_manual(values = LD_PUB, guide = "none") +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.3))) +
+  labs(title = "a  Shared eQTLs: local vs distant", x = "eQTLs shared by magnitude in all 6", y = NULL) +
+  theme_pub + theme(panel.grid.major.y = element_blank(), panel.grid.major.x = element_line(colour = "grey92", linewidth = 0.3))
+
+# (b) % shared by magnitude in all six, with 95% CI
+pb_dat <- ldp %>% group_by(local_distant) %>%
+  summarise(n = n(), x = sum(mag_shared_all6), pct = 100 * x / n, .groups = "drop") %>%
+  mutate(ci = map2(x, n, wilson)) %>% unnest(ci)
+st <- shared_given_ld %>% filter(outcome == "mag_shared_all6")
+pb <- ggplot(pb_dat, aes(local_distant, pct, fill = local_distant)) +
+  geom_col(width = 0.55) +
+  geom_errorbar(aes(ymin = lo, ymax = hi), width = 0.15, linewidth = 0.5) +
+  geom_text(aes(y = hi, label = sprintf("%.0f%%\n(%d / %d)", pct, x, n)), vjust = -0.25, size = PUB_LABEL, fontface = "bold", lineheight = 0.9) +
+  annotate("text", x = 1.5, y = 118, size = PUB_LABEL - 0.5, fontface = "bold",
+           label = sprintf("adjusted OR = %.1f, p = %s", st$adj_OR_local, format(st$adj_p_local, digits = 1))) +
+  scale_fill_manual(values = LD_PUB, guide = "none") +
+  scale_y_continuous(limits = c(0, 122), breaks = seq(0, 100, 25), expand = expansion(mult = c(0, 0))) +
+  labs(title = "b  Local eQTLs are more often shared", x = NULL, y = "% shared by magnitude\nin all 6 datasets") +
+  theme_pub
+
+# (c) the same within bins of effect strength
+Z_BREAKS <- c(0, 3, 4, 5, Inf); Z_LABELS <- c("< 3", "3-4", "4-5", "> 5")
+pc_dat <- ldp %>% mutate(z_bin = cut(max_abs_z, Z_BREAKS, labels = Z_LABELS)) %>%
+  group_by(z_bin, local_distant) %>%
+  summarise(n = n(), x = sum(mag_shared_all6), pct = 100 * x / n, .groups = "drop") %>%
+  mutate(ci = map2(x, n, wilson)) %>% unnest(ci)
+dodge <- position_dodge(width = 0.5)
+pc <- ggplot(pc_dat, aes(z_bin, pct, colour = local_distant, group = local_distant)) +
+  geom_errorbar(aes(ymin = lo, ymax = hi), width = 0.15, linewidth = 0.5, position = dodge) +
+  geom_point(size = 5, position = dodge) +
+  geom_text(aes(y = -4, label = n), position = dodge, size = PUB_LABEL - 1, fontface = "bold", colour = "grey30", show.legend = FALSE) +
+  scale_colour_manual(values = LD_PUB, name = NULL) +
+  scale_y_continuous(limits = c(-8, 102), breaks = seq(0, 100, 25)) +
+  labs(title = "c  ... at the same effect strength", x = "effect strength (max |z| across datasets)",
+       y = "% shared by magnitude\nin all 6 datasets", caption = "numbers: eQTLs per point") +
+  theme_pub + theme(legend.position = "bottom")
+
+# (a, alternative) all significant eQTLs, local and distant, split into shared by magnitude in all 6 and not
+pa2_dat <- ldp %>% count(local_distant, mag_shared_all6) %>%
+  mutate(fill_key = paste(local_distant, mag_shared_all6))
+pa2_tot <- pa2_dat %>% group_by(local_distant) %>%
+  summarise(total = sum(n), shared = sum(n[mag_shared_all6]), .groups = "drop") %>%
+  mutate(label = sprintf("%d shared + %d not (n = %d)", shared, total - shared, total))
+pa2 <- ggplot(pa2_dat, aes(n, local_distant, fill = fill_key)) +
+  geom_col(width = 0.6, colour = "white", linewidth = 0.6, position = position_stack(reverse = TRUE)) +
+  geom_text(data = pa2_tot, aes(total, local_distant, label = label), inherit.aes = FALSE, hjust = -0.05, size = PUB_LABEL, fontface = "bold") +
+  scale_fill_manual(values = c("Local TRUE" = LD_PUB[["Local"]], "Local FALSE" = LD_TINT[["Local"]],
+                               "Distant TRUE" = LD_PUB[["Distant"]], "Distant FALSE" = LD_TINT[["Distant"]]),
+                    breaks = c("Distant TRUE", "Distant FALSE", "Local TRUE", "Local FALSE"),
+                    labels = c("distant, shared by magnitude in all 6", "distant, not shared in all 6",
+                               "local, shared by magnitude in all 6", "local, not shared in all 6")) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.6))) +
+  labs(title = "a  Local and distant eQTLs", x = "mashr eQTLs", y = NULL, fill = NULL) +
+  theme_pub + theme(legend.position = "bottom", legend.direction = "vertical",
+                    panel.grid.major.y = element_blank(), panel.grid.major.x = element_line(colour = "grey92", linewidth = 0.3))
+
+# combined figure in two versions (panel a = shared list only, or split), and each panel on its own
+p <- pa + pb + pc + plot_layout(widths = c(1.2, 0.8, 1.2))
+print(p); save_fig(p, "Fig_mash_pub_local_vs_distant_sharing", 3 * PANEL_W, PANEL_H)
+p <- pa2 + pb + pc + plot_layout(widths = c(1.4, 0.8, 1.2))
+print(p); save_fig(p, "Fig_mash_pub_local_vs_distant_sharing_split", 3.3 * PANEL_W, PANEL_H + 1)
+# individual panels: same plots without the a / b / c letters in the titles
+untag <- function(p, title) p + labs(title = title)
+save_fig(untag(pa,  "Shared eQTLs: local vs distant"),                 "Fig_mash_pub_local_vs_distant_panel_a_shared_only", PANEL_W, PANEL_H)
+save_fig(untag(pa2, "Local and distant eQTLs"),                        "Fig_mash_pub_local_vs_distant_panel_a_split", PANEL_W, PANEL_H + 1)
+save_fig(untag(pb,  "Local eQTLs are more often shared"),              "Fig_mash_pub_local_vs_distant_panel_b", PANEL_W, PANEL_H)
+save_fig(untag(pc,  "Local eQTLs are more often shared\nat the same effect strength"), "Fig_mash_pub_local_vs_distant_panel_c", PANEL_W, PANEL_H)
+write.csv(bind_rows(pa_dat %>% mutate(panel = "a"),
+                    pa2_dat %>% select(-fill_key) %>% mutate(panel = "a_split"),
+                    pb_dat %>% mutate(panel = "b"),
+                    pc_dat %>% mutate(panel = "c", z_bin = as.character(z_bin))),
+          file.path(OUTPUT_DIR, "Fig_mash_pub_local_vs_distant_sharing_data.csv"), row.names = FALSE)
+```
+
+```{r session}
+sessionInfo()
+```

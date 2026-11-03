@@ -1,0 +1,781 @@
+---
+title: "1a.Table_describing_the_strain_genotype"
+output: html_document
+---
+
+#Load the data
+```{r}
+single_cell_strains <- read.csv("/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Agrawal_single_cell_eqtl_cell_cycle/Figure.1/Fig.1-all-experiment-table/StrainsforSC-RNAseq.csv")
+
+str(single_cell_strains)
+
+
+#Ignore row where Standardized.name == DGY3
+single_cell_strains <- single_cell_strains[single_cell_strains$Standardized.name != "DGY3", ]
+
+#calculate the percentage of zygosity, i.e., what is the percentage of heterozygous strains in the dataset
+sum(single_cell_strains$Zygosity == "heterozygous") / nrow(single_cell_strains) * 100
+#homozygous strains??
+sum(single_cell_strains$Zygosity == "homozygous") / nrow(single_cell_strains) * 100
+
+```
+
+#The vcf files used
+```{r}
+# ===================================================================
+# Variant configuration (SNPs, CNVs, InDels, SVs)
+# Same genotype files as Fig3_panel_B_C_D_variant_eqtl_classification.Rmd:
+# old SNP and InDel files, new SV and gene-based CNV files. Gene-based CNVs
+# are kept as their own variant type (not merged into SVs).
+# ===================================================================
+variant_cfg <- list(
+  SNPs = list(
+    # 96-strain file (MAF 15% computed across all 96 strains)
+    geno         = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/pan_transcriptome_paper/SNPs/SNPs_96_strain_filtering_no_change_name/SNPs_96_strains_MAF15_filtering/SNPs.96strains.maf15.plink"
+  ),
+  CNVs = list(
+    geno         = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/structural_variant_vcf/SVcalls2/SVcalls/CNVs_96_strains/CNV_96strains_maf15/CNVs.96strains.maf15.plink"
+  ),
+  InDels = list(
+    geno         = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/vcf_files_sent_by_Anne/SNPs_indels/modified_snp_indel_plink_for_96strains/Indels_only_96/indels.96samples"
+  ),
+  SVs = list(
+    geno         = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/structural_variant_vcf/SVcalls2/SVcalls/SVs_1087/SVs_96/SV_96_maf_15/SV.96strains.maf15.plink"
+  )
+)
+```
+
+#Categorize SV types
+```{r}
+# Read the SVs .bim file (PLINK bim: CHR, SNP, CM, POS, A1, A2)
+sv_bim <- read.table(paste0(variant_cfg$SVs$geno, ".bim"), header = FALSE, stringsAsFactors = FALSE)
+colnames(sv_bim) <- c("CHR", "SNP", "CM", "POS", "A1", "A2")
+
+# Total number of SVs
+cat("Total number of SVs:", nrow(sv_bim), "\n")
+
+# Extract SV subtypes from the SNP column (format: ID_TYPE_CHR_POS_len_SIZE_[TyRelated])
+sv_bim$SV_subtype <- sapply(strsplit(sv_bim$SNP, "_"), function(parts) {
+  if (length(parts) >= 2) {
+    return(parts[2])
+  }
+  return("Unknown")
+})
+
+# Number of SVs per subtype
+table(sv_bim$SV_subtype)
+
+# Assign broad categories based on subtype
+sv_bim$SV_broad_category <- NA
+sv_bim$SV_broad_category[sv_bim$SV_subtype %in% c("INS", "DEL")] <- "PAVs"
+sv_bim$SV_broad_category[sv_bim$SV_subtype %in% c("DUP", "CONTR")] <- "CNVs"
+sv_bim$SV_broad_category[sv_bim$SV_subtype %in% c("TRA", "INV")] <- "Structural Rearrangements"
+
+# Number of SVs per broad category
+table(sv_bim$SV_broad_category, useNA = "ifany")
+```
+
+#check the number of strains by comparing the number of strains in sample_used.txt and the .fam file
+```{r}
+sample_used <- read.table("/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/sample_used.txt", header = FALSE, stringsAsFactors = FALSE)
+str(sample_used)
+
+sv.fam <- read.table(paste0(variant_cfg$SVs$geno, ".fam"), header = FALSE, stringsAsFactors = FALSE)
+str(sv.fam)
+#check the number of strains in sample_used.txt and the .fam file
+cat("Number of strains in sample_used.txt:", nrow(sample_used), "\n")
+cat("Number of strains in .fam file:", nrow(sv.fam), "\n")
+
+#Is all the strains in sample_used.txt present in the .fam file?
+all(sample_used$V1 %in% sv.fam$V1)
+```
+
+
+
+## Check strain IDs in the 96-strain SV .fam file against sample_used.txt (the old full966 SV file was missing SACE_YCY and had AVI written as AVI_1a)
+```{r}
+#Another SV .fam file to check the number of strains
+sv_96 <- read.table(
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/structural_variant_vcf/SVcalls2/SVcalls/SVs_1087/SVs_96/SV_96_maf_15/SV.96strains.maf15.plink.fam",
+  header = FALSE,
+  stringsAsFactors = FALSE
+)
+
+# The .fam file stores most strain IDs in both columns (V1 == V2, e.g.
+# "AAA AAA"), but strains whose name has an underscore (e.g. SACE_YBJ) are
+# split across the two columns instead (V1 = "SACE", V2 = "YBJ"). Rebuild
+# the underscore-joined ID only for those split rows so it matches the
+# single-column format used in sample_used.txt.
+sv_96_ids <- ifelse(sv_96$V1 == sv_96$V2, sv_96$V1, paste(sv_96$V1, sv_96$V2, sep = "_"))
+
+#now Is all the strains in sample_used.txt present in the .fam file?
+all(sample_used$V1 %in% sv_96_ids)
+
+#number of strains that are in sample_used.txt but not in the .fam file and also the name and vice versa
+not_in_fam <- setdiff(sample_used$V1, sv_96_ids)
+not_in_sample_used <- setdiff(sv_96_ids, sample_used$V1)
+cat("Strains in sample_used.txt but not in .fam file:", not_in_fam, "\n")
+#also print the number of strains that are in sample_used.txt but not in the .fam file
+cat("Number of strains in sample_used.txt but not in .fam file:", length(not_in_fam), "\n")
+
+#also print the number of strains that are in .fam file but not in sample_used.txt
+cat("Number of strains in .fam file but not in sample_used.txt:", length(not_in_sample_used), "\n")
+```
+
+#Similarly, compute the number of variants in each of the variant types (SNPs, InDels, SVs) and their respective subtypes. This will help in understanding the distribution of genetic variations across the strains used in the study.
+```{r}
+# Read the SNP .bim file (PLINK bim: CHR, SNP, CM, POS, A1, A2)
+snp_bim <- read.table(paste0(variant_cfg$SNPs$geno, ".bim"), header = FALSE, stringsAsFactors = FALSE)
+colnames(snp_bim) <- c("CHR", "SNP", "CM", "POS", "A1", "A2")
+
+# Total number of SNPs
+cat("Total number of SNPs:", nrow(snp_bim), "\n")
+
+# Read the InDel .bim file (PLINK bim: CHR, SNP, CM, POS, A1, A2)
+indel_bim <- read.table(paste0(variant_cfg$InDels$geno, ".bim"), header = FALSE, stringsAsFactors = FALSE)
+colnames(indel_bim) <- c("CHR", "SNP", "CM", "POS", "A1", "A2")
+
+# Total number of InDels
+cat("Total number of InDels:", nrow(indel_bim), "\n")
+
+# Read the SV .bim file (PLINK bim: CHR, SNP, CM, POS, A1, A2)
+sv_bim <- read.table(paste0(variant_cfg$SVs$geno, ".bim"), header = FALSE, stringsAsFactors = FALSE)
+colnames(sv_bim) <- c("CHR", "SNP", "CM", "POS", "A1", "A2")
+
+# Total number of SVs
+cat("Total number of SVs:", nrow(sv_bim), "\n")
+
+# Read the gene CNV .bim file (PLINK bim: CHR, SNP, CM, POS, A1, A2)
+cnv_bim <- read.table(paste0(variant_cfg$CNVs$geno, ".bim"), header = FALSE, stringsAsFactors = FALSE)
+colnames(cnv_bim) <- c("CHR", "SNP", "CM", "POS", "A1", "A2")
+
+# Total number of CNVs
+cat("Total number of CNVs:", nrow(cnv_bim), "\n")
+```
+
+#Categorize gene CNVs. Variant IDs look like YAL069W_Cov0.25, i.e. GENE_CovX, where X is a relative-coverage threshold for that gene (1 = normal copy number). A gene can therefore contribute several markers (one per threshold). Thresholds below 1 are copy-number losses and thresholds above 1 are copy-number gains.
+```{r}
+# Each CNV marker is a below/above split of the gene's normalized depth at the
+# threshold in its name, called per strain. Normalized depth 1 = the isolate's
+# genome-wide median (normal copy number; all 96 strains are diploid, so one
+# copy = 0.5). Allele coding (checked on full1086.CNVs.MAC1.plink using the
+# nesting of thresholds, i.e. below 0.25 must imply below 0.75, which holds for
+# all 3,173 genes with both markers only under this coding):
+#   allele "2" = normalized depth BELOW the threshold
+#   allele "1" = normalized depth ABOVE the threshold
+# e.g. a strain with allele "2" at GENE_Cov0.25 has lost the gene completely.
+# All calls are homozygous (1/1 or 2/2). PLINK orders A1/A2 by minor allele, so
+# A1/A2 position (and the 0/1/2 code from read_plink_bed) differ between
+# markers; use the allele label, not its position, to interpret a strain's state.
+# Remove chromosome 17 (unplaced, non-reference gene families), as in Fig. 3.
+# cnv_bim_all keeps every marker so the .bed file can still be read in full;
+# cnv_keep selects the retained rows of the genotype matrix later on.
+cnv_bim_all <- cnv_bim
+cnv_keep    <- cnv_bim_all$CHR != 17
+cnv_bim     <- cnv_bim_all[cnv_keep, ]
+cat("Gene-based CNV markers on chromosome 17 removed:", sum(!cnv_keep),
+    "- remaining:", nrow(cnv_bim), "\n")
+
+cnv_bim$Gene <- sub("_Cov[0-9.]+$", "", cnv_bim$SNP)
+cnv_bim$Cov_threshold <- as.numeric(sub("^.*_Cov", "", cnv_bim$SNP))
+
+cnv_bim$Variant_Subtype <- ifelse(
+  is.na(cnv_bim$Cov_threshold), "Unknown",
+  ifelse(cnv_bim$Cov_threshold < 1, "Loss", "Gain")
+)
+
+# Number of CNV markers per subtype
+table(cnv_bim$Variant_Subtype, useNA = "ifany")
+
+# Number of distinct genes with a CNV marker, overall and per subtype
+cat("Number of genes with at least one CNV marker:", length(unique(cnv_bim$Gene)), "\n")
+tapply(cnv_bim$Gene, cnv_bim$Variant_Subtype, function(g) length(unique(g)))
+```
+
+
+
+An example: 
+
+1       chromosome1_1149_G_GTA  0       1149    GTA     G
+
+GTA is Alternate allele and G is reference allele. This is how I categorized it from the gwas results. Is this correct? 
+
+indel_data$Variant_Subtype <- sapply(strsplit(indel_data$SNP, "_"), function(parts) {
+  if (length(parts) >= 4) {
+    ref_allele <- parts[3]
+    alt_allele <- parts[4]
+    
+    ref_len <- nchar(ref_allele)
+    alt_len <- nchar(alt_allele)
+    
+    if (alt_len > ref_len) {
+      return("INS")
+    } else if (ref_len > alt_len) {
+      return("DEL")
+    } else if (ref_len == alt_len && ref_len > 1) {
+      return("MNV")
+    } else {
+      return("Unknown")
+    }
+  }
+  return("Unknown")
+})
+
+Here, I need to categorization using the .bim file
+
+```{r}
+  # Only for InDels: categorize variants as INS, DEL, or MNV using the .bim file.
+  # The variant ID is expected to have the format chromosome_position_REF_ALT.
+  indel_data <- indel_bim
+
+  indel_alleles <- strsplit(as.character(indel_data$SNP), "_", fixed = TRUE)
+
+  indel_data$REF <- vapply(indel_alleles, function(parts) {
+    if (length(parts) >= 4) parts[3] else NA_character_
+  }, character(1))
+
+  indel_data$ALT <- vapply(indel_alleles, function(parts) {
+    if (length(parts) >= 4) parts[4] else NA_character_
+  }, character(1))
+
+  indel_data$Variant_Subtype <- ifelse(
+    is.na(indel_data$REF) | is.na(indel_data$ALT),
+    "Unknown",
+    ifelse(
+      nchar(indel_data$ALT) > nchar(indel_data$REF), "INS",
+      ifelse(
+        nchar(indel_data$REF) > nchar(indel_data$ALT), "DEL",
+        ifelse(nchar(indel_data$REF) > 1, "MNV", "Unknown")
+      )
+    )
+  )
+
+  # Number of InDels in each subtype.
+  table(indel_data$Variant_Subtype, useNA = "ifany")
+```
+
+
+#compute if the number of strains in the .fam file and the number of strains in the sample_used.txt file are equal. If not, print the number of strains in each file and the difference. Do this for Indels and SNPs. 
+```{r}
+# Read the .fam file for InDels
+
+indel_fam <- read.table(paste0(variant_cfg$InDels$geno, ".fam"), header = FALSE, stringsAsFactors = FALSE)
+
+# Read the .fam file for SNPs.
+snp_fam <- read.table(paste0(variant_cfg$SNPs$geno, ".fam"), header = FALSE, stringsAsFactors = FALSE)
+
+# Read the .fam file for CNVs.
+cnv_fam <- read.table(paste0(variant_cfg$CNVs$geno, ".fam"), header = FALSE, stringsAsFactors = FALSE)
+
+# Compare the number of strains in sample_used.txt with each .fam file.
+compare_strain_counts <- function(fam_data, variant_type) {
+  sample_count <- nrow(sample_used)
+  fam_count <- nrow(fam_data)
+
+  if (sample_count == fam_count) {
+    cat(variant_type, ": counts are equal (", sample_count, " strains)\n", sep = "")
+  } else {
+    cat(variant_type, ": counts are not equal\n", sep = "")
+    cat("  sample_used.txt: ", sample_count, " strains\n", sep = "")
+    cat("  .fam file: ", fam_count, " strains\n", sep = "")
+    cat("  Difference (sample_used.txt - .fam): ", sample_count - fam_count, " strains\n", sep = "")
+  }
+}
+
+compare_strain_counts(indel_fam, "InDels")
+compare_strain_counts(snp_fam, "SNPs")
+compare_strain_counts(cnv_fam, "CNVs")
+
+
+```
+
+
+
+
+```{r}
+# The .fam file stores most strain IDs in both columns (V1 == V2, e.g.
+# "AAA AAA"), but strains whose name has an underscore (e.g. SACE_YBJ) are
+# split into a family ID and an individual ID across the two columns instead
+# (V1 = "SACE", V2 = "YBJ"). Join V1 and V2 only when they differ so the
+# result matches the single-column, underscore-joined format used in
+# sample_used.txt. Not every strain has an underscore, so this only changes
+# the rows where V1 != V2.
+normalize_fam_ids <- function(fam_data) {
+  ifelse(fam_data$V1 == fam_data$V2, fam_data$V1, paste(fam_data$V1, fam_data$V2, sep = "_"))
+}
+
+compare_strain_ids <- function(fam_data, variant_type) {
+  fam_ids <- normalize_fam_ids(fam_data)
+  missing_from_fam <- setdiff(sample_used$V1, fam_ids)
+  extra_in_fam <- setdiff(fam_ids, sample_used$V1)
+
+  cat(variant_type, ": ", length(intersect(sample_used$V1, fam_ids)),
+      " matching strains\n", sep = "")
+  cat("  In sample_used.txt but not in .fam (", length(missing_from_fam), "): ",
+      paste(missing_from_fam, collapse = ", "), "\n", sep = "")
+}
+
+compare_strain_ids(indel_fam, "InDels")
+compare_strain_ids(snp_fam, "SNPs")
+compare_strain_ids(sv_96, "SVs")
+compare_strain_ids(cnv_fam, "CNVs")
+```
+#In SNPs SACE_YCY is missing and in SVs SACE_YCY and / (is present as _1a) is missing. 
+
+#Make a table with number of SNPs, Indels and SVs and their respective subtypes.
+#The table should have the following columns: Variant Type, subtype, total number of variants
+```{r}
+# SNPs are not split into subtypes, so they get a single "SNP" row.
+snp_summary <- data.frame(
+  `Variant Type` = "SNPs",
+  Subtype = "SNP",
+  `Total number of variants` = nrow(snp_bim),
+  check.names = FALSE
+)
+
+# InDels: subtypes (INS, DEL, MNV) were computed above in indel_data$Variant_Subtype.
+indel_summary <- as.data.frame(table(indel_data$Variant_Subtype), stringsAsFactors = FALSE)
+colnames(indel_summary) <- c("Subtype", "Total number of variants")
+indel_summary <- cbind(`Variant Type` = "InDels", indel_summary)
+
+# SVs: subtypes are parsed from the variant ID (parts[2] of the SNP column), as above.
+sv_subtype <- sapply(strsplit(sv_bim$SNP, "_"), function(parts) {
+  if (length(parts) >= 2) parts[2] else "Unknown"
+})
+sv_summary <- as.data.frame(table(sv_subtype), stringsAsFactors = FALSE)
+colnames(sv_summary) <- c("Subtype", "Total number of variants")
+sv_summary <- cbind(`Variant Type` = "SVs", sv_summary)
+
+# Gene-based CNVs (own variant type, chr 17 removed): subtypes Loss / Gain
+# computed above in cnv_bim$Variant_Subtype. Counts are gene x coverage-
+# threshold markers, not independent CNV events.
+cnv_summary <- as.data.frame(table(cnv_bim$Variant_Subtype), stringsAsFactors = FALSE)
+colnames(cnv_summary) <- c("Subtype", "Total number of variants")
+cnv_summary <- cbind(`Variant Type` = "Gene-based CNVs", cnv_summary)
+
+# Combine into one table with the requested columns.
+variant_summary_table <- rbind(snp_summary, indel_summary, sv_summary, cnv_summary)
+variant_summary_table <- variant_summary_table[, c("Variant Type", "Subtype", "Total number of variants")]
+
+knitr::kable(variant_summary_table, row.names = FALSE)
+
+# Table 1: variant type / subtype / total count for the 96 strains used in this study.
+write.csv(variant_summary_table, "../results/Table1_variant_type_subtype_summary.csv", row.names = FALSE)
+```
+
+
+
+#Make the same Variant Type / Subtype / total number of variants table, but for the full966 SV file (sv_966) instead of the SVs file in variant_cfg. Variant IDs here look like SV_4_TRA_chromosome1_774_len_10371, so the subtype is the 3rd underscore-separated field.
+```{r}
+# sv_966_bim <- read.table(
+#   "/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/vcf_files_sent_by_Anne/SVs/full966.SVs.plink.bim",
+#   header = FALSE, stringsAsFactors = FALSE
+# )
+# colnames(sv_966_bim) <- c("CHR", "SNP", "CM", "POS", "A1", "A2")
+# 
+# # Total number of SVs in this file
+# cat("Total number of SVs (full966):", nrow(sv_966_bim), "\n")
+# 
+# sv_966_subtype <- sapply(strsplit(sv_966_bim$SNP, "_"), function(parts) {
+#   if (length(parts) >= 3) parts[3] else "Unknown"
+# })
+# 
+# # Number of SVs per subtype
+# table(sv_966_subtype, useNA = "ifany")
+# 
+# sv_966_summary <- as.data.frame(table(sv_966_subtype), stringsAsFactors = FALSE)
+# colnames(sv_966_summary) <- c("Subtype", "Total number of variants")
+# sv_966_summary <- cbind(`Variant Type` = "SVs (full966)", sv_966_summary)
+# sv_966_summary <- sv_966_summary[, c("Variant Type", "Subtype", "Total number of variants")]
+# 
+# knitr::kable(sv_966_summary, row.names = FALSE)
+```
+
+#Next, I want to find SNP differences between strains in sample_used. For examples, which strains in the have the most SNP difference and the least SNP difference. What is the average SNP difference between the strains?
+```{r}
+# Read a PLINK .bed file (SNP-major mode) into an n_snps x n_ind genotype
+# matrix. Genotype codes follow PLINK's convention: 0 = homozygous A1/A1,
+# 1 = heterozygous, 2 = homozygous A2/A2, NA = missing.
+read_plink_bed <- function(bed_file, n_snps, n_ind) {
+  con <- file(bed_file, "rb")
+  on.exit(close(con))
+
+  magic <- readBin(con, what = "raw", n = 3)
+  stopifnot(magic[1] == as.raw(0x6c), magic[2] == as.raw(0x1b), magic[3] == as.raw(0x01))
+
+  bytes_per_snp <- ceiling(n_ind / 4)
+  lookup <- c(0, NA, 1, 2) # code (0..3) -> genotype (copies of A2 allele)
+
+  geno <- matrix(NA_real_, nrow = n_snps, ncol = n_ind)
+  for (s in seq_len(n_snps)) {
+    raw_bytes <- as.integer(readBin(con, what = "raw", n = bytes_per_snp))
+    c0 <- bitwAnd(raw_bytes, 3L)
+    c1 <- bitwAnd(bitwShiftR(raw_bytes, 2L), 3L)
+    c2 <- bitwAnd(bitwShiftR(raw_bytes, 4L), 3L)
+    c3 <- bitwAnd(bitwShiftR(raw_bytes, 6L), 3L)
+    codes <- as.vector(rbind(c0, c1, c2, c3))[seq_len(n_ind)]
+    geno[s, ] <- lookup[codes + 1L]
+  }
+  geno
+}
+
+snp_fam_ids <- normalize_fam_ids(snp_fam)
+snp_geno <- read_plink_bed(paste0(variant_cfg$SNPs$geno, ".bed"), nrow(snp_bim), nrow(snp_fam))
+
+# Restrict to strains that are actually in sample_used.txt.
+keep_idx <- which(snp_fam_ids %in% sample_used$V1)
+cat("Strains in sample_used.txt found in the SNP genotype data:", length(keep_idx),
+    "out of", nrow(sample_used), "\n")
+
+snp_fam_ids <- snp_fam_ids[keep_idx]
+snp_geno <- snp_geno[, keep_idx, drop = FALSE]
+
+# Build indicator matrices (SNPs x strains) for each genotype class and for
+# non-missing calls, then use crossprod to get, for every pair of strains,
+# the number of SNPs where both are called and the number where they agree.
+# This avoids looping over all strain pairs directly (much faster in R).
+not_missing <- !is.na(snp_geno)
+I0 <- (not_missing & snp_geno == 0) * 1
+I1 <- (not_missing & snp_geno == 1) * 1
+I2 <- (not_missing & snp_geno == 2) * 1
+Mvalid <- not_missing * 1
+
+agree_count <- crossprod(I0) + crossprod(I1) + crossprod(I2)
+valid_count <- crossprod(Mvalid)
+diff_count <- valid_count - agree_count
+
+rownames(diff_count) <- colnames(diff_count) <- snp_fam_ids
+
+# Only keep the off-diagonal (i != j) pairwise differences.
+diag(diff_count) <- NA
+pair_idx <- which(upper.tri(diff_count), arr.ind = TRUE)
+pairwise_snp_diff <- data.frame(
+  Strain1 = rownames(diff_count)[pair_idx[, 1]],
+  Strain2 = colnames(diff_count)[pair_idx[, 2]],
+  SNP_differences = diff_count[pair_idx],
+  Valid_sites = valid_count[pair_idx]
+)
+# Per-site rate: differences divided by the number of SNP sites where both
+# strains were called (accounts for pairs with more/less missingness).
+pairwise_snp_diff$SNP_diff_per_site <- pairwise_snp_diff$SNP_differences / pairwise_snp_diff$Valid_sites
+
+# Pair with the most and least SNP differences.
+most_diff_pair <- pairwise_snp_diff[which.max(pairwise_snp_diff$SNP_differences), ]
+least_diff_pair <- pairwise_snp_diff[which.min(pairwise_snp_diff$SNP_differences), ]
+
+cat("Strain pair with the MOST SNP differences:\n")
+print(most_diff_pair)
+
+cat("\nStrain pair with the LEAST SNP differences:\n")
+print(least_diff_pair)
+
+cat("\nAverage SNP difference between strains:", mean(pairwise_snp_diff$SNP_differences), "\n")
+cat("Median SNP difference between strains:", median(pairwise_snp_diff$SNP_differences), "\n")
+cat("Average SNP differences per site between strain pairs:", mean(pairwise_snp_diff$SNP_diff_per_site), "\n")
+cat("Median SNP differences per site between strain pairs:", median(pairwise_snp_diff$SNP_diff_per_site), "\n")
+```
+
+#Same pairwise-difference analysis for InDels (indel data is already restricted to the 96 strains used in this study).
+```{r}
+indel_fam_ids <- normalize_fam_ids(indel_fam)
+indel_geno <- read_plink_bed(paste0(variant_cfg$InDels$geno, ".bed"), nrow(indel_bim), nrow(indel_fam))
+
+# Restrict to strains that are actually in sample_used.txt.
+keep_idx_indel <- which(indel_fam_ids %in% sample_used$V1)
+cat("Strains in sample_used.txt found in the InDel genotype data:", length(keep_idx_indel),
+    "out of", nrow(sample_used), "\n")
+
+indel_fam_ids <- indel_fam_ids[keep_idx_indel]
+indel_geno <- indel_geno[, keep_idx_indel, drop = FALSE]
+
+not_missing <- !is.na(indel_geno)
+I0 <- (not_missing & indel_geno == 0) * 1
+I1 <- (not_missing & indel_geno == 1) * 1
+I2 <- (not_missing & indel_geno == 2) * 1
+Mvalid <- not_missing * 1
+
+agree_count_indel <- crossprod(I0) + crossprod(I1) + crossprod(I2)
+valid_count_indel <- crossprod(Mvalid)
+diff_count_indel <- valid_count_indel - agree_count_indel
+
+rownames(diff_count_indel) <- colnames(diff_count_indel) <- indel_fam_ids
+diag(diff_count_indel) <- NA
+
+pair_idx_indel <- which(upper.tri(diff_count_indel), arr.ind = TRUE)
+pairwise_indel_diff <- data.frame(
+  Strain1 = rownames(diff_count_indel)[pair_idx_indel[, 1]],
+  Strain2 = colnames(diff_count_indel)[pair_idx_indel[, 2]],
+  InDel_differences = diff_count_indel[pair_idx_indel],
+  Valid_sites = valid_count_indel[pair_idx_indel]
+)
+pairwise_indel_diff$InDel_diff_per_site <- pairwise_indel_diff$InDel_differences / pairwise_indel_diff$Valid_sites
+
+most_diff_pair_indel <- pairwise_indel_diff[which.max(pairwise_indel_diff$InDel_differences), ]
+least_diff_pair_indel <- pairwise_indel_diff[which.min(pairwise_indel_diff$InDel_differences), ]
+
+cat("Strain pair with the MOST InDel differences:\n")
+print(most_diff_pair_indel)
+
+cat("\nStrain pair with the LEAST InDel differences:\n")
+print(least_diff_pair_indel)
+
+cat("\nAverage InDel difference between strains:", mean(pairwise_indel_diff$InDel_differences), "\n")
+cat("Median InDel difference between strains:", median(pairwise_indel_diff$InDel_differences), "\n")
+cat("Average InDel differences per site between strain pairs:", mean(pairwise_indel_diff$InDel_diff_per_site), "\n")
+cat("Median InDel differences per site between strain pairs:", median(pairwise_indel_diff$InDel_diff_per_site), "\n")
+```
+
+#Same pairwise-difference analysis for SVs, restricted to the 96 strains used in this study (the SV genotype file contains 1087 samples, so it needs the same sample_used.txt filtering as SNPs).
+```{r}
+sv_fam_ids <- normalize_fam_ids(sv.fam)
+# This SV genotype file stores the strain "AVI" with FID/IID = "AVI"/"1a" (not
+# "AVI"/"AVI" like other single-token strains), so normalize_fam_ids() would
+# otherwise turn it into "AVI_1a", which wouldn't match sample_used.txt's "AVI".
+sv_fam_ids[sv_fam_ids == "AVI_1a"] <- "AVI"
+sv_geno <- read_plink_bed(paste0(variant_cfg$SVs$geno, ".bed"), nrow(sv_bim), nrow(sv.fam))
+
+# Restrict to strains that are actually in sample_used.txt.
+keep_idx_sv <- which(sv_fam_ids %in% sample_used$V1)
+cat("Strains in sample_used.txt found in the SV genotype data:", length(keep_idx_sv),
+    "out of", nrow(sample_used), "\n")
+
+sv_fam_ids <- sv_fam_ids[keep_idx_sv]
+sv_geno <- sv_geno[, keep_idx_sv, drop = FALSE]
+
+not_missing <- !is.na(sv_geno)
+I0 <- (not_missing & sv_geno == 0) * 1
+I1 <- (not_missing & sv_geno == 1) * 1
+I2 <- (not_missing & sv_geno == 2) * 1
+Mvalid <- not_missing * 1
+
+agree_count_sv <- crossprod(I0) + crossprod(I1) + crossprod(I2)
+valid_count_sv <- crossprod(Mvalid)
+diff_count_sv <- valid_count_sv - agree_count_sv
+
+rownames(diff_count_sv) <- colnames(diff_count_sv) <- sv_fam_ids
+diag(diff_count_sv) <- NA
+
+pair_idx_sv <- which(upper.tri(diff_count_sv), arr.ind = TRUE)
+pairwise_sv_diff <- data.frame(
+  Strain1 = rownames(diff_count_sv)[pair_idx_sv[, 1]],
+  Strain2 = colnames(diff_count_sv)[pair_idx_sv[, 2]],
+  SV_differences = diff_count_sv[pair_idx_sv],
+  Valid_sites = valid_count_sv[pair_idx_sv]
+)
+pairwise_sv_diff$SV_diff_per_site <- pairwise_sv_diff$SV_differences / pairwise_sv_diff$Valid_sites
+
+most_diff_pair_sv <- pairwise_sv_diff[which.max(pairwise_sv_diff$SV_differences), ]
+least_diff_pair_sv <- pairwise_sv_diff[which.min(pairwise_sv_diff$SV_differences), ]
+
+cat("Strain pair with the MOST SV differences:\n")
+print(most_diff_pair_sv)
+
+cat("\nStrain pair with the LEAST SV differences:\n")
+print(least_diff_pair_sv)
+
+cat("\nAverage SV difference between strains:", mean(pairwise_sv_diff$SV_differences), "\n")
+cat("Median SV difference between strains:", median(pairwise_sv_diff$SV_differences), "\n")
+cat("Average SV differences per site between strain pairs:", mean(pairwise_sv_diff$SV_diff_per_site), "\n")
+cat("Median SV differences per site between strain pairs:", median(pairwise_sv_diff$SV_diff_per_site), "\n")
+```
+
+#Same pairwise-difference analysis for gene-based CNVs (chr 17 removed), restricted to the 96 strains used in this study. Note that a gene CNV "site" is a gene x coverage-threshold marker, so one gene can contribute several differences.
+```{r}
+cnv_fam_ids <- normalize_fam_ids(cnv_fam)
+# Read all markers (the .bed has one row per marker in cnv_bim_all), then drop chr 17.
+cnv_geno <- read_plink_bed(paste0(variant_cfg$CNVs$geno, ".bed"), nrow(cnv_bim_all), nrow(cnv_fam))
+cnv_geno <- cnv_geno[cnv_keep, , drop = FALSE]
+
+# Restrict to strains that are actually in sample_used.txt.
+keep_idx_cnv <- which(cnv_fam_ids %in% sample_used$V1)
+cat("Strains in sample_used.txt found in the CNV genotype data:", length(keep_idx_cnv),
+    "out of", nrow(sample_used), "\n")
+
+cnv_fam_ids <- cnv_fam_ids[keep_idx_cnv]
+cnv_geno <- cnv_geno[, keep_idx_cnv, drop = FALSE]
+
+not_missing <- !is.na(cnv_geno)
+I0 <- (not_missing & cnv_geno == 0) * 1
+I1 <- (not_missing & cnv_geno == 1) * 1
+I2 <- (not_missing & cnv_geno == 2) * 1
+Mvalid <- not_missing * 1
+
+agree_count_cnv <- crossprod(I0) + crossprod(I1) + crossprod(I2)
+valid_count_cnv <- crossprod(Mvalid)
+diff_count_cnv <- valid_count_cnv - agree_count_cnv
+
+rownames(diff_count_cnv) <- colnames(diff_count_cnv) <- cnv_fam_ids
+diag(diff_count_cnv) <- NA
+
+pair_idx_cnv <- which(upper.tri(diff_count_cnv), arr.ind = TRUE)
+pairwise_cnv_diff <- data.frame(
+  Strain1 = rownames(diff_count_cnv)[pair_idx_cnv[, 1]],
+  Strain2 = colnames(diff_count_cnv)[pair_idx_cnv[, 2]],
+  CNV_differences = diff_count_cnv[pair_idx_cnv],
+  Valid_sites = valid_count_cnv[pair_idx_cnv]
+)
+pairwise_cnv_diff$CNV_diff_per_site <- pairwise_cnv_diff$CNV_differences / pairwise_cnv_diff$Valid_sites
+
+most_diff_pair_cnv <- pairwise_cnv_diff[which.max(pairwise_cnv_diff$CNV_differences), ]
+least_diff_pair_cnv <- pairwise_cnv_diff[which.min(pairwise_cnv_diff$CNV_differences), ]
+
+cat("Strain pair with the MOST CNV differences:\n")
+print(most_diff_pair_cnv)
+
+cat("\nStrain pair with the LEAST CNV differences:\n")
+print(least_diff_pair_cnv)
+
+cat("\nAverage CNV difference between strains:", mean(pairwise_cnv_diff$CNV_differences), "\n")
+cat("Median CNV difference between strains:", median(pairwise_cnv_diff$CNV_differences), "\n")
+cat("Average CNV differences per site between strain pairs:", mean(pairwise_cnv_diff$CNV_diff_per_site), "\n")
+cat("Median CNV differences per site between strain pairs:", median(pairwise_cnv_diff$CNV_diff_per_site), "\n")
+```
+
+#Summary table of pairwise divergence (raw counts and per-site rates) across SNPs, InDels, SVs and gene-based CNVs, for reporting how genetically diverged the 96 strains are.
+```{r}
+# Nuclear genome length, used as the denominator for a genome-wide (rather than
+# called-sites-only) divergence rate. The SNP/InDel/SV .bim files all use plain
+# chromosome numbers 1-16 (no Mito or Marker/kanMX-natMX cassette variants), so
+# only the 16 nuclear chromosomes are summed here.
+ref_fai <- read.table(
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/creating_different_Ref_genomes_for_S288C/customized_ref_genome_with_kan_and_nat_annotations/S.cerevisiae_ref_with_clean_gtf/fasta/genome.fa.fai",
+  header = FALSE, stringsAsFactors = FALSE
+)
+colnames(ref_fai) <- c("contig", "length", "offset", "linebases", "linewidth")
+nuclear_genome_length <- sum(ref_fai$length[!ref_fai$contig %in% c("Mito", "Marker")])
+cat("Nuclear genome length (chr I-XVI):", nuclear_genome_length, "bp\n")
+
+pairwise_summary_table <- data.frame(
+  `Variant Type` = c("SNPs", "InDels", "SVs", "Gene-based CNVs"),
+  `Median pairwise differences` = c(
+    median(pairwise_snp_diff$SNP_differences),
+    median(pairwise_indel_diff$InDel_differences),
+    median(pairwise_sv_diff$SV_differences),
+    median(pairwise_cnv_diff$CNV_differences)
+  ),
+  `Mean pairwise differences` = c(
+    mean(pairwise_snp_diff$SNP_differences),
+    mean(pairwise_indel_diff$InDel_differences),
+    mean(pairwise_sv_diff$SV_differences),
+    mean(pairwise_cnv_diff$CNV_differences)
+  ),
+  `Median per-site rate` = c(
+    median(pairwise_snp_diff$SNP_diff_per_site),
+    median(pairwise_indel_diff$InDel_diff_per_site),
+    median(pairwise_sv_diff$SV_diff_per_site),
+    median(pairwise_cnv_diff$CNV_diff_per_site)
+  ),
+  `Mean per-site rate` = c(
+    mean(pairwise_snp_diff$SNP_diff_per_site),
+    mean(pairwise_indel_diff$InDel_diff_per_site),
+    mean(pairwise_sv_diff$SV_diff_per_site),
+    mean(pairwise_cnv_diff$CNV_diff_per_site)
+  ),
+  check.names = FALSE
+)
+
+# Genome-wide divergence rate: median pairwise differences divided by the
+# nuclear genome length, instead of by the number of MAF>15% sites analyzed.
+# This is the number to quote alongside the per-site (called-sites-only) rate
+# above, since the per-site rate only describes divergence among the panel of
+# already-known-variable sites, not the genome as a whole.
+pairwise_summary_table$`Genome-wide rate (per bp)` <-
+  pairwise_summary_table$`Median pairwise differences` / nuclear_genome_length
+# Gene-based CNV markers are gene x coverage-threshold bins (several per gene),
+# not positions in the genome, so a per-bp rate is not meaningful for them.
+pairwise_summary_table$`Genome-wide rate (per bp)`[pairwise_summary_table$`Variant Type` == "Gene-based CNVs"] <- NA
+
+knitr::kable(pairwise_summary_table, row.names = FALSE, digits = c(0, 1, 1, 4, 4, 6))
+
+# Table: pairwise genetic divergence (raw counts, per-site rates, and genome-wide rate) between the 96 strains.
+pairwise_summary_table_rounded <- pairwise_summary_table
+pairwise_summary_table_rounded[, 2:3] <- round(pairwise_summary_table_rounded[, 2:3], 1)
+pairwise_summary_table_rounded[, 4:5] <- round(pairwise_summary_table_rounded[, 4:5], 4)
+pairwise_summary_table_rounded[, 6] <- round(pairwise_summary_table_rounded[, 6], 6)
+write.csv(pairwise_summary_table_rounded, "../results/Table2_pairwise_diversity_summary.csv", row.names = FALSE)
+```
+
+#Distribution of minor allele frequency (MAF) across SNPs, InDels, SVs and gene-based CNVs, computed on the same 96 strains used above. This checks how much diversity each variant type is contributing and whether the reported MAF>15% filtering is reflected in the data.
+```{r}
+# Minor allele frequency per site from a sites x strains genotype matrix
+# (codes 0/1/2 = copies of the A2 allele, NA = missing).
+compute_maf <- function(geno) {
+  alt_freq <- rowMeans(geno, na.rm = TRUE) / 2
+  pmin(alt_freq, 1 - alt_freq)
+}
+
+maf_snp <- compute_maf(snp_geno)
+maf_indel <- compute_maf(indel_geno)
+maf_sv <- compute_maf(sv_geno)
+maf_cnv <- compute_maf(cnv_geno)
+
+cat("SNP MAF summary:\n"); print(summary(maf_snp))
+cat("\nInDel MAF summary:\n"); print(summary(maf_indel))
+cat("\nSV MAF summary:\n"); print(summary(maf_sv))
+cat("\nGene-based CNV MAF summary:\n"); print(summary(maf_cnv))
+
+maf_df <- rbind(
+  data.frame(Variant_Type = "SNPs", MAF = maf_snp),
+  data.frame(Variant_Type = "InDels", MAF = maf_indel),
+  data.frame(Variant_Type = "SVs", MAF = maf_sv),
+  data.frame(Variant_Type = "Gene-based CNVs", MAF = maf_cnv)
+)
+maf_df$Variant_Type <- factor(maf_df$Variant_Type, levels = c("SNPs", "InDels", "SVs", "Gene-based CNVs"))
+
+library(ggplot2)
+ggplot(maf_df, aes(x = MAF, fill = Variant_Type)) +
+  geom_histogram(binwidth = 0.02, boundary = 0, color = NA) +
+  facet_wrap(~ Variant_Type, scales = "free_y", ncol = 1) +
+  scale_fill_manual(
+    values = c(SNPs = "#2a78d6", InDels = "#eb6834", SVs = "#1baf7a", `Gene-based CNVs` = "#8e5bd0"),
+    guide = "none"
+  ) +
+  labs(
+    x = "Minor allele frequency (MAF)",
+    y = "Number of variants",
+    title = "Distribution of minor allele frequency by variant type"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    strip.text = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+```
+
+```{r}
+# Per variant, within the 96 strains: minor allele count and
+# number of strains carrying at least one copy of the minor allele.
+count_minor_carriers <- function(geno) {
+  n_called <- rowSums(!is.na(geno))
+  a2_count <- rowSums(geno, na.rm = TRUE)          # copies of A2
+  a2_minor <- a2_count <= (2 * n_called - a2_count) # is A2 the minor allele here?
+  mac      <- pmin(a2_count, 2 * n_called - a2_count)
+  carriers <- ifelse(a2_minor,
+                     rowSums(geno >= 1, na.rm = TRUE),  # carry >=1 A2
+                     rowSums(geno <= 1, na.rm = TRUE))  # carry >=1 A1
+  data.frame(MAC = mac, carriers = carriers, n_called = n_called)
+}
+
+carrier_list <- list(
+  SNPs = count_minor_carriers(snp_geno),
+  InDels = count_minor_carriers(indel_geno),
+  SVs = count_minor_carriers(sv_geno),
+  `Gene-based CNVs` = count_minor_carriers(cnv_geno)
+)
+maf_list <- list(SNPs = maf_snp, InDels = maf_indel, SVs = maf_sv,
+                 `Gene-based CNVs` = maf_cnv)
+
+carrier_summary <- do.call(rbind, lapply(names(carrier_list), function(v) {
+  x <- carrier_list[[v]]
+  data.frame(
+    `Variant Type` = v,
+    `Min carrier strains` = min(x$carriers),
+    `Median carrier strains` = median(x$carriers),
+    `Min MAC` = min(x$MAC),
+    `% variants with MAF <= 0.15 in the 96` = round(100 * mean(maf_list[[v]] <= 0.15), 1),
+    check.names = FALSE
+  )
+}))
+knitr::kable(carrier_summary, row.names = FALSE)
+```
+

@@ -1,21 +1,29 @@
 # Single-Cell eQTL Mapping and Cell Cycle Analysis in *S. cerevisiae*
-Analysis code and results for a study mapping expression quantitative trait loci (eQTLs) from single-cell RNA-seq data in a genetically diverse panel of wild *Saccharomyces cerevisiae* strains, across growth conditions and cell cycle states.
+Analysis code for a study mapping expression quantitative trait loci (eQTLs) from single-cell RNA-seq data in a genetically diverse panel of wild *Saccharomyces cerevisiae* strains, across growth conditions and cell cycle states.
 **Author:** Akriti Agrawal — [Gresham Lab](https://greshamlab.bio.nyu.edu/), New York University
 
 ## Overview
-Ninety-six strains from the 1011 *S. cerevisiae* genomes collection ([Peter et al. 2018](https://doi.org/10.1038/s41586-018-0030-5)) were pooled and profiled by droplet-based single-cell RNA-seq, with strain identity assigned per cell using genotype demultiplexing (`demuxlet`). 
-Pseudobulk expression per strain was used to map cis- and trans-eQTLs (SNPs, indels and structural variants) against strain genotypes, in standard growth medium (YPD) and under two additional conditions (fluconazole treatment and synthetic complete 2% glucose). Cell cycle phase and continuous cell cycle time were also assigned to single cells to examine how eQTL effects vary across the cell cycle
+Ninety-six strains from the 1011 *S. cerevisiae* genomes collection ([Peter et al. 2018](https://doi.org/10.1038/s41586-018-0030-5)) were pooled and profiled by droplet-based single-cell RNA-seq, with strain identity assigned per cell using genotype demultiplexing (`demuxlet`).
+Pseudobulk expression per strain was used to map local and distant eQTLs (SNPs, indels, structural variants and gene-CNVs) with FaST-LMM in six datasets: YPD (two replicates), fluconazole (16 and 8 µg/ml), synthetic complete with glucose and synthetic complete with galactose. Effects were compared across conditions jointly with mashr. Cell cycle phase and continuous cell cycle time were also assigned to single cells to examine how expression varies across the cell cycle.
 
 ## Repository structure
-The repository is organized by manuscript figure. Each figure directory generally contains a `codes/` (or `code/`) subdirectory with the R Markdown / Python / shell scripts used to produce the panel, and a `results/` subdirectory with the resulting plots, tables, and intermediate data files.
+This repository holds code only. Raw sequencing data, genotype VCFs, intermediate files, results and figures are not included; the code reads them from absolute paths in the Gresham Lab compute environment (NYU HPC). The repository is organized by manuscript figure. Each figure directory generally contains a `codes/` (or `code/`) subdirectory with the R Markdown / R / Python / shell scripts used to produce the panels; the `*.sbatch` / `*.sh` files next to them are the Slurm jobs used to run them.
 
 ```
+pipeline/   Upstream steps: alignment (Cell Ranger), demultiplexing (demuxlet), FaST-LMM launchers
 Figure.1/   Strain panel, demuxlet genotype demultiplexing, and scRNA-seq reproducibility
 Figure.2/   Strain- and clade-level differential gene expression
-Figure.3/   Genotype preparation, pseudobulk expression, and cis/trans-eQTL mapping in YPD
-Figure.4/   eQTL mapping and comparison across conditions (YPD, fluconazole, SC2Glu), plus bulk-vs-single-cell validation
-Figure.5/   Cell cycle phase and cell cycle time assignment for single cells, and cell-cycle-resolved phenotype analysis
+Figure.3/   Genotype preparation, pseudobulk expression, and local/distant eQTL mapping in YPD
+Figure.4/   eQTL mapping in the other five datasets and comparison across conditions (mashr), plus bulk-vs-single-cell validation
+Figure.5/   Cell cycle phase and cell cycle time assignment for single cells, and cell-cycle-resolved expression analysis
+Supplementary_Tables/, publication_tables/   Supplementary tables
+shared_code/   Functions sourced by several figures (LD clumping and local/distant calls, fonts, p-values) and render scripts
 ```
+
+### Upstream pipeline
+- Alignment, cell-barcode BAM splitting, pileup and `demuxlet` for each dataset (`pipeline/`; see `pipeline/README.md` for what changes per dataset).
+- Genotype preparation, pseudobulk expression and FaST-LMM eQTL mapping with permutation thresholds (`Figure.3/Fig.3_code_to_run_pseudobulk_and_fastlmm/`, steps 1-5).
+
 ### Figure 1 — Strain panel and scRNA-seq quality control
 - **Panel A** — phylogenetic tree of the 1011-strain collection with the 96 sequenced strains highlighted (`Fig.1-Panel-A-strain-selection-tree`).
 - **Panel B** — `demuxlet` genotype demultiplexing and validation of strain assignment accuracy against a spiked-in reference strain (S288C) (`Fig.1-Panel-B-demuxlet-accurately-detects-S288C`).
@@ -27,36 +35,35 @@ Figure.5/   Cell cycle phase and cell cycle time assignment for single cells, an
 - GO over-representation and gene set enrichment analysis, and regulon-level expression (e.g. GAL, NCR, stress response genes), with per-condition supplementary analyses.
 
 ### Figure 3 — eQTL mapping in YPD
-- Genotype preparation (custom yeast annotations, VCF processing, PLINK LD clumping) for SNPs, indels, and structural variants
+- Genotype preparation (custom yeast annotations, VCF processing) for SNPs, indels, structural variants and gene-CNVs.
 - Pseudobulk expression preparation and linear mixed-model eQTL mapping (`fastlmm`/pseudobulk pipeline).
-- Cis/trans classification and effect-size analysis of eQTLs by variant type.
+- Per-gene LD clumping, local/distant classification and effect-size analysis of eQTLs by variant type.
 - Raw single-cell validation of top eQTL hits (violin/scatter plots per variant).
 - Reproducibility of eQTL mapping between biological replicates and conditions.
 
 ### Figure 4 — eQTL mapping across conditions
-- Repeats the Figure 3 eQTL mapping pipeline for fluconazole and SC2Glu conditions, 
-- Compares eQTL sharing and effect-size concordance across conditions, and
-- Validates single-cell (SC2Glu) results against bulk RNA-seq.
+- Repeats the Figure 3 eQTL mapping pipeline for YPD.2, both fluconazole doses, synthetic complete with glucose and synthetic complete with galactose (`Fig.4-<dataset>/`, generated by `generate_condition_rmds.py`),
+- Compares eQTL sharing and effect-size concordance across conditions, including a joint analysis with mashr (`Fig.4-PartII-compare-conditions/`), and
+- Validates single-cell (synthetic complete with glucose) results against bulk RNA-seq.
 
 ### Figure 5 — Cell cycle assignment and cell-cycle-resolved analysis
 - Assignment of discrete cell cycle phase to single cells from normalized expression data.
-- Assignment of continuous cell cycle time (pseudotime) using cell-cycle marker/harmonic gene sets, including an `inferelator`-based pipeline (Python/bash scripts under `part1-bash-code-to-assign-cell-cycle-time`).
-- Identification of genes/strains whose cell-cycle amplitude, timing, or structure vary across the strain panel.
+- Assignment of continuous cell cycle time (pseudotime) using cell-cycle marker gene sets, including an `inferelator`-based pipeline (Python/bash scripts under `part1-bash-code-to-assign-cell-cycle-time`).
+- Harmonic models of cell-cycle expression to identify genes/strains whose amplitude, timing, or structure vary across the strain panel, compared between YPD.1 and YPD.2.
 
 ## Requirements
 
-Analyses are implemented primarily in R (R Markdown notebooks), with some Python and shell scripts for cell cycle time inference. Key dependencies include:
+Analyses are implemented primarily in R (R Markdown notebooks), with Python and shell scripts for the upstream pipeline and cell cycle time inference. Key dependencies include:
 
-- **R**: `Seurat`, `tidyverse` (`dplyr`, `tidyr`, `readr`), `ggplot2`,`ggtree`, `viridis`, `org.Sc.sgd.db`, `Rtsne`
-- **Genotyping / eQTL mapping**: `demuxlet`, `PLINK`, `fastlmm`
+- **R** (4.6.1): `Seurat`, `DESeq2`, `mashr`, `tidyverse` (`dplyr`, `tidyr`, `readr`), `ggplot2`, `patchwork`, `ggtree`, `viridis`, `org.Sc.sgd.db`, `Rtsne`
+- **Alignment / genotyping / eQTL mapping**: Cell Ranger, `demuxlet` (popscle), `PLINK` 1.9, `fastlmm` 0.6.12 (Singularity image)
 - **Python**: standard scientific stack (`numpy`, `pandas`, `scanpy`/`h5ad` tooling) plus [`inferelator`](https://github.com/flatironinstitute/inferelator) for cell cycle time inference
 
-Each `.Rmd` file lists its specific library dependencies in its setup chunk. Raw sequencing data and full genotype VCFs are not included in this repository; several notebooks reference external paths to the Gresham Lab compute environment.
+Each `.Rmd` file lists its specific library dependencies in its setup chunk.
 
 ## Usage
 
-Each figure's `codes/` scripts are intended to be run in the order implied by their filenames (e.g. `Step1`, `Step2`, ... or `Panel A`, `Panel B`, ...) within that figure's directory, reading inputs from and writing outputs to the
-adjacent `results/` (and, where present, `data/`) directories. There is no single top-level pipeline script; each figure is self-contained.
+Run `pipeline/` and `Figure.3/Fig.3_code_to_run_pseudobulk_and_fastlmm/` first, then Figures 1-5, then `Supplementary_Tables/` and `publication_tables/`. Within a figure directory, scripts are run in the order implied by their filenames (e.g. `Step1`, `Step2`, ... or `Panel A`, `Panel B`, ...); they write outputs to an adjacent `results/` directory (not included in the repository).
 
 ## Citation
 

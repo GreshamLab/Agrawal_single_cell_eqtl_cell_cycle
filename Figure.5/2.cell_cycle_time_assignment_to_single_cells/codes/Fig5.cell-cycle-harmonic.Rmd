@@ -63,6 +63,42 @@ library(ggrepel)
 select <- dplyr::select
 filter <- dplyr::filter
 
+# ── Publication theme ────────────────────────────────────────────────────────
+# Shared font settings: used by pub_theme (ggplot) and by the ComplexHeatmap gpar() calls
+PUB_FONT  <- "Arial"
+PUB_SIZE  <- 18                 # axis titles, axis labels, legend titles, strips (bold, as in Figs 3-4)
+PUB_SMALL <- 16                 # legend entries
+PUB_AXIS  <- 18                 # larger, bold axis text + titles for Panel C, volcano and GO plots
+PUB_LABEL <- 13 / ggplot2::.pt  # in-plot text (geom_text / ggrepel) in mm, = 13 pt
+
+pub_theme <- theme_classic(base_size = PUB_SIZE, base_family = PUB_FONT) +
+  theme(
+    text        = element_text(family = PUB_FONT, color = "black"),
+    axis.title  = element_text(size = PUB_SIZE, face = "bold", color = "black"),
+    axis.text   = element_text(size = PUB_SIZE, face = "bold", color = "black"),
+    axis.line   = element_line(linewidth = 0.4, color = "black"),
+    axis.ticks  = element_line(linewidth = 0.35, color = "black"),
+    plot.title  = element_text(size = PUB_SIZE, face = "bold", hjust = 0.5),
+    legend.title = element_text(size = PUB_SIZE, face = "bold"),
+    legend.text  = element_text(size = PUB_SMALL),
+    legend.key.size = unit(0.5, "cm"),
+    strip.text       = element_text(size = PUB_SIZE, face = "bold", color = "black"),
+    strip.background = element_rect(fill = "grey92", color = NA),
+    panel.grid       = element_blank(),
+    plot.background  = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.margin      = margin(10, 12, 8, 10)
+  )
+
+# Every ggsave() to .png also writes an LZW-compressed .tiff next to it (same size and dpi)
+ggsave <- function(filename, ...) {
+  ggplot2::ggsave(filename, ...)
+  if (grepl("\\.png$", filename, ignore.case = TRUE))
+    ggplot2::ggsave(sub("\\.png$", ".tiff", filename, ignore.case = TRUE), ...,
+                    compression = "lzw")
+  invisible(filename)
+}
+
 options(future.globals.maxSize = 9 * 1024^3)
 
 # ── Analysis parameters ──────────────────────────────────────────────────────
@@ -160,7 +196,7 @@ ggplot(cc_time, aes(x = cc_time)) +
   geom_histogram(bins = 88, fill = "steelblue") +
   facet_wrap(~CC, ncol = 1, scales = "free_y") +
   scale_x_continuous(breaks = seq(0, 88, 11)) +
-  theme_classic()
+  pub_theme
 
 p_cc_time_by_phase <- ggplot(cc_time, aes(x = cc_time)) +
   geom_histogram(bins = 88, fill = "steelblue") +
@@ -168,13 +204,15 @@ p_cc_time_by_phase <- ggplot(cc_time, aes(x = cc_time)) +
   scale_x_continuous(breaks = seq(0, 88, 11)) +
   labs(x = "Cell-cycle time (min)", y = "Cell count",
        title = "Assigned pseudotime distribution by phase") +
-  theme_classic()
+  pub_theme
 
 p_cc_time_by_phase
 
 dir.create("../results", showWarnings = FALSE)
 ggsave("../results/cc_time_by_phase.png", p_cc_time_by_phase,
        width = 6, height = 10, dpi = 300)
+
+saveRDS(Na_va, "../results/ypd1_Na_va_with_cc_time.rds")
 ```
 
 ## 1.3b Pseudotime coverage per strain
@@ -204,6 +242,8 @@ print(sort(gap_by_strain, decreasing = TRUE)[1:10])
 
 # flag, do not drop — used later when interpreting `peak`
 POOR_COVERAGE <- names(gap_by_strain)[gap_by_strain > 22]
+
+saveRDS(POOR_COVERAGE, "../results/ypd1_poor_coverage.rds")
 ```
 
 ## 1.4 Normalize (PCA/UMAP are for display only)
@@ -214,6 +254,8 @@ Na_va <- Na_va %>%
   FindVariableFeatures(selection.method = "vst", nfeatures = 2000)
 Na_va <- ScaleData(Na_va, features = VariableFeatures(Na_va))
 Na_va <- Na_va %>% RunPCA(features = VariableFeatures(.)) %>% RunUMAP(dims = 1:5)
+
+saveRDS(Na_va, "../results/ypd1_Na_va_with_cc_time_normalized.rds")
 ```
 
 ```{r umap_plots}
@@ -232,10 +274,10 @@ p_umap_pseudotime <- ggplot(umap_df, aes(umap_1, umap_2)) +
   scale_colour_viridis_c(option = "magma", direction = -1, name = "cc_time (min)") +
   geom_label_repel(data = centroids,
                    mapping = aes(x = umap_1, y = umap_2, label = CC),
-                   inherit.aes = FALSE, size = 4.5, alpha = 0.85,
+                   inherit.aes = FALSE, size = PUB_LABEL, alpha = 0.85,
                    label.size = 0.2, box.padding = 0.5) +
   labs(title = "Cell-cycle time with phase labels") +
-  theme_classic()
+  pub_theme
 
 p_umap_pseudotime
 
@@ -249,10 +291,10 @@ ggplot(umap_df %>% filter(!is.na(CC)), aes(umap_1, umap_2, colour = CC)) +
   scale_colour_manual(values = PHASE_FILL, name = "Phase") +
   geom_label_repel(data = centroids,
                    mapping = aes(x = umap_1, y = umap_2, label = CC),
-                   inherit.aes = FALSE, size = 4.5, alpha = 0.85) +
+                   inherit.aes = FALSE, size = PUB_LABEL, alpha = 0.85) +
   guides(colour = guide_legend(override.aes = list(size = 3))) +
   labs(title = "Cell-cycle phase") +
-  theme_classic()
+  pub_theme
 ```
 
 ## 1.5 ORF ↔ common name lookup
@@ -475,6 +517,14 @@ Y_cc  <- Y_all[, spellman_in, drop = FALSE]              # cells x Spellman gene
 cat("Matrix:", nrow(Y_cc), "cells x", ncol(Y_cc), "genes |",
     n_distinct(gvec), "strains\n")
 cat("Pseudotime range:", round(range(tvec), 2), "\n")
+
+nb_input <- list(
+  raw     = GetAssayData(Na_va, layer = "counts")[spellman_in, cells],
+  libsize = meta$nCount,
+  gvec    = gvec,
+  tvec    = tvec
+)
+saveRDS(nb_input, "../results/ypd1_nb_input.rds")
 ```
 
 ---
@@ -552,7 +602,7 @@ q1 %>% filter(r2_adj > R2_CYCLING) %>%
   labs(x = "Peak time (min)", y = "Genes",
        title = "When cycling genes crest",
        subtitle = "Two waves is the expected biology — a strong sanity check") +
-  theme_classic()
+  pub_theme
 ```
 
 ---
@@ -610,7 +660,7 @@ tibble(n_cells      = n_by_strain,
   scale_x_log10() +
   labs(x = "Cells per strain (log10)", y = "Median across genes",
        title = "Residual size dependence after correction") +
-  theme_classic()
+  pub_theme
 
 
 histones <- c("HTB2"="YBL002W","HHT2"="YNL031C","HHF1"="YBR009C","HHF2"="YNL030W")
@@ -834,10 +884,57 @@ cal %>%
             pct_sig = round(sig_any / n, 2), .groups = "drop") %>%
   print()
 ```
+
+```{r}
+n_measurable_and_sig <- sum(cal$mean_r2 > 0.15 &
+                            (cal$cv_amp_p_fdr < 0.05 | cal$sd_peak_p_fdr < 0.05 | cal$sd_r2_p_fdr < 0.05),
+                            na.rm = TRUE)
+cat("Well-measured genes (mean_r2 > 0.15) significant in at least one phenotype:",
+    n_measurable_and_sig, "of", sum(cal$mean_r2 > 0.15, na.rm = TRUE), "\n")
+
+cal %>% filter(mean_r2 > 0.15) %>%
+  summarise(sig_amp  = sum(cv_amp_p_fdr  < 0.05, na.rm = TRUE),
+            sig_time = sum(sd_peak_p_fdr < 0.05, na.rm = TRUE),
+            sig_str  = sum(sd_r2_p_fdr   < 0.05, na.rm = TRUE),
+            sig_any  = sum(cv_amp_p_fdr < 0.05 | sd_peak_p_fdr < 0.05 | sd_r2_p_fdr < 0.05, na.rm = TRUE),
+            n_total  = n())
+```
+
+
+## 8.2 Three-way accounting of every gene
+
+Every Spellman gene lands in exactly one class. The third class — genes with too
+little cell-cycle signal to say anything about — was missing from the earlier
+version, which is why the numbers did not add up.
+
+```{r audit}
+audit <- cal %>%
+  left_join(q1 %>% select(gene, r2_adj_pooled = r2_adj), by = "gene") %>%
+  mutate(
+    cycles_pooled = r2_adj_pooled > R2_CYCLING,   # kept only for reporting/comparison — not a gate anymore
+    measurable    = mean_r2 > 0.15,       # the actual gate gene_summary uses
+    sig_any = (sd_r2_p_fdr < 0.05 | cv_amp_p_fdr < 0.05 | sd_peak_p_fdr < 0.05),
+    class = case_when(
+      !measurable            ~ "not measurably cycling",
+      measurable &  sig_any  ~ "cycling, varies between strains",
+      measurable & !sig_any  ~ "cycling, consistent between strains"))
+
+#print(count(audit, class))
+str(audit)
+
+```
+
+desc(consistency_score) = most variable
+
+rank() gives 1 to the smallest value. So:
+
+Low sd_peak + low cv_amp → low ranks → low score → most consistent
+High sd_peak + high cv_amp → high ranks → high score → most variable
+
+
 ```{r}
 # ── Where does pct_sig stop climbing steeply? ────────────────────────────
 inflection_check <- audit %>%
-  filter(cycles) %>%
   mutate(sig_any = sd_r2_p_fdr < 0.05 | cv_amp_p_fdr < 0.05 | sd_peak_p_fdr < 0.05)
 
 # finer bins than before
@@ -868,9 +965,9 @@ tibble(mean_r2 = grid_r2[-1], pct_sig_smoothed = pred[-1], slope = deriv) %>%
   geom_line() + geom_hline(yintercept = 0, linetype = 2) +
   labs(title = "Rate of change in pct_sig — inflection is where this flattens toward 0",
        x = "mean_r2", y = "d(pct_sig)/d(mean_r2)") +
-  theme_classic()
+  pub_theme
 
-audit %>% filter(cycles) %>%
+audit %>%
   mutate(bin = cut(mean_r2, breaks = seq(0, 0.5, by = 0.025))) %>%
   group_by(bin) %>%
   summarise(n = n(),
@@ -879,50 +976,28 @@ audit %>% filter(cycles) %>%
             .groups = "drop") %>%
   filter(n >= 5) %>%
   print(n = 20)
+
+
+
+#Attempt2:
+reference <- inflection_check %>% filter(mean_r2 <= 0.025)
+ref_n   <- nrow(reference)
+ref_sig <- sum(reference$sig_any, na.rm = TRUE)
+
+thresholds <- seq(0.025, 0.30, by = 0.025)
+
+threshold_sweep <- map_dfr(thresholds, function(th) {
+  above     <- inflection_check %>% filter(mean_r2 > th)
+  n_above   <- nrow(above)
+  sig_above <- sum(above$sig_any, na.rm = TRUE)
+  test <- prop.test(c(sig_above, ref_sig), c(n_above, ref_n))
+  tibble(threshold = th, n_above = n_above,
+         pct_sig_above = sig_above / n_above,
+         p_vs_floor = test$p.value)
+})
+
+print(threshold_sweep, n = 20)
 ```
-```{r}
-n_measurable_and_sig <- sum(cal$mean_r2 > 0.15 &
-                            (cal$cv_amp_p_fdr < 0.05 | cal$sd_peak_p_fdr < 0.05 | cal$sd_r2_p_fdr < 0.05),
-                            na.rm = TRUE)
-cat("Well-measured genes (mean_r2 > 0.15) significant in at least one phenotype:",
-    n_measurable_and_sig, "of", sum(cal$mean_r2 > 0.15, na.rm = TRUE), "\n")
-
-cal %>% filter(mean_r2 > 0.15) %>%
-  summarise(sig_amp  = sum(cv_amp_p_fdr  < 0.05, na.rm = TRUE),
-            sig_time = sum(sd_peak_p_fdr < 0.05, na.rm = TRUE),
-            sig_str  = sum(sd_r2_p_fdr   < 0.05, na.rm = TRUE),
-            sig_any  = sum(cv_amp_p_fdr < 0.05 | sd_peak_p_fdr < 0.05 | sd_r2_p_fdr < 0.05, na.rm = TRUE),
-            n_total  = n())
-```
-
-
-## 8.2 Three-way accounting of every gene
-
-Every Spellman gene lands in exactly one class. The third class — genes with too
-little cell-cycle signal to say anything about — was missing from the earlier
-version, which is why the numbers did not add up.
-
-```{r audit}
-audit <- cal %>%
-  left_join(q1 %>% select(gene, r2_adj_pooled = r2_adj), by = "gene") %>%
-  mutate(
-    cycles  = r2_adj_pooled > R2_CYCLING,
-    sig_any = (sd_r2_p_fdr < 0.05 | cv_amp_p_fdr < 0.05 | sd_peak_p_fdr < 0.05),
-    class = case_when(
-      !cycles           ~ "not measurably cycling",
-      cycles &  sig_any ~ "cycling, varies between strains",
-      cycles & !sig_any ~ "cycling, consistent between strains"))
-
-#print(count(audit, class))
-str(audit)
-```
-
-desc(consistency_score) = most variable
-
-rank() gives 1 to the smallest value. So:
-
-Low sd_peak + low cv_amp → low ranks → low score → most consistent
-High sd_peak + high cv_amp → high ranks → high score → most variable
 
 ```{r}
 amp_resid <- t(sapply(rownames(AMP), function(g) {
@@ -934,13 +1009,13 @@ amp_resid <- t(sapply(rownames(AMP), function(g) {
 
 resid_spread <- row_sd(amp_resid) / row_mean(AMP)   # spread not explained by expression
 
-audit %>%
-  mutate(resid_spread = resid_spread[gene],
-         frac_explained = 1 - resid_spread / cv_amp) %>%
-  filter(cycles, cv_amp_p_fdr < 0.05) %>%
-  arrange(desc(frac_explained)) %>%
-  select(name, gene, mean_r2, cv_amp, resid_spread, frac_explained) %>%
-  print(n = 25)
+# audit %>%
+#   mutate(resid_spread = resid_spread[gene],
+#          frac_explained = 1 - resid_spread / cv_amp) %>%
+#   filter(cycles, cv_amp_p_fdr < 0.05) %>%
+#   arrange(desc(frac_explained)) %>%
+#   select(name, gene, mean_r2, cv_amp, resid_spread, frac_explained) %>%
+#   print(n = 25)
 ```
 
 
@@ -1028,15 +1103,15 @@ peak_shape <- map_dfr(rownames(obs$peak), function(g) {
 
 stopifnot(intersect(names(audit), names(peak_shape)) == "gene")
 
-# ── Why raw spread cannot be the ranking ────────────────────────────────────
-cat("Correlation of raw spread statistics with mean_r2 (cycling genes):\n")
-audit %>% filter(cycles) %>%
-  summarise(sd_peak   = cor(mean_r2, sd_peak,   method = "spearman", use = "complete.obs"),
-            amp_range = cor(mean_r2, amp_range, method = "spearman", use = "complete.obs"),
-            cv_amp    = cor(mean_r2, cv_amp,    method = "spearman", use = "complete.obs")) %>%
-  round(3) %>% print()
-cat("  -> all three track how strongly a gene cycles, so rank on excess over each\n",
-    "     gene's own permutation null instead.\n\n")
+# # ── Why raw spread cannot be the ranking ────────────────────────────────────
+# cat("Correlation of raw spread statistics with mean_r2 (cycling genes):\n")
+# audit %>% filter(cycles) %>%
+#   summarise(sd_peak   = cor(mean_r2, sd_peak,   method = "spearman", use = "complete.obs"),
+#             amp_range = cor(mean_r2, amp_range, method = "spearman", use = "complete.obs"),
+#             cv_amp    = cor(mean_r2, cv_amp,    method = "spearman", use = "complete.obs")) %>%
+#   round(3) %>% print()
+# cat("  -> all three track how strongly a gene cycles, so rank on excess over each\n",
+#    "     gene's own permutation null instead.\n\n")
 ```
 peak_shape, amp_shape, and str_shape are the fix for that. For each gene, they:
 
@@ -1046,6 +1121,8 @@ Drop the 10% of strains that are furthest away — the most extreme ones.
 Recompute the spread using only the remaining 90%.
 
 robustness: If a gene's raw spread and trimmed spread are almost the same, robustness is close to 1 (100%) — dropping the extremes barely mattered, so the variation is spread broadly across many strains, not concentrated in a few.
+
+mean_r2: Is this gene measured precisely enough that I trust its individual estimates
 
 ```{r}
 # ── Trimmed spread for ALL THREE phenotypes, computed the same way ──────────
@@ -1088,7 +1165,7 @@ frac_explained_tbl <- tibble(
 
 # ── One table, three parallel trimmed-excess columns ─────────────────────────
 gene_summary <- audit %>%
-  filter(cycles, mean_r2 > 0.15) %>%
+#  filter(mean_r2 > 0.05) %>%
   left_join(peak_shape,         by = "gene") %>%
   left_join(amp_shape,          by = "gene") %>%
   left_join(str_shape,          by = "gene") %>%
@@ -1145,10 +1222,7 @@ gene_summary <- audit %>%
 
 
 ```{r}
-cat("Well-measured cycling genes:", nrow(gene_summary),
-    " (pooled r2_adj >", R2_CYCLING, "and mean per-strain r2 > 0.1)\n\n")
-cat("Amplitude candidates excluded as expression-driven (frac_explained > 0.5):",
-    sum(gene_summary$amp_gated, na.rm = TRUE), "of", nrow(gene_summary), "\n\n")
+cat("Well-measured cycling genes:", nrow(gene_summary))
 
 # ── Outlier diagnostic, now for all three ────────────────────────────────────
 cat("Is the spread broad or outlier-driven? (raw excess vs trimmed excess)\n")
@@ -1163,18 +1237,13 @@ gene_summary %>%
          str_excess, str_trim_excess, gap_str) %>%
   head(20) %>% print(n = 20, width = Inf)
 
-# ── OVERALL: most variable (combined) and most consistent (combined) ────────
+# ── OVERALL: most variable (combined) ────────
 cat("\nMOST VARIABLE — combined ranking across structure, amplitude, timing:\n")
 gene_summary %>% head(15) %>%
   select(name, gene, which_phenotype, mean_r2,
          str_trim_excess, amp_trim_excess_final, peak_trim_excess, variability) %>%
   print(n = 15)
 
-cat("\nMOST CONSISTENT — combined ranking, low end:\n")
-gene_summary %>% tail(15) %>%
-  select(name, gene, mean_r2,
-         str_trim_excess, amp_trim_excess_final, peak_trim_excess, variability) %>%
-  print(n = 15)
 ```
 
 ## gene significant varying in each phenotype
@@ -1190,7 +1259,7 @@ amp_gated means "NOT gated" — i.e., this gene passed that check, so its amplit
 sig_structure <- gene_summary %>%
   filter(sd_r2_p_fdr < 0.05) %>%
   arrange(desc(str_trim_excess)) %>%
-  select(name, gene, mean_r2, sd_r2, sd_r2_null_mean, str_trim_excess,
+  select(name, gene, mean_r2, pct_strains_detected, sd_r2, sd_r2_null_mean, str_trim_excess,
          str_robustness, sd_r2_p_fdr, which_phenotype, early_strains, late_strains)
 
 sig_structure
@@ -1198,7 +1267,7 @@ sig_structure
 sig_amplitude <- gene_summary %>%
   filter(cv_amp_p_fdr < 0.05, !amp_gated) %>%
   arrange(desc(amp_trim_excess_final)) %>%
-  select(name, gene, mean_r2, cv_amp, amp_trim_excess_final,
+  select(name, gene, mean_r2, pct_strains_detected, cv_amp, amp_trim_excess_final,
          amp_robustness, frac_explained, cv_amp_p_fdr, which_phenotype,
          early_strains, late_strains)
 sig_amplitude
@@ -1206,7 +1275,7 @@ sig_amplitude
 sig_timing <- gene_summary %>%
   filter(sd_peak_p_fdr < 0.05) %>%
   arrange(desc(peak_trim_excess)) %>%
-  select(name, gene, mean_r2, mean_peak, sd_peak, peak_trim_excess,
+  select(name, gene, mean_r2, pct_strains_detected, mean_peak, sd_peak, peak_trim_excess,
          peak_robustness, n_early, n_late, sd_peak_p_fdr, which_phenotype,
          early_strains, late_strains)
 sig_timing
@@ -1290,11 +1359,11 @@ make_overlap_plot <- function(df, x, y, title) {
                         name = "Significance (FDR < 0.05)") +
     ggrepel::geom_text_repel(
       data = . %>% filter(sig_status != "neither"),
-      aes(label = name), size = 2.5, max.overlaps = 20) +
+      aes(label = name), size = PUB_LABEL, max.overlaps = 20) +
     coord_cartesian(xlim = c(0, lims$x_max), ylim = c(0, lims$y_max)) +
     labs(x = "Amplitude excess over null", y = "Timing excess over null",
          title = title) +
-    theme_classic()
+    pub_theme
 }
 
 p_overlap_raw     <- make_overlap_plot(gene_summary, "amp_excess", "peak_excess",
@@ -1302,8 +1371,8 @@ p_overlap_raw     <- make_overlap_plot(gene_summary, "amp_excess", "peak_excess"
 p_overlap_trimmed <- make_overlap_plot(gene_summary, "amp_trim_excess_final", "peak_trim_excess",
                                        "Trimmed (worst 10% dropped)")
 
-print(p_overlap_raw + p_overlap_trimmed)
-
+p_overlap_raw
+p_overlap_trimmed
 dir.create("../results", showWarnings = FALSE)
 ggsave("../results/phenotype_overlap_amp_vs_timing.png",
        p_overlap_raw + p_overlap_trimmed, width = 12, height = 6, dpi = 300)
@@ -1329,9 +1398,9 @@ write.csv(gene_summary,   "../results/harmonic_gene_summary.csv",       row.name
 write.csv(sig_structure,        "../results/sig_structure.csv",        row.names = FALSE)
 write.csv(sig_amplitude,        "../results/sig_amplitude.csv",        row.names = FALSE)
 write.csv(sig_timing,           "../results/sig_timing.csv",           row.names = FALSE)
-write.csv(consistent_structure, "../results/consistent_structure.csv", row.names = FALSE)
-write.csv(consistent_amplitude, "../results/consistent_amplitude.csv", row.names = FALSE)
-write.csv(consistent_timing,    "../results/consistent_timing.csv",    row.names = FALSE)
+#write.csv(consistent_structure, "../results/consistent_structure.csv", row.names = FALSE)
+#write.csv(consistent_amplitude, "../results/consistent_amplitude.csv", row.names = FALSE)
+#write.csv(consistent_timing,    "../results/consistent_timing.csv",    row.names = FALSE)
 
 long_pheno <- map_dfr(c("r2_adj","amp","amp1_db","peak","phase1"), function(st)
   as.data.frame(obs[[st]]) %>% rownames_to_column("gene") %>%
@@ -1360,32 +1429,51 @@ The curve plotted is exactly the curve that was measured — no padding, no seam
 handling, no second smoother.
 
 ```{r plot_toolkit}
+# The anchors given to calculate_times (M-G1 7, G1 22.5, S 39.5, G2 56.5, M 77.5)
+# are the times at each phase's CENTROID, not phase starts. Band edges are the
+# midpoints between consecutive centroids (M -> M-G1 wraps: (77.5 + 7 + 88) / 2).
+PHASE_CENTROIDS <- c('M-G1' = 7, 'G1' = 22.5, 'S' = 39.5, 'G2' = 56.5, 'M' = 77.5)
+.edges <- (PHASE_CENTROIDS + c(PHASE_CENTROIDS[-1], PHASE_CENTROIDS[1] + WRAP)) / 2
+#   M-G1|G1 14.75, G1|S 31, S|G2 48, G2|M 67, M|M-G1 86.25
 PHASE_BOUNDS <- tibble(
-  xmin  = c(0, 7, 22.5, 39.5, 56.5, 77.5),
-  xmax  = c(7, 22.5, 39.5, 56.5, 77.5, WRAP),
-  phase = factor(c('M','M-G1','G1','S','G2','M'), levels = CC_LEVELS)
+  xmin  = c(0,           .edges[1:4],  .edges[5]),
+  xmax  = c(.edges[1:4], .edges[5],    WRAP),
+  phase = factor(c('M-G1','G1','S','G2','M','M-G1'), levels = CC_LEVELS)
 )
 
 harmonic_curve <- function(gene, strain = NULL, K = HARMONICS) {
   idx <- if (is.null(strain)) seq_along(tvec) else which(gvec == strain)
   y <- Y_cc[idx, gene]
-  if (length(idx) < 2 * K + 4 || sd(y) == 0) return(NULL)
+  if (length(idx) < 2 * K + 4) return(NULL)   # too few cells to say anything — still omitted
+  if (sd(y) == 0) {
+    # zero variance: not a fit, just an honest flat line showing "not detected here"
+    return(tibble(time = GRID, y = mean(y), strain = strain %||% "global", detected = FALSE))
+  }
   X <- harmonic_design(tvec[idx], K)
   b <- qr.coef(qr(X), y); b[is.na(b)] <- 0
   tibble(time = GRID, y = as.numeric(harmonic_design(GRID, K) %*% b),
-         strain = strain %||% "global")
+         strain = strain %||% "global", detected = TRUE)
 }
 
-cc_panel <- function(genes, per_strain = TRUE, ncol = 3, title = NULL) {
+# Colours for strains called out by name (cc_panel / strain_scatter `highlight`)
+HIGHLIGHT_COLS <- c("firebrick", "steelblue", "darkorange", "purple4")
+
+# highlight: optional strain IDs whose per-strain curves are drawn in colour
+cc_panel <- function(genes, per_strain = TRUE, ncol = 3, title = NULL, highlight = NULL) {
   orfs <- to_orf(genes)
   orfs <- orfs[orfs %in% colnames(Y_cc)]
   if (length(orfs) == 0) { message("cc_panel: no genes to plot"); return(invisible(NULL)) }
 
-  global <- map_dfr(orfs, ~ harmonic_curve(.x) %>% mutate(gene = .x))
+  global <- map_dfr(orfs, function(g) {
+    hc <- harmonic_curve(g); if (is.null(hc)) return(NULL); mutate(hc, gene = g)
+  })
+
   strains <- names(n_by_strain)
   per <- if (per_strain)
     map_dfr(orfs, function(g)
-      map_dfr(strains, ~ harmonic_curve(g, .x) %>% mutate(gene = g))) else NULL
+      map_dfr(strains, function(s) {
+        hc <- harmonic_curve(g, s); if (is.null(hc)) return(NULL); mutate(hc, gene = g)
+      })) else NULL
 
   binned <- tibble(gene = rep(orfs, each = length(tvec)),
                    t = rep(round(tvec) %% WRAP, times = length(orfs)),
@@ -1396,11 +1484,23 @@ cc_panel <- function(genes, per_strain = TRUE, ncol = 3, title = NULL) {
     geom_rect(data = PHASE_BOUNDS,
               aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf, fill = phase),
               alpha = 0.20, inherit.aes = FALSE) +
-    scale_fill_manual(values = PHASE_FILL, name = "Phase")
+    geom_text(data = filter(PHASE_BOUNDS, xmax - xmin > 5),   # skip the 86.25–88 wrap sliver
+              aes(x = (xmin + xmax) / 2, y = Inf, label = phase),
+              vjust = 1.4, size = PUB_LABEL, fontface = "bold", colour = "grey25",
+              inherit.aes = FALSE) +
+    scale_fill_manual(values = PHASE_FILL, guide = "none") +
+    scale_y_continuous(expand = expansion(mult = c(0.04, 0.14)))   # headroom for labels
   if (per_strain)
     p <- p + geom_line(data = per %>% mutate(label = to_name(gene)),
-                       aes(time, y, group = strain),
-                       colour = "grey45", alpha = 0.4, linewidth = 0.3)
+                       aes(time, y, group = strain, linetype = detected),
+                       colour = "grey45", alpha = 0.4, linewidth = 0.3) +
+      scale_linetype_manual(values = c(`TRUE` = "solid", `FALSE` = "22"), guide = "none")
+  if (per_strain && length(highlight))
+    p <- p + geom_line(data = per %>% filter(strain %in% highlight) %>%
+                         mutate(label = to_name(gene)),
+                       aes(time, y, group = strain, colour = strain), linewidth = 0.9) +
+      scale_colour_manual(values = setNames(HIGHLIGHT_COLS[seq_along(highlight)], highlight),
+                          name = "Strain")
   p +
     geom_point(data = binned %>% mutate(label = to_name(gene)),
                aes(t, y), size = 1, alpha = 0.6, colour = "grey20") +
@@ -1410,7 +1510,7 @@ cc_panel <- function(genes, per_strain = TRUE, ncol = 3, title = NULL) {
     coord_cartesian(xlim = c(0, WRAP)) +
     facet_wrap(~label, scales = "free_y", ncol = ncol) +
     labs(x = "Time in cell cycle (min)", y = "Normalized expression", title = title) +
-    theme_classic() + theme(legend.position = "bottom")
+    pub_theme + theme(legend.position = "bottom")
 }
 
 ```
@@ -1466,9 +1566,13 @@ save_cc(p_timing_varies, "timing_varies.png")
 # save_cc(p_timing_consistent, "timing_consistent.png")
 
 # ── SIGNIFICANT IN BOTH amplitude AND timing ───────────────────────────────
+# restricted to genes that cycle in the pooled fit (Q1), so every example
+# shown has a real wave to vary; order follows sig_amplitude (trimmed excess)
+cycling_genes <- q1$gene[q1$r2_adj > R2_CYCLING]
 both_sig <- intersect(sig_amplitude$gene, sig_timing$gene)
-cat("\nGenes significant in BOTH amplitude and timing:", length(both_sig), "|",
-    paste(to_name(head(both_sig, 10)), collapse = ", "), "\n")
+cat("Significant in both:", length(both_sig), "| of which cycling:",
+    length(intersect(both_sig, cycling_genes)), "\n")
+both_sig <- intersect(both_sig, cycling_genes)
 
 p_both_amp_timing <- cc_panel(head(both_sig, 6), title = "Significant in both timing and amplitude")
 print(p_both_amp_timing)
@@ -1476,28 +1580,37 @@ save_cc(p_both_amp_timing, "both_amplitude_and_timing.png")
 ```
 
 ```{r}
-strain_scatter <- function(gene_ids, title, subtitle = NULL) {
-  map_dfr(gene_ids, ~ tibble(gene = .x, strain = colnames(AMP),
-                             amp = AMP[.x, ], peak = obs$peak[.x, ],
-                             n_cells = n_by_strain,
-                             poor_cov = colnames(AMP) %in% POOR_COVERAGE)) %>%
+# highlight: optional strain IDs drawn as coloured, labelled points
+# (same colours as cc_panel's highlight)
+strain_scatter <- function(gene_ids, title, subtitle = NULL, highlight = NULL, ncol = 3) {
+  df <- map_dfr(gene_ids, ~ tibble(gene = .x, strain = colnames(AMP),
+                                   amp = AMP[.x, ], peak = obs$peak[.x, ],
+                                   n_cells = n_by_strain,
+                                   poor_cov = colnames(AMP) %in% POOR_COVERAGE)) %>%
     filter(!is.na(amp)) %>%
-    mutate(name = to_name(gene)) %>%
-    ggplot(aes(peak, amp)) +
+    mutate(name = to_name(gene))
+
+  hl_layers <- if (length(highlight)) list(
+    geom_point(data = filter(df, strain %in% highlight),
+               aes(fill = strain), shape = 21, size = 3.5, colour = "black"),
+    ggrepel::geom_text_repel(data = filter(df, strain %in% highlight),
+                             aes(label = strain), size = PUB_LABEL,
+                             min.segment.length = 0),
+    scale_fill_manual(values = setNames(HIGHLIGHT_COLS[seq_along(highlight)], highlight))
+  )
+
+  ggplot(df, aes(peak, amp)) +
     geom_point(aes(size = n_cells, colour = poor_cov), alpha = 0.6) +
     scale_colour_manual(values = c(`FALSE` = "black", `TRUE` = "firebrick"),
-                        name = "gap > 22 min") +
-    ggrepel::geom_text_repel(
-      data = . %>% group_by(name) %>%
-        mutate(ctr = circ_mean_rows(matrix(peak, nrow = 1)),
-               d   = ((peak - ctr + WRAP/2) %% WRAP) - WRAP/2) %>%
-        filter(abs(d) > 10) %>% ungroup(),
-      aes(label = strain), size = 2.5, max.overlaps = 15) +
-    facet_wrap(~name, scales = "free_y") +
-    scale_x_continuous(limits = c(0, WRAP), breaks = seq(0, WRAP, 22)) +
+                        guide = "none") +
+    hl_layers +
+    facet_wrap(~name, scales = "free_y", ncol = ncol) +
+    # same x axis as cc_panel
+    scale_x_continuous(breaks = seq(0, WRAP, 11)) +
+    coord_cartesian(xlim = c(0, WRAP)) +
     labs(x = "Peak time (min)", y = "Amplitude (bias-corrected)",
          title = title, subtitle = subtitle) +
-    theme_classic()
+    pub_theme + theme(legend.position = "none")
 }
 
 strain_scatter_structure <- function(gene_ids, title, subtitle = NULL) {
@@ -1510,12 +1623,13 @@ strain_scatter_structure <- function(gene_ids, title, subtitle = NULL) {
     ggplot(aes(reorder(strain, r2), r2)) +
     geom_point(aes(size = n_cells, colour = poor_cov), alpha = 0.6) +
     scale_colour_manual(values = c(`FALSE` = "black", `TRUE` = "firebrick"),
-                        name = "gap > 22 min") +
+                        guide = "none") +
     facet_wrap(~name, scales = "free_x") +
     labs(x = "Strain (sorted by R2)", y = "Adjusted R2 (fit quality)",
          title = title, subtitle = subtitle) +
-    theme_classic() +
-    theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
+    pub_theme +
+    theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(),
+          legend.position = "none")
 }
 
 dir.create("../results/strain_scatter", showWarnings = FALSE, recursive = TRUE)
@@ -1543,6 +1657,163 @@ p_timing_sig <- strain_scatter(head(sig_timing$gene, 6),
                                "Significant timing variation (FDR < 0.05)")
 print(p_timing_sig)
 save_scatter(p_timing_sig, "timing_highest.png")
+
+# ── SIGNIFICANT IN BOTH amplitude AND timing (same genes as the cc_panel) ──
+p_both_sig <- strain_scatter(head(both_sig, 6),
+                             "Significant in both timing and amplitude (FDR < 0.05)",
+                             "(expression-driven genes excluded)")
+print(p_both_sig)
+save_scatter(p_both_sig, "both_amplitude_and_timing.png")
+```
+
+## 9.1 Paper panels: summary (5E) and supplementary
+
+```{r paper_supp_panels}
+dir.create("../results/paper_panels", showWarnings = FALSE, recursive = TRUE)
+save_paper <- function(plot, filename, width = 10, height = 7) {
+  ggsave(file.path("../results/paper_panels", filename), plot,
+         width = width, height = height, dpi = 300)
+}
+cycling_summary <- gene_summary %>% filter(gene %in% cycling_genes)
+
+# ── 5E: amplitude vs timing excess, cycling genes only ─────────────────────
+p_overlap_cycling <- make_overlap_plot(cycling_summary, "amp_trim_excess_final",
+                                       "peak_trim_excess",
+                                       paste0("Cycling genes (pooled adj. R2 > ",
+                                              R2_CYCLING, ", n = ",
+                                              nrow(cycling_summary), ")"))
+print(p_overlap_cycling)
+save_paper(p_overlap_cycling, "Fig5E_amp_vs_timing_excess_cycling.png", width = 8, height = 7)
+
+# ── Supp: pseudotime by phase call, with the centroid-based phase bands ────
+p_phase_validation <- ggplot(meta %>% filter(!is.na(CC)), aes(pseudotime)) +
+  geom_rect(data = PHASE_BOUNDS,
+            aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf, fill = phase),
+            alpha = 0.35, inherit.aes = FALSE) +
+  geom_histogram(binwidth = 1, boundary = 0, fill = "grey25") +
+  scale_fill_manual(values = PHASE_FILL, guide = "none") +
+  facet_wrap(~CC, ncol = 1, scales = "free_y", strip.position = "right") +
+  scale_x_continuous(breaks = seq(0, WRAP, 11), expand = c(0, 0)) +
+  labs(x = "Cell-cycle time (min)", y = "Cell count") +
+  pub_theme
+
+# fraction of each phase call that lands inside its own band (quoted in text)
+phase_in_band <- meta %>% filter(!is.na(CC)) %>%
+  mutate(band = PHASE_BOUNDS$phase[findInterval(pseudotime %% WRAP, PHASE_BOUNDS$xmin)]) %>%
+  group_by(CC) %>%
+  summarise(n = n(), median_time = round(median(pseudotime), 1),
+            pct_in_own_band = round(100 * mean(band == CC)), .groups = "drop")
+print(phase_in_band)
+
+print(p_phase_validation)
+save_paper(p_phase_validation, "Supp_phase_validation.png", width = 6, height = 10)
+
+# ── Supp: histone genes, APQ and BDL highlighted ───────────────────────────
+HIST_HIGHLIGHT <- c("APQ", "BDL")
+p_hist_curves <- cc_panel(names(histones), ncol = 2, highlight = HIST_HIGHLIGHT,
+                          title = "Histone genes — APQ and BDL highlighted")
+print(p_hist_curves)
+save_paper(p_hist_curves, "Supp_histone_curves.png", width = 8, height = 7)
+
+p_hist_scatter <- strain_scatter(unname(histones),
+                                 "Histone genes — per-strain peak time vs amplitude",
+                                 highlight = HIST_HIGHLIGHT)
+print(p_hist_scatter)
+save_paper(p_hist_scatter, "Supp_histone_scatter.png", width = 8, height = 7)
+
+# ── Supp: robustness of amplitude vs timing variation ──────────────────────
+robust_df <- cycling_summary %>%
+  mutate(sig = case_when(
+    gene %in% sig_amplitude$gene & gene %in% sig_timing$gene ~ "both",
+    gene %in% sig_amplitude$gene ~ "amplitude only",
+    gene %in% sig_timing$gene    ~ "timing only")) %>%
+  filter(!is.na(sig))
+
+p_robustness <- ggplot(robust_df, aes(amp_robustness, peak_robustness)) +
+  geom_abline(linetype = 2, colour = "grey70") +
+  geom_point(aes(colour = sig), size = 2.5, alpha = 0.7) +
+  ggrepel::geom_text_repel(
+    data = filter(robust_df, name %in% c(names(histones), "MRH1", "TIP1")),
+    aes(label = name), size = PUB_LABEL, min.segment.length = 0) +
+  scale_colour_manual(values = c("both" = "firebrick", "amplitude only" = "darkorange",
+                                 "timing only" = "steelblue"),
+                      name = "Significant (FDR < 0.05)") +
+  coord_cartesian(xlim = c(0, 1.2), ylim = c(0, 1.2)) +
+  labs(x = "Amplitude robustness (trimmed / untrimmed spread)",
+       y = "Timing robustness (trimmed / untrimmed spread)",
+       title = "Below the diagonal: timing variation rests on fewer strains") +
+  pub_theme + theme(legend.position = "bottom")
+print(p_robustness)
+save_paper(p_robustness, "Supp_robustness_amp_vs_timing.png", width = 8, height = 8)
+```
+
+## 9.2 Paper panels: curves (top) over strain scatter (bottom)
+
+Each column is one gene: per-strain curves on top, that gene's per-strain
+peak time vs amplitude underneath. Both rows facet alphabetically by gene name,
+so columns line up.
+
+```{r paper_curve_scatter_panels}
+# Facets default to alphabetical; this sets the facet variable to a factor in
+# the plot data and every layer's data so columns follow `levels` instead
+order_facets <- function(p, var, levels) {
+  relevel <- function(d) {
+    if (is.data.frame(d) && var %in% names(d))
+      d[[var]] <- factor(d[[var]], levels = levels)
+    d
+  }
+  p$data <- relevel(p$data)
+  for (i in seq_along(p$layers)) p$layers[[i]]$data <- relevel(p$layers[[i]]$data)
+  p
+}
+
+# columns follow the order `genes` is given in
+curve_over_scatter <- function(genes, title = NULL) {
+  orfs <- to_orf(genes)
+  top    <- cc_panel(orfs, ncol = length(orfs)) +
+    labs(x = "Time in cell cycle (min)")
+  bottom <- strain_scatter(orfs, title = NULL, ncol = length(orfs))
+  top    <- order_facets(top,    "label", to_name(orfs))
+  bottom <- order_facets(bottom, "name",  to_name(orfs))
+  patchwork::wrap_plots(top, bottom, ncol = 1) +
+    patchwork::plot_annotation(title = title,
+                               theme = theme(plot.title = element_text(
+                                 size = PUB_SIZE, face = "bold", hjust = 0.5)))
+}
+
+# ── 5B: marker genes HHF1 (S) and CTS1 (M/G1) ─────────────────────────────
+MARKER_GENES <- c("HHF1", "CTS1")
+p_markers_curve_scatter <- curve_over_scatter(MARKER_GENES)
+print(p_markers_curve_scatter)
+save_paper(p_markers_curve_scatter, "Fig5B_markers_curves_over_scatter.png", width = 8, height = 9)
+
+# ── 5C-D: MRH1, TIP1 and the histones not already shown in 5B (all significant in both)
+MAIN_GENES <- c("MRH1", "TIP1", "HHF2", "HHT2", "HTB2")
+stopifnot(all(to_orf(MAIN_GENES) %in% intersect(sig_amplitude$gene, sig_timing$gene)))
+
+p_main_curve_scatter <- curve_over_scatter(MAIN_GENES)
+print(p_main_curve_scatter)
+save_paper(p_main_curve_scatter, "Fig5CD_curves_over_scatter.png", width = 17, height = 9)
+
+# ── Supp: top amplitude and top timing genes not already in 5B-D ───────────
+N_SUPP <- 5
+shown_genes       <- to_orf(c(MARKER_GENES, MAIN_GENES))
+supp_amp_genes    <- head(setdiff(sig_amplitude$gene, shown_genes), N_SUPP)
+supp_timing_genes <- head(setdiff(sig_timing$gene,    shown_genes), N_SUPP)
+cat("Supp amplitude genes:", to_name(supp_amp_genes), "\n")
+cat("Supp timing genes:   ", to_name(supp_timing_genes), "\n")
+
+p_supp_amp_curve_scatter <- curve_over_scatter(
+  supp_amp_genes, "Largest significant amplitude variation")
+print(p_supp_amp_curve_scatter)
+save_paper(p_supp_amp_curve_scatter, "Supp_amplitude_curves_over_scatter.png",
+           width = 17, height = 9)
+
+p_supp_timing_curve_scatter <- curve_over_scatter(
+  supp_timing_genes, "Largest significant timing variation")
+print(p_supp_timing_curve_scatter)
+save_paper(p_supp_timing_curve_scatter, "Supp_timing_curves_over_scatter.png",
+           width = 17, height = 9)
 ```
 
 

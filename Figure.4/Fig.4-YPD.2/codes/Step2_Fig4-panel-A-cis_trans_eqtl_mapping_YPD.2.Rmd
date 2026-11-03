@@ -1,0 +1,289 @@
+---
+title: "Fig.4-panel-A-cis_trans_eqtl_mapping_YPD.2"
+author: "Akriti Agrawal"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  html_document: 
+    toc: true
+    number_section: true
+    toc_float: 
+      collapsed: false
+      smooth_scroll: true
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(inputFile, encoding = encoding, output_dir = "../results/") })
+---
+
+**Update 2026-10-16.** This step now reads the annotated tables written by Step1
+(`Fig3_panel_B_C_D_variant_eqtl_classification.Rmd`), which uses per-gene LD clumping
+(r2 > 0.6 within 50 kb; PLINK 1.9 `--clump` run per gene since 2026-10-21) and classifies eQTLs as local (within 25 kb, all variant types) or distant.
+Panel A is drawn twice: the cis/trans map (lead variant within 2 kb, as before) and the
+local/distant map.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 10, fig.height = 10)
+```
+
+```{r libs, include=FALSE}
+library(tidyverse)
+source("/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Agrawal_single_cell_eqtl_cell_cycle/shared_code/arial_font.R")  # Arial for all plots, as in Figs 2 and 5
+library(data.table)
+library(GenomicRanges)
+select <- dplyr::select
+filter <- dplyr::filter
+```
+
+## 0. Config — set your four .clumped/assoc paths here
+
+```{r config}
+# ===================================================================
+# Configuration with ABSOLUTE PATHS
+# ===================================================================
+RES   <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.2/fastlmm/results"
+
+CLMP  <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Agrawal_single_cell_eqtl_cell_cycle/Figure.4/Fig.4-YPD.2/results/YPD.2/clumped/"
+
+# Output directory - ABSOLUTE PATH
+OUT_MAIN  <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Agrawal_single_cell_eqtl_cell_cycle/Figure.4/Fig.4-YPD.2/results/YPD.2/eqtl_plot"
+
+OUT_ANNOT <- file.path(OUT_MAIN, "annotations")
+OUT_FIG   <- file.path(OUT_MAIN, "figures")
+OUT_SUMM  <- file.path(OUT_MAIN, "data_summary")
+
+# Create output directories
+for (dir in c(OUT_MAIN, OUT_ANNOT, OUT_FIG, OUT_SUMM)) {
+  dir.create(dir, showWarnings = FALSE, recursive = TRUE)
+}
+
+ANNOT_CSV <- "/scratch/aa9679/SingleCell_cerevisiae/Gene_exp_analysis/yeast_custom_annotations.csv"
+GENE_LOC  <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.2/fastlmm/data/pheno_data/gene_location.txt"
+
+CIS_WINDOW_BP <- 2000
+
+# ===================================================================
+# Step1 annotated tables (per-gene clumped eQTLs, with cis_trans and local_distant)
+# ===================================================================
+ANNOT_IN <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Agrawal_single_cell_eqtl_cell_cycle/Figure.4/Fig.4-YPD.2/results/YPD.2/annotations"
+variant_cfg <- list(
+  SNP   = list(annot = file.path(ANNOT_IN, "snp_data_annotated_cis_trans.txt")),
+  CNV   = list(annot = file.path(ANNOT_IN, "cnv_data_annotated_cis_trans.txt")),
+  Indel = list(annot = file.path(ANNOT_IN, "indel_data_annotated_cis_trans.txt")),
+  SV    = list(annot = file.path(ANNOT_IN, "sv_data_annotated_cis_trans.txt"))
+)
+
+# Variant colors
+variant_colors <- c("SNP" = "#4472C4", "Indel" = "#FFC000",
+                    "SV" = "#C41E3A", "CNV" = "#70AD47")
+
+cat("════════════════════════════════════════════════════════════\n")
+cat("CONFIGURATION SUMMARY\n")
+cat("════════════════════════════════════════════════════════════\n")
+cat("Step1 annotated tables:       ", ANNOT_IN, "\n")
+cat("Output directory (OUT_MAIN):  ", OUT_MAIN, "\n")
+cat("Variant types:                ", paste(names(variant_cfg), collapse = ", "), "\n")
+cat("════════════════════════════════════════════════════════════\n\n")
+
+# Verify files exist
+cat("File existence check:\n")
+for (vt in names(variant_cfg))
+  cat(sprintf("  %s: %s\n", vt, file.exists(variant_cfg[[vt]]$annot)))
+missing <- Filter(function(x) !file.exists(x$annot), variant_cfg)
+if (length(missing)) stop("Run Step1 first: annotated tables missing for ", paste(names(missing), collapse = ", "))
+cat("\n")
+```
+
+## 1. Shared reference objects
+
+```{r reference}
+ann <- read.csv(ANNOT_CSV)
+annotations_gr <- GRanges(ann$seqnames,
+                          IRanges(ann$start, ann$end),
+                          strand = ann$strand,
+                          type = ann$type, gene_id = ann$gene_id, gene_name = ann$gene_name)
+
+roman16 <- c("I","II","III","IV","V","VI","VII","VIII","IX","X","XI","XII","XIII","XIV","XV","XVI")
+num_to_roman <- function(x) roman16[x]
+
+chr_lengths <- c(I=230218, II=813184, III=316620, IV=1531933, V=576874, VI=270161,
+                 VII=1090940, VIII=562643, IX=439888, X=745751, XI=666816,
+                 XII=1078177, XIII=924431, XIV=784333, XV=1091291, XVI=948066)
+chr_offsets <- c(0, cumsum(chr_lengths[-length(chr_lengths)])); names(chr_offsets) <- roman16
+chr_mids <- chr_offsets + chr_lengths / 2
+
+gene_location_fixed <- read.table(GENE_LOC, header = TRUE, stringsAsFactors = FALSE) %>%
+  select(gene_id, gene_name, chr, left, right) %>%
+  mutate(right = right + 2,
+         gene_id = str_replace(gene_id, "-", "."))
+
+feature_priority <- c(promoter=1, three_prime_UTR=2, five_prime_UTR=3,
+                      start_codon=4, stop_codon=5, CDS=6)
+prio <- function(f) { p <- feature_priority[f]; p[is.na(p)] <- 99; p }
+```
+
+## 2. Build the combined table from the Step1 annotations
+
+```{r build-table}
+type_key <- c(SNP = "SNP", CNV = "Gene-based CNV", Indel = "Indel", SV = "SV")
+combined <- bind_rows(lapply(names(variant_cfg), function(vt) {
+  fread(variant_cfg[[vt]]$annot) %>%
+    transmute(variant_type = vt, SNP, Pheno, var_chr_roman = Variant_Chr, ChrPos,
+              Pheno_chr, Pheno_start, Pheno_end, causal_gene = Causal_Gene,
+              cis_trans, local_distant, local_distance_bp, clump_n_members,
+              abs_effect_size = abs(SnpWeight), PValue)
+})) %>%
+  mutate(var_chr_roman = factor(var_chr_roman, levels = roman16),
+         Pheno_chr     = factor(Pheno_chr,     levels = roman16),
+         variant_type  = factor(type_key[variant_type], levels = type_key),
+         var_genome    = chr_offsets[as.character(var_chr_roman)] + ChrPos,
+         pheno_genome  = chr_offsets[as.character(Pheno_chr)] + (Pheno_start + Pheno_end)/2) %>%
+  filter(!is.na(var_genome), !is.na(pheno_genome), !is.na(cis_trans))
+
+cat("\nVariant type x cis/trans (lead variant within 2 kb):\n")
+print(table(combined$variant_type, combined$cis_trans))
+cat("\nVariant type x local/distant (within 25 kb, all variant types):\n")
+print(table(combined$variant_type, combined$local_distant))
+cat("\n")
+```
+
+## 8. Panel A: 2×2 cis/trans facet (Publication-ready)
+
+```{r panelA, fig.width=12, fig.height=11}
+PANEL_A_AXIS <- 18   # axis titles (bold)
+PANEL_A_TICK <- 13   # chromosome tick labels (bold): larger sizes overlap at the short chromosomes (I-III, V/VI, VIII/IX)
+CIS_STROKE   <- 1.2  # outline width added to cis points, so they are drawn larger than trans points
+
+panelA <- ggplot(combined, aes(var_genome, pheno_genome, color = cis_trans, size = abs_effect_size)) +
+  # trans eQTLs first (many points, semi-transparent) ...
+  geom_point(data = filter(combined, cis_trans == "Trans"), alpha = 0.5) +
+  # ... then cis eQTLs on top, opaque, with a dark-red outline that makes each
+  # point larger (size still scales with effect size, as for trans)
+  geom_point(data = filter(combined, cis_trans == "Cis"), alpha = 0.9,
+             shape = 21, fill = "#d73027", stroke = CIS_STROKE) +
+  facet_wrap(~ variant_type, ncol = 2) +
+  scale_color_manual(
+    name = "eQTL type",
+    values = c(Cis = "#8B0000", Trans = "#4575b4"),   # Cis = outline colour (fill is red)
+    breaks = c("Cis", "Trans"),
+    guide = guide_legend(order = 1,   # eQTL type legend first, effect size second
+                         title.position = "top", title.hjust = 0.5,
+                         override.aes = list(shape = c(21, 16), fill = c("#d73027", NA),
+                                             stroke = c(CIS_STROKE, 0.5), size = 4, alpha = 1),
+                         label.theme = element_text(size = 14, face = "bold"),
+                         title.theme = element_text(size = 15, face = "bold"))
+  ) +
+  scale_size_continuous(
+    # plotmath beta: renders without a UTF-8 locale (the cluster R runs in the C locale)
+    name = expression(bold("Effect size (|"*beta*"|)")),
+    range = c(0.4, 2.6),
+    trans = "log10",
+    guide = guide_legend(order = 2, title.position = "top", title.hjust = 0.5,
+                         label.theme = element_text(size = 14),
+                         title.theme = element_text(size = 15, face = "bold"))
+  ) +
+  scale_x_continuous(breaks = chr_mids, labels = names(chr_mids), expand = c(0.01, 0)) +
+  scale_y_continuous(breaks = chr_mids, labels = names(chr_mids), expand = c(0.01, 0)) +
+  labs(
+    x = "Variant position (chromosome)",
+    y = "Gene position (chromosome)"
+  ) +
+  theme_bw(base_size = 13) +
+  theme(
+    # Axis titles
+    axis.title = element_text(size = PANEL_A_AXIS, face = "bold", color = "black"),
+    axis.title.x = element_text(margin = margin(t = 10)),
+    axis.title.y = element_text(margin = margin(r = 10)),
+    # Axis text
+    axis.text = element_text(size = PANEL_A_TICK, color = "black", face = "bold"),
+    # x tick labels vertical: 16 chromosome numerals do not fit side by side
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+    # Facet labels
+    strip.text = element_text(size = 16, face = "bold", color = "black"),
+    strip.background = element_rect(fill = "grey90", color = "black", linewidth = 0.8),
+    # Panel borders
+    panel.border = element_rect(color = "black", linewidth = 0.8),
+    panel.grid = element_line(color = "grey95", linewidth = 0.3),
+    # Legend
+    legend.position = "bottom",
+    legend.box = "horizontal",
+    legend.box.just = "center",
+    legend.spacing.x = unit(1, "cm"),
+    legend.background = element_rect(fill = "white", color = "black", linewidth = 0.8),
+    legend.margin = margin(10, 10, 10, 10),
+    legend.text = element_text(size = 14, color = "black"),
+    legend.title = element_text(size = 15, face = "bold", color = "black"),
+    # Plot margins
+    plot.margin = margin(15, 15, 15, 15)
+  )
+
+print(panelA)
+ggsave(file.path(OUT_FIG, "Fig4_YPD.2_panelA_cis_trans_2x2.tiff"), panelA,
+       width = 12, height = 11, units = "in", dpi = 600, compression = "lzw")
+ggsave(file.path(OUT_FIG, "Fig4_YPD.2_panelA_cis_trans_2x2.png"),  panelA,
+       width = 12, height = 11, units = "in", dpi = 300)
+cat("✓ Saved: Fig4_YPD.2_panelA_cis_trans_2x2.tiff & .png\n\n")
+```
+
+## 9. Panel A: 2×2 local/distant eQTL map
+
+Same map, with eQTLs classified as local (any variant of the clump within 25 kb of the gene;
+gene-based CNVs: the CNV's gene start) or distant.
+
+```{r panelA-local, fig.width=12, fig.height=11}
+panelA_local <- ggplot(combined, aes(var_genome, pheno_genome, color = local_distant, size = abs_effect_size)) +
+  geom_point(data = filter(combined, local_distant == "Distant"), alpha = 0.5) +
+  geom_point(data = filter(combined, local_distant == "Local"), alpha = 0.9,
+             shape = 21, fill = "#d73027", stroke = CIS_STROKE) +
+  facet_wrap(~ variant_type, ncol = 2) +
+  scale_color_manual(
+    name = "eQTL type",
+    values = c(Local = "#8B0000", Distant = "#4575b4"),
+    breaks = c("Local", "Distant"),
+    labels = c(Local = "Local eQTL", Distant = "Distant eQTL"),
+    guide = guide_legend(order = 1, title.position = "top", title.hjust = 0.5,
+                         override.aes = list(shape = c(21, 16), fill = c("#d73027", NA),
+                                             stroke = c(CIS_STROKE, 0.5), size = 4, alpha = 1),
+                         label.theme = element_text(size = 14, face = "bold"),
+                         title.theme = element_text(size = 15, face = "bold"))
+  ) +
+  scale_size_continuous(
+    name = expression(bold("Effect size (|"*beta*"|)")),
+    range = c(0.4, 2.6), trans = "log10",
+    guide = guide_legend(order = 2, title.position = "top", title.hjust = 0.5,
+                         label.theme = element_text(size = 14),
+                         title.theme = element_text(size = 15, face = "bold"))
+  ) +
+  scale_x_continuous(breaks = chr_mids, labels = names(chr_mids), expand = c(0.01, 0)) +
+  scale_y_continuous(breaks = chr_mids, labels = names(chr_mids), expand = c(0.01, 0)) +
+  labs(x = "Variant position (chromosome)", y = "Gene position (chromosome)") +
+  theme_bw(base_size = 13) +
+  theme(axis.title = element_text(size = PANEL_A_AXIS, face = "bold", color = "black"),
+        axis.title.x = element_text(margin = margin(t = 10)),
+        axis.title.y = element_text(margin = margin(r = 10)),
+        axis.text = element_text(size = PANEL_A_TICK, color = "black", face = "bold"),
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+        strip.text = element_text(size = 16, face = "bold", color = "black"),
+        strip.background = element_rect(fill = "grey90", color = "black", linewidth = 0.8),
+        panel.border = element_rect(color = "black", linewidth = 0.8),
+        panel.grid = element_line(color = "grey95", linewidth = 0.3),
+        legend.position = "bottom", legend.box = "horizontal", legend.box.just = "center",
+        legend.spacing.x = unit(1, "cm"),
+        legend.background = element_rect(fill = "white", color = "black", linewidth = 0.8),
+        legend.margin = margin(10, 10, 10, 10),
+        legend.text = element_text(size = 14, color = "black"),
+        legend.title = element_text(size = 15, face = "bold", color = "black"),
+        plot.margin = margin(15, 15, 15, 15))
+print(panelA_local)
+ggsave(file.path(OUT_FIG, "Fig4_YPD.2_panelA_local_distant_2x2.tiff"), panelA_local,
+       width = 12, height = 11, units = "in", dpi = 600, compression = "lzw")
+ggsave(file.path(OUT_FIG, "Fig4_YPD.2_panelA_local_distant_2x2.png"),  panelA_local,
+       width = 12, height = 11, units = "in", dpi = 300)
+cat("✓ Saved: Fig4_YPD.2_panelA_local_distant_2x2.tiff & .png\n\n")
+```
+
+## 10. Save the combined table
+
+```{r save-tables}
+fwrite(combined, file.path(OUT_ANNOT, "cis_trans_eQTL_mapping_all_variants_combined.txt"),
+       sep = "\t", quote = FALSE, row.names = FALSE, na = "NA")
+cat(sprintf("✓ Wrote cis_trans_eQTL_mapping_all_variants_combined.txt — %d rows (cis_trans and local_distant)\n", nrow(combined)))
+```

@@ -1,0 +1,530 @@
+---
+title: "Figure 1B — overlap of demuxlet DGY3 calls with NATMX+ cells (YPD, per replicate)"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 8, fig.height = 4.2, dpi = 300)
+
+# Some R installs (e.g. the HPC r/4.6.1 module) start in the plain "C" locale, which prints
+# non-ASCII characters such as "±" as <U+00B1>. Switch to UTF-8 if needed.
+if (!l10n_info()$`UTF-8`) invisible(Sys.setlocale("LC_CTYPE", "C.UTF-8"))
+```
+
+```{r libraries}
+library(Seurat)
+library(Matrix)
+library(dplyr)
+library(tibble)
+library(ggplot2)
+library(ggforce)
+library(patchwork)
+
+select <- dplyr::select
+filter <- dplyr::filter
+```
+
+# 1. Configuration
+
+```{r config}
+DGY3_ID      <- "DGY3,DGY3,0.00"
+MIN_COUNTS   <- 3          # NATMX-positive if NATMX UMI count >= MIN_COUNTS
+MIN_FEATURES <- 200        # cell-level QC, matches CreateSeuratObject(min.features = 200)
+
+OUT_DIR <- "../results"
+
+# Shared font settings (same as Fig. 1C); all Venn text is bold
+PUB_FONT  <- "Arial"
+PUB_SIZE  <- 16                 # plot titles, circle titles
+PUB_SMALL <- 15                 # circle totals (n = ...)
+PUB_LABEL <- 13 / ggplot2::.pt  # in-plot text (counts / percentages) in mm, = 13 pt
+
+LEGEND_NOTE <- paste("Percentages are relative to each circle; the overlap is shown as a",
+                     "percentage of polymorphism-assigned S288C cells (accuracy).")
+
+samples <- tribble(
+  ~Condition, ~Replicate, ~demuxlet_path, ~matrix_dir,
+
+  "YPD", 1,
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.1/demuxlet/merged_demuxlet_output_YPD.tsv",
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.1/alignment/output_of_alignment_YPD1_with_clean_gtf/run_count/outs/filtered_feature_bc_matrix/",
+
+  "YPD", 2,
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.2/demuxlet/merged_demuxlet_output_YPD_2.tsv",
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.2/alignment/output_of_alignment_YPD2_with_clean_gtf/run_count/outs/filtered_feature_bc_matrix/"
+)
+```
+
+# 2. Functions
+
+```{r functions}
+load_demuxlet <- function(path) {
+  d <- read.delim(path, stringsAsFactors = FALSE)
+  num_cols <- c("BEST.LLK", "NUM.READS", "NUM.SNPS", "NEXT.LLK",
+                "DIFF.LLK.BEST.NEXT", "BEST.POSTERIOR", "SNG.POSTERIOR",
+                "SNG.BEST.LLK", "SNG.NEXT.LLK", "SNG.ONLY.POSTERIOR",
+                "DBL.BEST.LLK", "DIFF.LLK.SNG.DBL")
+  num_cols <- intersect(num_cols, colnames(d))
+  d[num_cols] <- lapply(d[num_cols], as.numeric)
+  na.omit(d)
+}
+
+# 10x barcodes carry a "-1" suffix; demuxlet output sometimes does not. Strip both.
+strip_suffix <- function(x) sub("-\\d+$", "", x)
+
+read_counts <- function(matrix_dir, min_features = MIN_FEATURES) {
+  mat <- Read10X(data.dir = matrix_dir)
+  if (is.list(mat)) mat <- mat[[1]]
+  colnames(mat) <- strip_suffix(colnames(mat))
+  mat[, Matrix::colSums(mat > 0) >= min_features, drop = FALSE]
+}
+
+# Marker-positive cells. grep can match >1 row, so sum over all matching rows.
+marker_cells <- function(mat, pattern, min_counts = MIN_COUNTS) {
+  idx <- grep(pattern, rownames(mat), ignore.case = TRUE)
+  if (length(idx) == 0) stop("Marker '", pattern, "' not present in the reference.")
+  colnames(mat)[Matrix::colSums(mat[idx, , drop = FALSE]) >= min_counts]
+}
+
+# Returns the two cell sets (demuxlet DGY3, NATMX+) for one replicate,
+# restricted to QC-passing cells present in both the count matrix and demuxlet output.
+get_sets <- function(Condition, Replicate, demuxlet_path, matrix_dir) {
+
+  dmx <- load_demuxlet(demuxlet_path)
+  dmx$BARCODE <- strip_suffix(dmx$BARCODE)
+  mat <- read_counts(matrix_dir)
+
+  shared <- intersect(dmx$BARCODE, colnames(mat))
+  if (length(shared) / ncol(mat) < 0.5) {
+    warning(Condition, " rep", Replicate,
+            ": only ", length(shared), " of ", ncol(mat),
+            " matrix barcodes found in demuxlet output - check barcode formatting.")
+  }
+  dmx <- dmx[dmx$BARCODE %in% shared, ]
+  mat <- mat[, shared, drop = FALSE]
+
+  nat <- marker_cells(mat, "NATMX")
+  kan <- marker_cells(mat, "KANMX")
+
+  # Demuxlet call per cell. For doublets, BEST.GUESS is "strainA,strainB,mix".
+  dmx_pair <- strsplit(dmx$BEST.GUESS, ",")
+  has_dgy3 <- vapply(dmx_pair, function(p) "DGY3" %in% p[1:2], logical(1))
+  demuxlet_call <- with(dmx, case_when(
+    DROPLET.TYPE == "SNG" &  has_dgy3 ~ "Singlet DGY3",
+    DROPLET.TYPE == "SNG" & !has_dgy3 ~ "Singlet other strain",
+    DROPLET.TYPE == "DBL" &  has_dgy3 ~ "Doublet with DGY3",
+    DROPLET.TYPE == "DBL" & !has_dgy3 ~ "Doublet without DGY3",
+    DROPLET.TYPE == "AMB"             ~ "Ambiguous",
+    TRUE                              ~ DROPLET.TYPE))
+  names(demuxlet_call) <- dmx$BARCODE
+
+  list(Condition = Condition,
+       Replicate = Replicate,
+       Num_cells_passing_QC = ncol(mat),
+       dgy3 = dmx$BARCODE[dmx$DROPLET.TYPE == "SNG" & dmx$BEST.GUESS == DGY3_ID],
+       demuxlet_call = demuxlet_call,
+       markers = list(NATMX           = nat,
+                      KANMX_and_NATMX = intersect(kan, nat)))
+}
+```
+
+# 3. Compute
+
+Two ground-truth cell sets are compared against the demuxlet DGY3 (S288C) calls:
+NATMX+ cells, and cells positive for both KANMX and NATMX.
+Column names say which marker set each count refers to.
+
+```{r compute}
+sets <- lapply(seq_len(nrow(samples)), function(i) {
+  do.call(get_sets, as.list(samples[i, ]))
+})
+
+# Marker set labels used in the Venn diagrams (right-hand circle)
+MARKER_LABELS <- c(NATMX           = "Single\nNATMX+ cells",
+                   KANMX_and_NATMX = "Single KANMX+\nNATMX+ cells")
+
+results <- bind_rows(lapply(sets, function(s) {
+  dgy3_cells <- s$dgy3
+  row <- data.frame(Condition                         = s$Condition,
+                    Replicate                         = s$Replicate,
+                    Num_cells_passing_QC              = s$Num_cells_passing_QC,
+                    Num_cells_called_DGY3_by_demuxlet = length(dgy3_cells))
+
+  for (mk in names(s$markers)) {
+    marker_pos_cells <- s$markers[[mk]]
+    n_cells_in_both  <- length(intersect(dgy3_cells, marker_pos_cells))
+
+    row[[sprintf("Num_cells_%s_positive", mk)]]                    <- length(marker_pos_cells)
+    row[[sprintf("Num_cells_called_DGY3_AND_%s_positive", mk)]]    <- n_cells_in_both
+    row[[sprintf("Num_cells_called_DGY3_NOT_%s_positive", mk)]]    <- length(dgy3_cells) - n_cells_in_both
+    row[[sprintf("Num_cells_%s_positive_NOT_called_DGY3", mk)]]    <- length(marker_pos_cells) - n_cells_in_both
+    row[[sprintf("Pct_of_demuxlet_DGY3_cells_that_are_%s_positive", mk)]] <-
+      100 * n_cells_in_both / max(length(dgy3_cells), 1)
+
+    # Marker+ cells in which demuxlet detected DGY3 at all (as a singlet, or as one cell of a doublet)
+    calls <- s$demuxlet_call[marker_pos_cells]
+    n_dgy3_any <- sum(calls %in% c("Singlet DGY3", "Doublet with DGY3"))
+    row[[sprintf("Num_cells_%s_positive_called_DGY3_singlet_or_doublet_with_DGY3", mk)]] <- n_dgy3_any
+    row[[sprintf("Pct_of_%s_positive_cells_called_DGY3_singlet_or_doublet_with_DGY3", mk)]] <-
+      100 * n_dgy3_any / max(length(marker_pos_cells), 1)
+
+    # Restricted to demuxlet singlets: of marker+ singlets, how many are DGY3
+    n_sng <- sum(calls %in% c("Singlet DGY3", "Singlet other strain"))
+    row[[sprintf("Num_cells_%s_positive_demuxlet_singlets", mk)]] <- n_sng
+    row[[sprintf("Num_cells_%s_positive_demuxlet_singlets_NOT_called_DGY3", mk)]] <- n_sng - n_cells_in_both
+    row[[sprintf("Pct_of_%s_positive_singlets_called_DGY3", mk)]] <-
+      100 * n_cells_in_both / max(n_sng, 1)
+  }
+  row
+}))
+
+knitr::kable(t(results), digits = 1)
+```
+
+## 3b. Doublet breakdown: what demuxlet called the marker-positive cells
+
+One row per replicate and demuxlet call; the last row of each replicate is the total.
+For each marker set:
+
+- `Num_<marker>_positive_cells` / `Pct_of_all_<marker>_positive_cells`: how the marker+ cells
+  split across demuxlet calls (columns sum to the total number of marker+ cells).
+- `Pct_of_cells_with_this_call_that_are_<marker>_positive`: how well each demuxlet call matches
+  the marker data (e.g. singlet and doublet DGY3 calls should be ~100% marker+, other-strain
+  singlets ~0%).
+
+```{r doublet-breakdown}
+CALL_LEVELS <- c("Singlet DGY3", "Doublet with DGY3", "Doublet without DGY3",
+                 "Singlet other strain", "Ambiguous")
+
+doublet_breakdown <- bind_rows(lapply(sets, function(s) {
+  calls <- factor(s$demuxlet_call, levels = CALL_LEVELS)
+  tab <- data.frame(Condition = s$Condition,
+                    Replicate = s$Replicate,
+                    Demuxlet_call = c(CALL_LEVELS, "Total"),
+                    Num_cells_with_this_call = c(as.vector(table(calls)), length(calls)))
+
+  for (mk in names(s$markers)) {
+    pos_calls <- factor(s$demuxlet_call[s$markers[[mk]]], levels = CALL_LEVELS)
+    n_pos <- c(as.vector(table(pos_calls)), length(pos_calls))
+    tab[[sprintf("Num_%s_positive_cells", mk)]] <- n_pos
+    tab[[sprintf("Pct_of_all_%s_positive_cells", mk)]] <- 100 * n_pos / max(length(pos_calls), 1)
+    tab[[sprintf("Pct_of_cells_with_this_call_that_are_%s_positive", mk)]] <-
+      100 * n_pos / pmax(tab$Num_cells_with_this_call, 1)
+  }
+  tab
+}))
+
+knitr::kable(doublet_breakdown, digits = 1)
+```
+
+# 4. Venn diagrams (one per YPD replicate and marker set)
+
+Both circles contain single cells only (demuxlet singlets), so the overlap is the actual
+shared set of cells.
+
+- Left circle: cells demuxlet called singlet DGY3 (S288C), `Num_cells_called_DGY3_by_demuxlet`.
+- Right circle: marker-positive cells that demuxlet called a singlet (any strain),
+  `Num_cells_<marker>_positive_demuxlet_singlets`. Marker+ doublets are left out; see 3b.
+- Overlap: `Num_cells_called_DGY3_AND_<marker>_positive`, with
+  `Pct_of_demuxlet_DGY3_cells_that_are_<marker>_positive` (= overlap / left circle) = demuxlet accuracy.
+- Left-only: % of the left circle. Right-only: % of the right circle.
+
+```{r venn}
+# Counts and percentages for one replicate x marker set.
+# Left only: % of left circle; overlap: % of left circle (accuracy); right only: % of right circle
+venn_numbers <- function(r, mk) {
+  n_left       <- r$Num_cells_called_DGY3_by_demuxlet
+  n_right      <- r[[sprintf("Num_cells_%s_positive_demuxlet_singlets", mk)]]
+  n_left_only  <- r[[sprintf("Num_cells_called_DGY3_NOT_%s_positive", mk)]]
+  n_both       <- r[[sprintf("Num_cells_called_DGY3_AND_%s_positive", mk)]]
+  n_right_only <- r[[sprintf("Num_cells_%s_positive_demuxlet_singlets_NOT_called_DGY3", mk)]]
+  data.frame(n_left, n_right, n_left_only, n_both, n_right_only,
+             pct_left_only  = 100 * n_left_only  / max(n_left, 1),
+             pct_both       = r[[sprintf("Pct_of_demuxlet_DGY3_cells_that_are_%s_positive", mk)]],
+             pct_right_only = 100 * n_right_only / max(n_right, 1))
+}
+
+# Area of the overlap (lens) of two circles with radii r1, r2 whose centres are d apart
+lens_area <- function(r1, r2, d) {
+  if (d >= r1 + r2) return(0)
+  if (d <= abs(r1 - r2)) return(pi * min(r1, r2)^2)
+  r1^2 * acos((d^2 + r1^2 - r2^2) / (2 * d * r1)) +
+    r2^2 * acos((d^2 + r2^2 - r1^2) / (2 * d * r2)) -
+    0.5 * sqrt((-d + r1 + r2) * (d + r1 - r2) * (d - r1 + r2) * (d + r1 + r2))
+}
+
+VENN_COLORS <- c(demuxlet = "#1F4E8C", marker = "#F28E2B")
+
+# Area-proportional Venn: circle areas are proportional to the number of cells in each set
+# and the overlap area to the number of shared cells.
+# v: one row from venn_numbers() (or the replicate mean); v_sd: optional SD of the percentages
+plot_venn <- function(v, mk, title, v_sd = NULL) {
+  big <- max(v$n_left, v$n_right)
+  r1 <- sqrt(v$n_left / big); r2 <- sqrt(v$n_right / big)       # largest circle has radius 1
+  target <- pi * v$n_both / big                                   # overlap area in plot units
+  lo <- abs(r1 - r2); hi <- r1 + r2
+  d <- if (target >= lens_area(r1, r2, lo + 1e-9)) lo else
+         uniroot(function(d) lens_area(r1, r2, d) - target, c(lo + 1e-9, hi - 1e-9))$root
+  c1 <- -d / 2; c2 <- d / 2
+
+  circles <- data.frame(x0 = c(c1, c2), y0 = 0, r = c(r1, r2), set = c("demuxlet", "marker"))
+
+  # x-extent of each region along the horizontal axis
+  left_span  <- c(c1 - r1, min(c2 - r2, c1 + r1))
+  right_span <- c(max(c1 + r1, c2 - r2), c2 + r2)
+  both_span  <- c(max(c1 - r1, c2 - r2), min(c1 + r1, c2 + r2))
+
+  # Line 1: cell count. Line 2: percentage; on the mean plot "(mean% ± SD%)" in a smaller font.
+  fmt_pct <- function(p, s) if (is.null(s)) sprintf("(%.1f%%)", p) else
+    sprintf("(%.1f%% ± %.1f%%)", p, s)
+  pct_size <- if (is.null(v_sd)) PUB_LABEL else 10 / .pt   # 13 pt per replicate, 10 pt on the mean plot
+
+  # Regions too thin to hold text get their label outside the circles, with a leader line
+  MIN_WIDTH <- 0.55
+  left_inside  <- diff(left_span)  >= MIN_WIDTH
+  right_inside <- diff(right_span) >= MIN_WIDTH
+  region_labels <- data.frame(
+    x = c(if (left_inside)  mean(left_span)  else c1 - r1 - 0.12,
+          mean(both_span),
+          if (right_inside) mean(right_span) else c2 + r2 + 0.12),
+    hjust = c(if (left_inside) 0.5 else 1, 0.5, if (right_inside) 0.5 else 0),
+    count = round(c(v$n_left_only, v$n_both, v$n_right_only)),
+    pct   = c(fmt_pct(v$pct_left_only,  v_sd$pct_left_only),
+              fmt_pct(v$pct_both,       v_sd$pct_both),
+              fmt_pct(v$pct_right_only, v_sd$pct_right_only))
+  )
+  leaders <- rbind(
+    if (!left_inside)  data.frame(x = c1 - r1 - 0.1, xend = mean(left_span)),
+    if (!right_inside) data.frame(x = c2 + r2 + 0.1, xend = mean(right_span)))
+
+  # Titles and totals sit above the circles; text colour matches the circle it names
+  title_y <- max(r1, r2) + 0.25
+  totals <- data.frame(x = c(-0.95, 0.95), y = title_y - 0.2,
+                       label = c(sprintf("n = %s", round(v$n_left)), sprintf("n = %s", round(v$n_right))),
+                       col = VENN_COLORS)
+
+  ggplot() +
+    geom_circle(data = circles, aes(x0 = x0, y0 = y0, r = r, fill = set),
+                alpha = 0.6, color = "black", linewidth = 0.5) +
+    { if (!is.null(leaders)) geom_segment(data = leaders, aes(x = x, xend = xend, y = 0, yend = 0),
+                                          linewidth = 0.4) } +
+    geom_text(data = region_labels, aes(x = x, y = 0.09, label = count, hjust = hjust),
+              size = PUB_LABEL, family = PUB_FONT, fontface = "bold") +
+    geom_text(data = region_labels, aes(x = x, y = -0.09, label = pct, hjust = hjust),
+              size = pct_size, family = PUB_FONT, fontface = "bold") +
+    # Left title on two lines: "Polymorphism" / italic "S288C"
+    annotate("text", x = -0.95, y = title_y + 0.2, label = "Polymorphism", color = VENN_COLORS[["demuxlet"]],
+             size = PUB_SIZE / .pt, family = PUB_FONT, fontface = "bold", vjust = 0) +
+    annotate("text", x = -0.95, y = title_y, label = "S288C", color = VENN_COLORS[["demuxlet"]],
+             size = PUB_SIZE / .pt, family = PUB_FONT, fontface = "bold.italic", vjust = 0) +
+    annotate("text", x = 0.95, y = title_y, label = MARKER_LABELS[[mk]], color = VENN_COLORS[["marker"]],
+             size = PUB_SIZE / .pt, family = PUB_FONT, fontface = "bold",
+             vjust = 0, lineheight = 0.9) +
+    geom_text(data = totals, aes(x = x, y = y, label = label), color = totals$col,
+              size = PUB_SMALL / .pt, family = PUB_FONT, fontface = "bold", vjust = 0) +
+    scale_fill_manual(values = VENN_COLORS) +
+    coord_fixed(xlim = c(-2.1, 2.1), ylim = c(-1.05, title_y + 0.55), clip = "off") +
+    labs(title = title) +
+    theme_void(base_size = PUB_SIZE, base_family = PUB_FONT) +
+    theme(legend.position = "none",
+          text = element_text(family = PUB_FONT, face = "bold", color = "black"),
+          plot.title = element_text(size = PUB_SIZE, face = "bold", hjust = 0.5),
+          plot.caption = element_text(size = PUB_SMALL - 4, face = "bold", hjust = 0),
+          plot.background = element_rect(fill = "white", color = NA),
+          plot.margin = margin(10, 12, 8, 10))
+}
+
+# Legend note printed as a caption under the figure
+add_note <- function(p, wrap = 110) p + plot_annotation(caption = stringr::str_wrap(LEGEND_NOTE, wrap),
+                                            theme = theme(plot.caption = element_text(
+                                              family = PUB_FONT, face = "bold",
+                                              size = PUB_SMALL - 4, hjust = 0)))
+
+venn_plots <- list()
+for (i in seq_len(nrow(results))) {
+  for (mk in names(MARKER_LABELS)) {
+    nm <- sprintf("%s_rep%d_%s", results$Condition[i], results$Replicate[i], mk)
+    venn_plots[[nm]] <- plot_venn(venn_numbers(results[i, ], mk), mk,
+                                  title = sprintf("%s, replicate %d", results$Condition[i], results$Replicate[i]))
+  }
+}
+
+# Mean across replicates: counts are the mean cell numbers (rounded), percentages are the
+# mean of the per-replicate percentages ± SD (same summary as the Step2 bar plot).
+venn_mean <- list()
+venn_mean_numbers <- list()
+for (cond in unique(results$Condition)) {
+  for (mk in names(MARKER_LABELS)) {
+    per_rep <- bind_rows(lapply(which(results$Condition == cond),
+                                function(i) venn_numbers(results[i, ], mk)))
+    v_mean <- as.data.frame(lapply(per_rep, mean))
+    v_sd   <- as.data.frame(lapply(per_rep, sd))
+    nm <- sprintf("%s_mean_%s", cond, mk)
+    venn_mean[[nm]] <- plot_venn(v_mean, mk, v_sd = v_sd,
+                                 title = sprintf("%s, mean of %d replicates", cond, nrow(per_rep)))
+    venn_mean_numbers[[nm]] <- cbind(Condition = cond, Marker = mk, n_replicates = nrow(per_rep),
+                                     setNames(v_mean, paste0("mean_", names(v_mean))),
+                                     setNames(v_sd[grepl("^pct", names(v_sd))],
+                                              paste0("sd_", names(v_sd)[grepl("^pct", names(v_sd))])))
+  }
+}
+venn_mean_numbers <- bind_rows(venn_mean_numbers)
+knitr::kable(venn_mean_numbers, digits = 1)
+
+# Reminder for the figure legend
+cat("FIGURE LEGEND NOTE:", LEGEND_NOTE, "\n")
+```
+
+## 4a. Demuxlet S288C vs NATMX+ cells
+
+```{r venn-natmx, fig.width = 10, fig.height = 5}
+venn_nat <- add_note(wrap_plots(venn_plots[grepl("_NATMX$", names(venn_plots)) &
+                                           !grepl("KANMX", names(venn_plots))], nrow = 1))
+venn_nat
+```
+
+## 4b. Demuxlet S288C vs KANMX+ NATMX+ cells
+
+```{r venn-kan-nat, fig.width = 10, fig.height = 5}
+venn_kannat <- add_note(wrap_plots(venn_plots[grepl("_KANMX_and_NATMX$", names(venn_plots))], nrow = 1))
+venn_kannat
+```
+
+## 4b-mean. Mean of replicates
+
+Counts are mean cell numbers across replicates (rounded); percentages are the mean ± SD of
+the per-replicate percentages.
+
+```{r venn-mean, fig.width = 5, fig.height = 5.5}
+MEAN_NOTE <- paste(LEGEND_NOTE, "Counts are mean cell numbers across replicates;",
+                   "percentages are mean ± SD of the replicate percentages.")
+
+add_mean_note <- function(p, wrap = 60) p + plot_annotation(
+  caption = stringr::str_wrap(MEAN_NOTE, wrap),
+  theme = theme(plot.caption = element_text(family = PUB_FONT, face = "bold",
+                                            size = PUB_SMALL - 4, hjust = 0)))
+
+for (nm in names(venn_mean)) print(add_mean_note(venn_mean[[nm]]))
+
+cat("FIGURE LEGEND NOTE (mean):", MEAN_NOTE, "\n")
+```
+
+## 4c. All NATMX+ cells split by polymorphism (demuxlet) assignment
+
+One circle per replicate = all NATMX+ cells (singlets and doublets). Each slice is the
+polymorphism call those cells received; slice size and percentage are relative to all NATMX+ cells.
+Blue = polymorphism detected S288C (as a singlet or within a doublet); orange = it did not.
+Counts come from the doublet breakdown table (3b).
+
+```{r pie-natmx, fig.width = 13, fig.height = 5.5}
+PIE_NOTE <- "Percentages are relative to all NATMX+ cells (singlets and doublets)."
+
+pie_colors <- c("Singlet DGY3"         = "#4E79A7",
+                "Doublet with DGY3"    = "#A9C1DD",
+                "Doublet without DGY3" = "#F9C894",
+                "Singlet other strain" = "#F28E2B",
+                "Ambiguous"            = "grey70")
+pie_labels <- c("Singlet DGY3"         = expression(bold("Singlet")~bolditalic("S288C")),
+                "Doublet with DGY3"    = expression(bold("Doublet with")~bolditalic("S288C")),
+                "Doublet without DGY3" = expression(bold("Doublet without")~bolditalic("S288C")),
+                "Singlet other strain" = expression(bold("Singlet other strain")),
+                "Ambiguous"            = expression(bold("Ambiguous")))
+
+plot_pie <- function(cond, rep) {
+  d <- doublet_breakdown %>%
+    filter(Condition == cond, Replicate == rep, Demuxlet_call != "Total",
+           Num_NATMX_positive_cells > 0) %>%
+    mutate(Demuxlet_call = factor(Demuxlet_call, levels = names(pie_colors))) %>%
+    arrange(Demuxlet_call) %>%
+    mutate(frac  = Num_NATMX_positive_cells / sum(Num_NATMX_positive_cells),
+           mid   = 2 * pi * (cumsum(frac) - frac / 2),   # 0 = 12 o'clock, clockwise
+           small = frac < 0.05,                          # small slices labelled outside
+           r_lab = ifelse(small, 1.3, 0.62),
+           x_lab = r_lab * sin(mid), y_lab = r_lab * cos(mid),
+           label = sprintf("%d\n(%.1f%%)", Num_NATMX_positive_cells, 100 * frac))
+
+  n_total <- sum(d$Num_NATMX_positive_cells)
+
+  ggplot(d) +
+    geom_arc_bar(aes(x0 = 0, y0 = 0, r0 = 0, r = 1, amount = Num_NATMX_positive_cells,
+                     fill = Demuxlet_call),
+                 stat = "pie", color = "black", linewidth = 0.4) +
+    geom_segment(data = filter(d, small),
+                 aes(x = 1.0 * sin(mid), y = 1.0 * cos(mid),
+                     xend = 1.15 * sin(mid), yend = 1.15 * cos(mid)), linewidth = 0.4) +
+    geom_text(aes(x = x_lab, y = y_lab, label = label),
+              size = PUB_LABEL, family = PUB_FONT, fontface = "bold", lineheight = 0.9) +
+    scale_fill_manual(values = pie_colors, labels = pie_labels, drop = TRUE,
+                      name = "Polymorphism\nassignment") +
+    guides(fill = guide_legend(ncol = 1)) +
+    coord_fixed(xlim = c(-1.45, 1.45), ylim = c(-1.1, 1.55), clip = "off") +
+    labs(title = sprintf("%s, replicate %d", cond, rep),
+         subtitle = sprintf("All NATMX+ cells (n = %d)", n_total)) +
+    theme_void(base_size = PUB_SIZE, base_family = PUB_FONT) +
+    theme(text          = element_text(family = PUB_FONT, face = "bold", color = "black"),
+          plot.title    = element_text(size = PUB_SIZE, face = "bold", hjust = 0.5),
+          plot.subtitle = element_text(size = PUB_SIZE, face = "bold", hjust = 0.5,
+                                       margin = margin(t = 6, b = 2)),
+          legend.title  = element_text(size = PUB_SIZE, face = "bold"),
+          legend.text   = element_text(size = PUB_SMALL, face = "bold"),
+          legend.key.size = unit(0.5, "cm"),
+          plot.background = element_rect(fill = "white", color = NA),
+          plot.margin   = margin(10, 12, 8, 10))
+}
+
+pie_plots <- lapply(seq_len(nrow(results)), function(i)
+  plot_pie(results$Condition[i], results$Replicate[i]))
+names(pie_plots) <- sprintf("%s_rep%d", results$Condition, results$Replicate)
+
+pie_caption <- function(p) p + plot_annotation(
+  caption = PIE_NOTE,
+  theme = theme(plot.caption = element_text(family = PUB_FONT, face = "bold",
+                                            size = PUB_SMALL - 4, hjust = 0)))
+
+pie_nat <- pie_caption(wrap_plots(pie_plots, nrow = 1, guides = "collect"))
+pie_nat
+
+cat("FIGURE LEGEND NOTE (pie):", PIE_NOTE, "\n")
+```
+
+```{r save}
+dir.create(OUT_DIR, showWarnings = FALSE, recursive = TRUE)
+
+for (nm in names(venn_plots)) {
+  ggsave(file.path(OUT_DIR, sprintf("Fig1B_venn_demuxlet_vs_%s.tiff", nm)),
+         add_note(venn_plots[[nm]], wrap = 55), width = 5, height = 5, units = "in",
+         dpi = 300, device = "tiff", compression = "lzw")
+}
+
+ggsave(file.path(OUT_DIR, "Fig1B_venn_demuxlet_vs_NATMX_YPD_all.tiff"),
+       venn_nat, width = 10, height = 5, units = "in",
+       dpi = 300, device = "tiff", compression = "lzw")
+ggsave(file.path(OUT_DIR, "Fig1B_venn_demuxlet_vs_KANMX_and_NATMX_YPD_all.tiff"),
+       venn_kannat, width = 10, height = 5, units = "in",
+       dpi = 300, device = "tiff", compression = "lzw")
+
+for (nm in names(venn_mean)) {
+  ggsave(file.path(OUT_DIR, sprintf("Fig1B_venn_demuxlet_vs_%s.tiff", nm)),
+         add_mean_note(venn_mean[[nm]]), width = 5, height = 5.5, units = "in",
+         dpi = 300, device = "tiff", compression = "lzw")
+}
+write.csv(venn_mean_numbers, file.path(OUT_DIR, "Fig1B_venn_mean_source_data.csv"), row.names = FALSE)
+
+write.csv(results, file.path(OUT_DIR, "Fig1B_venn_source_data.csv"), row.names = FALSE)
+write.csv(doublet_breakdown, file.path(OUT_DIR, "Fig1B_venn_doublet_breakdown.csv"), row.names = FALSE)
+
+for (nm in names(pie_plots)) {
+  ggsave(file.path(OUT_DIR, sprintf("Fig1B_pie_NATMX_by_polymorphism_call_%s.tiff", nm)),
+         pie_caption(pie_plots[[nm]]),
+         width = 7.5, height = 5.5, units = "in",
+         dpi = 300, device = "tiff", compression = "lzw")
+}
+ggsave(file.path(OUT_DIR, "Fig1B_pie_NATMX_by_polymorphism_call_YPD_all.tiff"),
+       pie_nat, width = 13, height = 5.5, units = "in",
+       dpi = 300, device = "tiff", compression = "lzw")
+```
+
+```{r session}
+sessionInfo()
+```
