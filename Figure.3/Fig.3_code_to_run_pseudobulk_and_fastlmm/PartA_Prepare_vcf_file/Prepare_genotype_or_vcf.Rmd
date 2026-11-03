@@ -183,7 +183,6 @@ plink --bfile 96strains.snps.indels.plink \
 plink --vcf SV.1087Samples.vcf \
        --make-bed \
        --allow-extra-chr \
-       --maf 0.15 \
        --out ./SVs_from_SV.1087/SV.1087samples.SVs
 
 ```

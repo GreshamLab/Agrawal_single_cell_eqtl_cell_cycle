@@ -52,8 +52,22 @@ CONDITIONS <- list(
   "YPD.2"    = list(path = file.path(BASE, "YPD.2/fastlmm/data/pheno_data/pseudobulk_reliable_transcripts_YPD.txt"),    sep = "\t"),
   "Flu.1"    = list(path = file.path(BASE, "Flu.1/fastlmm/data/pheno_data/pseudobulk_reliable_transcripts_Flu1.txt"),   sep = "\t"),
   "Flu.2"    = list(path = file.path(BASE, "Flu.2/fastlmm/data/pheno_data/pseudobulk_reliable_transcripts_Flu2.txt"),   sep = "\t"),
-  "sc2glu.2" = list(path = file.path(BASE, "sc2glu.2/fastlmm/data/pheno_data/pseudobulked_sc2glu_before_any_filtering.csv"), sep = ",")
+  # sc2glu.2: the sc2glu.2_only pseudobulk used for the sc2glu.2 eQTL mapping (2026-09-30);
+  # it is unfiltered, so the >= 60%-of-strains filter is applied in load_condition_counts()
+  "sc2glu.2" = list(path = file.path(BASE, "sc2glu.2/fastlmm_sc2.glu.2_only/data/pheno_data/pseudobulked_sc2glu.2_only_before_any_filtering.csv"), sep = ","),
+  "scgal.1"  = list(path = file.path(BASE, "scgal.1/fastlmm/data/pheno_data/pseudobulk_reliable_transcripts_scgal.1.txt"), sep = "\t")
 )
+
+# demuxlet output per condition (cells per strain for the heatmap labels / >= 30-cell filter)
+DEMUX <- c(
+  "YPD.1"    = file.path(BASE, "YPD.1/demuxlet/merged_demuxlet_output_YPD.tsv"),
+  "YPD.2"    = "/scratch/aa9679/SingleCell_cerevisiae/Gene_exp_analysis/yeast/yeast.2/data/merged_demuxlet_output_YPD_2.tsv",
+  "Flu.1"    = file.path(BASE, "Flu.1/demuxlet/merged_demuxlet_output_flu_1.tsv"),
+  "Flu.2"    = file.path(BASE, "Flu.2/demuxlet/merged_demuxlet_output_flu_2.tsv"),
+  "sc2glu.2" = file.path(BASE, "sc2glu.2/demuxlet/merged_demuxlet_output_scglu2.tsv"),
+  "scgal.1"  = file.path(BASE, "scgal.1/demuxlet/merged_demuxlet_output_scgal.tsv")
+)
+for (cn in names(CONDITIONS)) CONDITIONS[[cn]]$demux <- DEMUX[[cn]]
 ```
 
 
@@ -86,6 +100,13 @@ build_orf_to_name <- function(custom_map, all_orfs) {
   c(custom_map, sgd_map[!names(sgd_map) %in% names(custom_map)])
 }
 
+gene_location <- all_custom_gene_annotations %>%
+  filter(type == "CDS", !is.na(gene_id)) %>%
+  group_by(gene_id) %>%
+  summarise(gene_name = first(gene_name), chr = first(seqnames), .groups = "drop")
+
+standard_orfs <- gene_location %>% filter(!chr %in% c("Mito", "Marker")) %>% pull(gene_id)
+
 # All ORFs that could appear in any condition
 all_possible_orfs <- unique(c(names(orf_to_name_custom), standard_orfs))
 orf_to_name <- build_orf_to_name(orf_to_name_custom, all_possible_orfs)
@@ -94,13 +115,6 @@ cat("Named ORFs — custom:", length(orf_to_name_custom),
     "| + SGD:", length(orf_to_name), "\n")
 
 name_to_orf <- setNames(names(orf_to_name), orf_to_name)
-
-gene_location <- all_custom_gene_annotations %>%
-  filter(type == "CDS", !is.na(gene_id)) %>%
-  group_by(gene_id) %>%
-  summarise(gene_name = first(gene_name), chr = first(seqnames), .groups = "drop")
-
-standard_orfs <- gene_location %>% filter(!chr %in% c("Mito", "Marker")) %>% pull(gene_id)
 
 # Clade metadata — covers all strains across all conditions
 strains_sc <- read.csv(file.path(BASE, "StrainsforSC-RNAseq.csv"), header = TRUE)
@@ -114,6 +128,9 @@ load_condition_counts <- function(path, sep = "\t") {
 
   raw_counts <- read.table(path, header = TRUE, sep = sep, row.names = 1,
                            check.names = FALSE, quote = quote_arg)
+  # keep transcripts detected in >= 60% of strains, as in the pseudobulk step of every
+  # condition (no change for the *_reliable_transcripts_* files, which are already filtered)
+  raw_counts <- raw_counts[rowSums(raw_counts > 0) >= 0.6 * ncol(raw_counts), ]
 
   expr_gene_ids <- rownames(raw_counts)
   is_orf <- grepl("^Y[A-Z]{2}\\d{3}[WC](-[A-Z])?$", expr_gene_ids)
@@ -465,17 +482,32 @@ plot_go_grid <- function(ora_combined, condition_label, top_n = 5, ncol = 4) {
     scale_y_discrete(labels = function(x) sub("^.*___", "", x)) +
     scale_color_manual(values = c(Upregulated = "#C0392B",
                                   Downregulated = "#2471A3"), name = NULL) +
-    scale_size_continuous(name = "Genes", range = c(1, 4)) +
+    scale_size_continuous(name = "Genes", range = c(2, 6)) +
     facet_wrap(~ clade, ncol = ncol, scales = "free_y") +
-    labs(title = paste0("GO Biological Process enrichment — ", condition_label),
+    labs(title = paste0("GO Biological Process enrichment: ", condition_label),
          x = "Gene ratio", y = NULL) +
-    theme_bw(base_size = 8) +
-    theme(axis.text.y        = element_text(size = 5.5, lineheight = 0.8),
-          strip.text         = element_text(size = 6.5, face = "bold"),
+    theme_bw(base_size = 14) +
+    # large bold text so the grid stays readable when shrunk to page width
+    theme(axis.text.y        = element_text(size = 13, face = "bold", color = "black", lineheight = 0.85),
+          axis.text.x        = element_text(size = 13, face = "bold", color = "black"),
+          axis.title.x       = element_text(size = 16, face = "bold"),
+          strip.text         = element_text(size = 15, face = "bold"),
           strip.background   = element_rect(fill = "grey92", color = NA),
           panel.grid.major.y = element_blank(),
           legend.position    = "bottom",
-          plot.title         = element_text(face = "bold", size = 10))
+          legend.text        = element_text(size = 14, face = "bold"),
+          legend.title       = element_text(size = 15, face = "bold"),
+          plot.title         = element_text(face = "bold", size = 18))
+}
+
+# Saves the GO grid as .png and .tiff; height scales with the number of clade rows
+save_go_grid <- function(g_grid, out_stem, ncol = 4) {
+  n_rows <- ceiling(length(unique(g_grid$data$clade)) / ncol)
+  h <- 7 * n_rows + 1.5
+  safe_ggsave(paste0(out_stem, ".png"), g_grid, width = 24, height = h, units = "in",
+              dpi = 300, device = "png", limitsize = FALSE)
+  safe_ggsave(paste0(out_stem, ".tiff"), g_grid, width = 24, height = h, units = "in",
+              dpi = 300, device = "tiff", compression = "lzw", limitsize = FALSE)
 }
 ```
 
@@ -545,8 +577,116 @@ make_clade_summary <- function(dge_combined, condition_label) {
 
 
 ```{r}
+# ── Panel A heatmap: same function, versions and style as the main Fig. 2A Rmd ──
+# (Fig.2-panel-A-B-C-D-differential-gene-expression.Rmd, make_fig2A), with the
+# per-condition objects passed in instead of read from the global environment.
+PUB_FONT  <- "Arial"
+PUB_SIZE  <- 16                 # axis titles, axis labels, legend titles, strips
+PUB_SMALL <- 15                 # legend entries
+
+col_fun_A <- colorRamp2(
+  c(-3, -1.5, 0, 1.5, 3),
+  c("#2166AC", "#92C5DE", "white", "#F4A582", "#B2182B")
+)
+
+# Builds the Panel A heatmap for strains whose clade has >= min_strains strains.
+# Columns are clustered up front (Ward.D2) so the clade legend can be listed in the
+# same left-to-right order in which the clades first appear along the heatmap.
+# show_cells = TRUE labels each strain as "STRAIN (n cells)".
+# min_cells drops strains with fewer cells first; clade sizes are then counted on the
+# remaining strains, so min_strains applies after the cell filter.
+make_fig2A <- function(scaled_A, sample_meta, clade_colors, cells_per_strain,
+                       min_strains, show_cells = FALSE, min_cells = 0) {
+  pass_cells <- colnames(scaled_A)[cells_per_strain[colnames(scaled_A)] >= min_cells]
+  clade_n_kept <- table(sample_meta[pass_cells, "clade"])
+  keep_clades <- names(clade_n_kept)[clade_n_kept >= min_strains]
+  strains <- pass_cells[sample_meta[pass_cells, "clade"] %in% keep_clades]
+  mat <- scaled_A[, strains, drop = FALSE]
+  if (ncol(mat) < 2) return(list(ht = NULL, mat = mat))
+
+  col_hc <- hclust(dist(t(mat)), method = "ward.D2")
+  clade_vec <- sample_meta[colnames(mat), "clade"]
+  legend_clades <- unique(clade_vec[col_hc$order])
+  col_labels <- if (show_cells) {
+    paste0(colnames(mat), " (", cells_per_strain[colnames(mat)], ")")
+  } else colnames(mat)
+
+  cat("min_cells =", min_cells, "| min_strains =", min_strains, ":", length(keep_clades), "clades,",
+      ncol(mat), "strains x", nrow(mat), "genes\n")
+
+  col_ann <- HeatmapAnnotation(
+    clade = clade_vec,
+    col = list(clade = clade_colors[legend_clades]),
+    show_annotation_name = FALSE,
+    annotation_legend_param = list(
+      clade = list(
+        title = "Clade",
+        at     = legend_clades,   # legend order = order along the heatmap
+        labels = legend_clades,
+        title_gp  = gpar(fontsize = PUB_SIZE, fontface = "bold", fontfamily = PUB_FONT),
+        labels_gp = gpar(fontsize = PUB_SMALL, fontfamily = PUB_FONT),
+        grid_height = unit(5, "mm"), grid_width = unit(5, "mm"),
+        ncol = 1   # all clades in one vertical column
+      )
+    ),
+    which = "column"
+  )
+
+  ht <- Heatmap(
+    mat,
+    col  = col_fun_A,
+    name = "z-score",
+    cluster_rows    = TRUE,
+    cluster_columns = col_hc,
+    clustering_method_rows = "ward.D2",
+    top_annotation    = col_ann,
+    show_row_names    = FALSE,
+    show_column_names = TRUE,
+    column_labels     = col_labels,
+    # axis titles: strains along x (below the strain names), DEGs along y
+    column_title      = if (show_cells) "Demuxlet identified strains (number of cells)"
+                        else "Demuxlet identified strains",
+    column_title_side = "bottom",
+    column_title_gp   = gpar(fontsize = PUB_SIZE, fontface = "bold", fontfamily = PUB_FONT),
+    row_title         = "Differentially expressed genes",
+    row_title_gp      = gpar(fontsize = PUB_SIZE, fontface = "bold", fontfamily = PUB_FONT),
+    column_names_rot  = 90,
+    column_names_gp   = gpar(fontsize = 12, fontface = "bold", fontfamily = PUB_FONT),  # strain names; ~75 strains, so 12 pt is about the max that fits
+    heatmap_legend_param = list(
+      title      = "DEG expression",
+      title_gp   = gpar(fontsize = PUB_SIZE, fontface = "bold", fontfamily = PUB_FONT),
+      labels_gp  = gpar(fontsize = PUB_SMALL, fontfamily = PUB_FONT),
+      at         = c(-3, -1.5, 0, 1.5, 3),
+      labels     = c("-3 (low)", "-1.5", "0 (mean)", "1.5", "+3 (high)"),
+      legend_height = unit(5, "cm")
+    ),
+    border = FALSE
+  )
+  list(ht = ht, mat = mat)
+}
+
+# Versions of Panel A (as in the main figure):
+#   all_clades           every strain with a clade annotation
+#   min2_strains         clades with only 1 strain removed (the clades tested in DGE)
+#   min2_strains_ncells  as min2_strains, strain labels include the number of cells
+#   min3_strains         clades with 2 or fewer strains removed
+#   min4_strains         clades with 3 or fewer strains removed
+#   min30cells_min2_strains  strains with < 30 cells removed, then clades left with
+#                            only 1 strain removed; labels include the number of cells
+fig2A_versions <- list(
+  all_clades          = list(min_strains = 1),
+  min2_strains        = list(min_strains = 2),
+  min2_strains_ncells = list(min_strains = 2, show_cells = TRUE),
+  min3_strains        = list(min_strains = 3),
+  min4_strains        = list(min_strains = 4),
+  min30cells_min2_strains = list(min_strains = 2, show_cells = TRUE, min_cells = 30)
+)
+```
+
+
+```{r}
 # ── Master per-condition analysis: Panels A, B, C (GAL/NCR/Stress) ─────
-analyze_condition <- function(condition_label, path, sep) {
+analyze_condition <- function(condition_label, path, sep, demux_path) {
   cat("\n==== Condition:", condition_label, "====\n")
 
   # ---- Per-condition output directories ────────────────────────────────
@@ -594,6 +734,26 @@ analyze_condition <- function(condition_label, path, sep) {
   degs_in_matrix <- intersect(sig_degs, rownames(vst_mat))
   cat("Clades tested:", length(dge_results), "| unique DEGs:", length(degs_in_matrix), "\n")
 
+  # ---- Full DESeq2 clade-vs-rest table (all tested genes) + DEGs per clade ──
+  # Same columns as Supplementary_Tables/codes/01_export_DESeq2_tables.R
+  if (nrow(dge_combined) > 0) {
+    dge_combined %>%
+      transmute(condition = condition_label,
+                clade, n_focal_strains = n_focal,
+                n_rest_strains = ncol(raw_counts_mat) - n_focal,
+                gene, gene_name,
+                baseMean, log2FoldChange, lfcSE, stat, pvalue, padj, direction) %>%
+      arrange(clade, padj) %>%
+      write_csv(file.path(DIR_TABLES, paste0("DESeq2_clade_vs_rest_all_genes_", condition_label, ".csv")))
+
+    dge_combined %>%
+      filter(direction != "NS") %>%
+      dplyr::count(clade, n_focal, direction) %>%
+      pivot_wider(names_from = direction, values_from = n, values_fill = 0) %>%
+      arrange(desc(rowSums(across(any_of(c("Upregulated", "Downregulated")))))) %>%
+      write_csv(file.path(DIR_TABLES, paste0("DEGs_per_clade_", condition_label, ".csv")))
+  }
+
   # ---- GO ORA per clade (feeds GAL/NCR/Stress gene selection) ──────────
   universe_genes <- if (nrow(dge_combined) > 0) unique(dge_combined$gene) else rownames(raw_counts_mat)
   ora_results <- lapply(names(dge_results), function(cl) {
@@ -621,97 +781,51 @@ analyze_condition <- function(condition_label, path, sep) {
               file.path(DIR_TABLES, paste0("clade_summary_", condition_label, ".csv")))
   }
 
-  # ---- Panel A: strain-level DEG heatmap (ComplexHeatmap) ──────────────
-  fig2A <- NULL
+  # ---- Panel A: strain-level DEG heatmaps, same versions and style as main Fig. 2A ──
+  # make_fig2A() is defined above (copied from the main Fig. 2 Rmd); cells per strain are
+  # demuxlet singlet droplets, as in the main figure.
   if (length(degs_in_matrix) >= 2) {
     scaled_A <- t(scale(t(vst_mat[degs_in_matrix, , drop = FALSE])))
     scaled_A[scaled_A >  3] <-  3
     scaled_A[scaled_A < -3] <- -3
 
-    # Drop singleton clades — never had their own contrast
-    tested_clades <- dge_combined %>%
-      distinct(clade, n_focal) %>%
-      filter(n_focal > 1) %>%
-      pull(clade)
-
-    excluded_clades <- setdiff(unique(sample_meta$clade), tested_clades)
+    demux <- read.delim(demux_path)
+    cells_per_strain <- demux %>%
+      filter(DROPLET.TYPE == "SNG") %>%
+      dplyr::count(SNG.BEST.GUESS) %>%
+      deframe()
+    stopifnot(all(colnames(scaled_A) %in% names(cells_per_strain)))
 
     cat("\n--- Panel A:", condition_label, "---\n")
-    cat("Tested clades (n_focal > 1):", length(tested_clades), "\n")
-    cat("  included:", paste(sort(tested_clades), collapse = ", "), "\n")
-    cat("Excluded singleton clades:", length(excluded_clades), "\n")
-    cat("  excluded:", paste(sort(excluded_clades), collapse = ", "), "\n")
+    for (v in names(fig2A_versions)) {
+      res <- do.call(make_fig2A, c(list(scaled_A = scaled_A, sample_meta = sample_meta,
+                                        clade_colors = clade_colors,
+                                        cells_per_strain = cells_per_strain),
+                                   fig2A_versions[[v]]))
+      if (is.null(res$ht)) { cat("  ", v, ": fewer than 2 strains, skipped\n"); next }
 
-    strains_in_matrix <- intersect(
-      rownames(sample_meta)[sample_meta$clade %in% tested_clades],
-      colnames(scaled_A)
-    )
+      ht_drawn <- draw(res$ht, heatmap_legend_side = "right",
+                       annotation_legend_side = "right", merge_legend = TRUE)
+      hm_rows <- rownames(res$mat)[row_order(ht_drawn)]
+      hm_cols <- colnames(res$mat)[column_order(ht_drawn)]
 
-    cat("Strains before filtering:", ncol(scaled_A),
-        "| after:", length(strains_in_matrix),
-        "| removed:", ncol(scaled_A) - length(strains_in_matrix), "\n")
+      write.table(data.frame(gene = hm_rows,
+                             gene_name = ifelse(hm_rows %in% names(orf_to_name), orf_to_name[hm_rows], hm_rows),
+                             res$mat[hm_rows, hm_cols, drop = FALSE], check.names = FALSE),
+                  file.path(DIR_TABLES, paste0("heatmap_DEG_zscore_matrix_", v, "_", condition_label, ".txt")),
+                  sep = "\t", quote = FALSE, row.names = FALSE)
+      write.table(data.frame(column_order = seq_along(hm_cols), strain = hm_cols,
+                             clade = sample_meta[hm_cols, "clade"],
+                             n_cells = cells_per_strain[hm_cols]),
+                  file.path(DIR_TABLES, paste0("heatmap_strain_order_", v, "_", condition_label, ".txt")),
+                  sep = "\t", quote = FALSE, row.names = FALSE)
 
-    scaled_A_filtered <- scaled_A[, strains_in_matrix, drop = FALSE]
-    cat("Final matrix:", nrow(scaled_A_filtered), "genes x",
-        ncol(scaled_A_filtered), "strains\n")
-
-    col_ann_A <- HeatmapAnnotation(
-      clade = sample_meta[colnames(scaled_A_filtered), "clade"],
-      col   = list(clade = clade_colors),
-      show_annotation_name = FALSE,
-      annotation_legend_param = list(
-        clade = list(
-          title     = "Clade",
-          title_gp  = gpar(fontsize = 10, fontface = "bold"),
-          labels_gp = gpar(fontsize = 8),
-          ncol      = 1
-        )
-      ),
-      which = "column"
-    )
-
-    col_fun_A <- colorRamp2(
-      c(-3, -1.5, 0, 1.5, 3),
-      c("#2166AC", "#92C5DE", "white", "#F4A582", "#B2182B")
-    )
-
-    fig2A <- Heatmap(
-      scaled_A_filtered,
-      col  = col_fun_A,
-      name = "z-score",
-      cluster_rows              = TRUE,
-      cluster_columns           = TRUE,
-      clustering_method_rows    = "ward.D2",
-      clustering_method_columns = "ward.D2",
-      top_annotation    = col_ann_A,
-      show_row_names    = FALSE,
-      show_column_names = TRUE,
-      column_names_rot  = 90,
-      column_names_gp   = gpar(fontsize = 8),
-      heatmap_legend_param = list(
-        title         = "DEG expression",
-        title_gp      = gpar(fontsize = 10, fontface = "bold"),
-        labels_gp     = gpar(fontsize = 8),
-        at            = c(-3, -1.5, 0, 1.5, 3),
-        labels        = c("-3 (low)", "-1.5", "0 (mean)", "1.5", "+3 (high)"),
-        legend_height = unit(4, "cm")
-      ),
-      column_title = paste0("Strain-level DEG expression (", condition_label, ")\n",
-                            nrow(scaled_A_filtered), " genes × ",
-                            ncol(scaled_A_filtered), " strains"),
-      column_title_gp = gpar(fontsize = 12, fontface = "bold"),
-      border = FALSE
-    )
-
-    # Draw to file only. An inline draw() can throw "Viewport has zero
-    # dimension(s)" when the plot pane is too small for the clade legend;
-    # the TIFF device has fixed dimensions so it always succeeds.
-    tiff(file.path(DIR_HEATMAP, paste0("heatmap_", condition_label, ".tiff")),
-         width = 10, height = 7, units = "in", res = 600, compression = "lzw")
-    draw(fig2A, heatmap_legend_side = "right",
-         annotation_legend_side = "right", merge_legend = TRUE)
-    dev.off()
-
+      tiff(file.path(DIR_HEATMAP, paste0("heatmap_", v, "_", condition_label, ".tiff")),
+           width = 16, height = 9, units = "in", res = 600, compression = "lzw")
+      draw(res$ht, heatmap_legend_side = "right",
+           annotation_legend_side = "right", merge_legend = TRUE)
+      dev.off()
+    }
   } else {
     cat("Skipping Panel A for", condition_label, "- fewer than 2 DEGs\n")
   }
@@ -867,10 +981,7 @@ analyze_condition <- function(condition_label, path, sep) {
     g_grid <- plot_go_grid(ora_combined, condition_label, ncol = 4)
     if (!is.null(g_grid)) {
       print(g_grid)
-      safe_ggsave(file.path(DIR_GOTERM,
-                            paste0("GOterm_GRID_", condition_label, ".png")),
-                  g_grid, width = 12, height = grid_h * 1.2, units = "in",
-                  dpi = 600, device = "png", limitsize = FALSE)
+      save_go_grid(g_grid, file.path(DIR_GOTERM, paste0("GOterm_GRID_", condition_label)))
     }
 }
   # ---- return value MUST be the last expression in the function ────────
@@ -889,9 +1000,9 @@ analyze_condition <- function(condition_label, path, sep) {
 
 
 ```{r}
-# ── Run across all 5 conditions ────────────────────────────────────────
+# ── Run across all 6 conditions ────────────────────────────────────────
 condition_results <- imap(CONDITIONS, function(cfg, label) {
-  analyze_condition(label, cfg$path, cfg$sep)
+  analyze_condition(label, cfg$path, cfg$sep, cfg$demux)
 })
 
 # Consolidated logs

@@ -20,14 +20,234 @@ To produce `obs2`: copy §1.1–§3 into a separate script with `ROOT` pointed a
 YPD.2, then `obs2 <- fit_by_group(Y_cc2, tvec2, gvec2, depth = depthv2)`.
 `saveRDS(obs2, ...)` so you do not refit every session.
 
-```{r replicate}
-# ROOT2 <- ".../YPD.2"
-# obs2   <- fit_by_group(Y_cc2, tvec2, gvec2, depth = depthv2)
-# offset2 <- ...   # §10 logic on replicate 2
+```{r}
+library(tidyverse)
+select <- dplyr::select
+filter <- dplyr::filter
 
-obs2    <- readRDS("/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.2/continuous_time_trajectory/results/ypd2_obs.rds")
-offset2 <- readRDS("/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.2/continuous_time_trajectory/results/ypd2_offset.rds")
+# ── Publication theme ────────────────────────────────────────────────────────
+# Shared font settings: used by pub_theme (ggplot) and by the ComplexHeatmap gpar() calls
+PUB_FONT  <- "Arial"
+PUB_SIZE  <- 18                 # axis titles, axis labels, legend titles, strips (bold, as in Figs 3-4)
+PUB_SMALL <- 16                 # legend entries
+PUB_AXIS  <- 18                 # larger, bold axis text + titles for Panel C, volcano and GO plots
+PUB_LABEL <- 13 / ggplot2::.pt  # in-plot text (geom_text / ggrepel) in mm, = 13 pt
 
+pub_theme <- theme_classic(base_size = PUB_SIZE, base_family = PUB_FONT) +
+  theme(
+    text        = element_text(family = PUB_FONT, color = "black"),
+    axis.title  = element_text(size = PUB_SIZE, face = "bold", color = "black"),
+    axis.text   = element_text(size = PUB_SIZE, face = "bold", color = "black"),
+    axis.line   = element_line(linewidth = 0.4, color = "black"),
+    axis.ticks  = element_line(linewidth = 0.35, color = "black"),
+    plot.title  = element_text(size = PUB_SIZE, face = "bold", hjust = 0.5),
+    legend.title = element_text(size = PUB_SIZE, face = "bold"),
+    legend.text  = element_text(size = PUB_SMALL),
+    legend.key.size = unit(0.5, "cm"),
+    strip.text       = element_text(size = PUB_SIZE, face = "bold", color = "black"),
+    strip.background = element_rect(fill = "grey92", color = NA),
+    panel.grid       = element_blank(),
+    plot.background  = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.margin      = margin(10, 12, 8, 10)
+  )
+
+# Every ggsave() to .png also writes an LZW-compressed .tiff next to it (same size and dpi)
+ggsave <- function(filename, ...) {
+  ggplot2::ggsave(filename, ...)
+  if (grepl("\\.png$", filename, ignore.case = TRUE))
+    ggplot2::ggsave(sub("\\.png$", ".tiff", filename, ignore.case = TRUE), ...,
+                    compression = "lzw")
+  invisible(filename)
+}
+```
+
+
+```{r}
+library(tidyverse)
+
+WRAP <- 88
+
+circ_mean_rows <- function(M, period = WRAP) {
+  th <- 2 * pi * M / period
+  (atan2(rowMeans(sin(th), na.rm = TRUE),
+         rowMeans(cos(th), na.rm = TRUE)) %% (2 * pi)) / (2 * pi) * period
+}
+
+circ_sd_rows <- function(M, period = WRAP) {
+  th <- 2 * pi * M / period
+  R  <- sqrt(rowMeans(cos(th), na.rm = TRUE)^2 + rowMeans(sin(th), na.rm = TRUE)^2)
+  R  <- pmin(pmax(R, 1e-8), 1)
+  sqrt(-2 * log(R)) / (2 * pi) * period
+}
+```
+
+```{r}
+ROOT1 <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Agrawal_single_cell_eqtl_cell_cycle/Figure.5/2.cell_cycle_time_assignment_to_single_cells/results/"
+
+obs1 <- readRDS(file.path(ROOT1, "harmonic_obs.rds"))
+
+gene_summary_1  <- read.csv(file.path(ROOT1, "harmonic_gene_summary.csv"))
+sig_structure_1 <- as_tibble(read.csv(file.path(ROOT1, "sig_structure.csv")))  # tibble so print(n = Inf) works
+sig_amplitude_1 <- as_tibble(read.csv(file.path(ROOT1, "sig_amplitude.csv")))  # tibble so print(n = Inf) works
+sig_timing_1    <- as_tibble(read.csv(file.path(ROOT1, "sig_timing.csv")))  # tibble so print(n = Inf) works
+
+AMP_STAT_1 <- "amp1_db"
+AMP1     <- obs1[[AMP_STAT_1]]
+
+```
+
+```{r}
+ROOT2 <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.2/continuous_time_trajectory/results/"
+
+obs2 <- readRDS(file.path(ROOT2, "harmonic_obs.rds"))
+
+gene_summary_2  <- read.csv(file.path(ROOT2, "harmonic_gene_summary.csv"))
+sig_structure_2 <- as_tibble(read.csv(file.path(ROOT2, "sig_structure.csv")))  # tibble so print(n = Inf) works
+sig_amplitude_2 <- as_tibble(read.csv(file.path(ROOT2, "sig_amplitude.csv")))  # tibble so print(n = Inf) works
+sig_timing_2    <- as_tibble(read.csv(file.path(ROOT2, "sig_timing.csv")))  # tibble so print(n = Inf) works
+
+AMP2 <- obs2[["amp1_db"]]
+```
+
+```{r}
+library(Seurat)
+Na_va <- readRDS("../results/ypd1_Na_va_with_cc_time.rds")
+
+meta_slim <- Na_va@meta.data %>%
+  rownames_to_column("cell") %>%
+  select(cell,
+         strain     = SNG.BEST.GUESS,
+         pseudotime = cc_time,
+         CC,
+         nCount_RNA,
+         nFeature_RNA) # Seurat v5
+
+raw_counts_mat <- GetAssayData(Na_va, layer = "counts")  # Seurat v5
+# raw_counts_mat <- GetAssayData(Na_va, slot = "counts")  # Seurat v4 fallback
+
+# raw_counts_mat_ypd1 <- GetAssayData(seurat_ypd1, slot = "counts")  # use this line instead if you're on Seurat v4
+
+# # ── YPD.2 raw counts ─────────────────────────────────────────────────────────
+# expr_ypd2 <- Read10X(
+#   data.dir = file.path("/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/YPD.2/alignment/output_of_alignment_YPD2_with_clean_gtf",
+#                        "run_count/outs/filtered_feature_bc_matrix/")
+# )
+# seurat_ypd2 <- CreateSeuratObject(
+#   counts = expr_ypd2, project = "natural variants",
+#   min.cells = 3, min.features = 200
+# )
+# raw_counts_mat_ypd2 <- GetAssayData(seurat_ypd2, layer = "counts")
+# raw_counts_mat_ypd2 <- GetAssayData(seurat_ypd2, slot = "counts")  # Seurat v4 fallback
+```
+
+
+#Compute offset is a per sample "technical quality offset"/ "Computed but unused downstream"
+
+**Not run (`eval = FALSE`): not used in the paper.**
+
+It's a QC/normalization step producing a per-cell (or per-sample) correction factor derived only from genes whose model fit is trustworthy [mean_r2_g > 0.1 & pct_detected_g > 0.7], so downstream comparisons aren't skewed by noisy or undetected genes
+```{r, eval = FALSE}
+compute_offset <- function(obs) {
+  mean_r2_g      <- rowMeans(obs$r2_adj, na.rm = TRUE) #mean of r2 across columns for each gene - one r2 value per gene - how well signal fits across cells
+  pct_detected_g <- 1 - rowSums(obs$constant == 1, na.rm = TRUE) / ncol(obs$constant) #fraction of column where gene isn't constant meaning gene has zero variance/undetected
+  well_g <- names(mean_r2_g)[mean_r2_g > 0.1 & pct_detected_g > 0.7]
+
+  zrow <- function(M) t(scale(t(M)))
+  Z <- zrow(obs$r2_adj[well_g, , drop = FALSE])
+  list(well = well_g, offset = colMeans(Z, na.rm = TRUE))
+}
+
+res1    <- compute_offset(obs1)
+res2    <- compute_offset(obs2)
+offset  <- res1$offset
+offset2 <- res2$offset
+
+cat("YPD.1 well-measured genes used for offset:", length(res1$well), "\n")
+cat("YPD.2 well-measured genes used for offset:", length(res2$well), "\n")
+
+cat("\ncor(strain offset rep1, rep2):",
+    round(cor(offset[names(offset2)], offset2,
+              use = "complete.obs", method = "spearman"), 3), "\n")
+```
+
+
+#Compare the two datasets Jaccard overlap (a.k.a. Jaccard index/similarity) is a measure of how much two sets agree, defined as the size of their intersection divided by the size of their union:
+
+Jaccard = |A ∩ B| / |A ∪ B|
+
+It ranges from 0 to 1. 1 = perfect replicate; 0 no overlap
+```{r}
+compare_sig_lists <- function(sig1, sig2, label) {
+  g1 <- sig1$gene; g2 <- sig2$gene
+  both  <- intersect(g1, g2)
+  only1 <- setdiff(g1, g2)
+  only2 <- setdiff(g2, g1)
+
+  cat("\n==", label, "==\n")
+  cat("YPD.1 significant:", length(g1), "| YPD.2 significant:", length(g2), "\n")
+  cat("Significant in BOTH:", length(both), "\n")
+  cat("Only YPD.1:", length(only1), "| Only YPD.2:", length(only2), "\n")
+  cat("Jaccard overlap:", round(length(both) / length(union(g1, g2)), 3), "\n")
+
+  invisible(list(both = both, only1 = only1, only2 = only2))
+}
+
+# Structure (R2) is not reported in the paper: its lines are commented out below.
+# structure_ov <- compare_sig_lists(sig_structure_1, sig_structure_2, "Structure (sd_r2)")
+amplitude_ov <- compare_sig_lists(sig_amplitude_1, sig_amplitude_2, "Amplitude (cv_amp)")
+timing_ov    <- compare_sig_lists(sig_timing_1,    sig_timing_2,    "Timing (sd_peak)")
+
+# overlap counts as a table (paper: reproducibility paragraph)
+overlap_tbl <- imap_dfr(list(Amplitude = list(sig_amplitude_1, sig_amplitude_2),
+                             Timing    = list(sig_timing_1,    sig_timing_2)),
+  function(s, ph) {
+    g1 <- s[[1]]$gene; g2 <- s[[2]]$gene
+    tibble(phenotype = ph, significant_ypd1 = length(g1), significant_ypd2 = length(g2),
+           significant_both = length(intersect(g1, g2)),
+           only_ypd1 = length(setdiff(g1, g2)), only_ypd2 = length(setdiff(g2, g1)),
+           jaccard = round(length(intersect(g1, g2)) / length(union(g1, g2)), 3))
+  })
+dir.create(file.path(ROOT1, "paper_tables"), showWarnings = FALSE)
+write.csv(overlap_tbl, file.path(ROOT1, "paper_tables/SuppTable_replicate_overlap.csv"),
+          row.names = FALSE)
+overlap_tbl
+
+# structure_both <- sig_structure_1 %>%
+#   inner_join(sig_structure_2, by = "gene", suffix = c("_ypd1", "_ypd2")) %>%
+#   select(gene, name = name_ypd1, sd_r2_ypd1, sd_r2_ypd2,
+#          str_trim_excess_ypd1, str_trim_excess_ypd2) %>%
+#   mutate(min_excess = pmin(str_trim_excess_ypd1, str_trim_excess_ypd2)) %>%
+#   arrange(desc(min_excess))
+
+amplitude_both <- sig_amplitude_1 %>%
+  inner_join(sig_amplitude_2, by = "gene", suffix = c("_ypd1", "_ypd2")) %>%
+  select(gene, name = name_ypd1, cv_amp_ypd1, cv_amp_ypd2,
+         amp_trim_excess_final_ypd1, amp_trim_excess_final_ypd2) %>%
+  mutate(min_excess = pmin(amp_trim_excess_final_ypd1, amp_trim_excess_final_ypd2)) %>%
+  arrange(desc(min_excess))
+
+timing_both <- sig_timing_1 %>%
+  inner_join(sig_timing_2, by = "gene", suffix = c("_ypd1", "_ypd2")) %>%
+  select(gene, name = name_ypd1, mean_peak_ypd1, mean_peak_ypd2,
+         sd_peak_ypd1, sd_peak_ypd2, peak_trim_excess_ypd1, peak_trim_excess_ypd2) %>%
+  mutate(min_excess = pmin(peak_trim_excess_ypd1, peak_trim_excess_ypd2)) %>%
+  arrange(desc(min_excess))
+
+# print(structure_both, n = Inf)
+print(amplitude_both, n = Inf)
+print(timing_both, n = Inf)
+```
+#Permutation test tells us a gene's between strain-spread is bigger than expected from shuffling strain labels. But, permutation can't distinguidh genuine biological variation from technical confounds
+
+concordance() and circ_conc() ask "does the pattern across strains reproduce in a second, independently-captured dataset (YPD.2)?"
+
+concordabce - takes a gene's 74 strains per-strain values (R-square or amplitude) from replicate 1 and replicate 2, performs spearman correlation between them
+
+circ_conc - does the same thing with peak timing
+
+# The median r (this is spearman correlation r) correlation for variable genes should be higher than for genes with false variable genes (false as in non-significant ones from ypd.1). Keep in mind  conc_peak uses R i.e., circular concentration (R close to 1 is reproducible; median_abs_shift close to 0 is reproducible). Because peak_time isn't circular we are using this
+```{r}
 concordance <- function(M1, M2, min_strains = 20) {
   genes   <- intersect(rownames(M1), rownames(M2))
   strains <- intersect(colnames(M1), colnames(M2))
@@ -39,153 +259,497 @@ concordance <- function(M1, M2, min_strains = 20) {
   })
 }
 
-circ_conc <- function(M1, M2, min_strains = 20) {
-  genes   <- intersect(rownames(M1), rownames(M2))
-  strains <- intersect(colnames(M1), colnames(M2))
-  map_dfr(genes, function(g) {
-    d  <- ((M1[g, strains] - M2[g, strains] + WRAP/2) %% WRAP) - WRAP/2
-    ok <- !is.na(d)
-    tibble(gene = g, n = sum(ok),
-           median_abs_shift = median(abs(d[ok])),
-           R = sqrt(mean(cos(2*pi*d[ok]/WRAP))^2 + mean(sin(2*pi*d[ok]/WRAP))^2))
-  })
-}
+# circ_conc() is not used in the paper: it measures whether each strain's peak time is
+# the same in both replicates, which is high for any gene whose strains all peak together
+# (histones R ~ 0.92) whether or not strain differences reproduce. §12 replaces it.
+# circ_conc <- function(M1, M2, min_strains = 20) {
+#   genes   <- intersect(rownames(M1), rownames(M2))
+#   strains <- intersect(colnames(M1), colnames(M2))
+#   map_dfr(genes, function(g) {
+#     d  <- ((M1[g, strains] - M2[g, strains] + WRAP/2) %% WRAP) - WRAP/2
+#     ok <- !is.na(d)
+#     n  <- sum(ok)
+#     tibble(gene = g, n = n,
+#            median_abs_shift = if (n >= min_strains) median(abs(d[ok])) else NA_real_,
+#            R = if (n >= min_strains)
+#                  sqrt(mean(cos(2*pi*d[ok]/WRAP))^2 + mean(sin(2*pi*d[ok]/WRAP))^2)
+#                else NA_real_)
+#   })
+# }
 
-conc_r2   <- concordance(obs$r2_adj,        obs2$r2_adj)
-conc_amp  <- concordance(obs[[AMP_STAT]],   obs2[[AMP_STAT]])
-conc_peak <- circ_conc(obs$peak,            obs2$peak)
+#n is the number of strains shared between YPD.1 and YPd.2 and the strains where the gene produced a usable fit value
+# conc_r2   <- concordance(obs1$r2_adj, obs2$r2_adj)    # structure: not reported
+conc_amp  <- concordance(AMP1,        AMP2)
+# conc_peak <- circ_conc(obs1$peak,     obs2$peak)      # see note above
 
-# THE decisive comparison
-bind_rows(conc_r2 %>% mutate(stat = "r2_adj"),
-          conc_amp %>% mutate(stat = "amplitude")) %>%
-  mutate(is_variable = gene %in% gene_summary$gene) %>%
+#summary and we are asking whether YPD.1's significance call alone predicts elevated correlation with YPD.2
+conc_summary <- bind_rows(
+  # conc_r2   %>% transmute(gene, stat = "r2_adj",    value = r,
+  #                          is_variable = gene %in% sig_structure_1$gene),
+  conc_amp  %>% transmute(gene, stat = "amplitude", value = r,
+                           is_variable = gene %in% sig_amplitude_1$gene)
+  # conc_peak %>% transmute(gene, stat = "timing (R)", value = R,
+  #                          is_variable = gene %in% sig_timing_1$gene)
+) %>%
   group_by(stat, is_variable) %>%
-  summarise(n = n(), median_r = round(median(r, na.rm = TRUE), 3), .groups = "drop") %>%
-  print()
+  summarise(n = n(), median_value = round(median(value, na.rm = TRUE), 3), .groups = "drop")
 
-cat("\ncor(strain offset rep1, rep2):",
-    round(cor(offset[names(offset2)], offset2,
-              use = "complete.obs", method = "spearman"), 3), "\n")
+print(conc_summary)
 
-validation_targets <- gene_summary %>%
-  left_join(conc_amp  %>% select(gene, r_amp  = r), by = "gene") %>%
-  left_join(conc_r2   %>% select(gene, r_r2   = r), by = "gene") %>%
-  left_join(conc_peak %>% select(gene, R_peak = R, med_shift = median_abs_shift),
-            by = "gene") %>%
-  filter(mean_r2 > 0.3, mean_pct_expressed > 0.3)
 
-cat("\nRanked by amplitude reproducibility:\n")
-validation_targets %>% arrange(desc(r_amp)) %>%
-  select(name, gene, which_phenotype, r_amp, amp_spread, amp_excess) %>%
-  head(15) %>% print(n = 15)
+wilcox.test(r ~ is_variable, data = conc_amp %>% mutate(is_variable = gene %in% sig_amplitude_1$gene) %>% filter(!is.na(r)))
+# wilcox.test(r ~ is_variable, data = conc_r2  %>% mutate(is_variable = gene %in% sig_structure_1$gene) %>% filter(!is.na(r)))
+# wilcox.test(R ~ is_variable, data = conc_peak %>% mutate(is_variable = gene %in% sig_timing_1$gene) %>% filter(!is.na(R)))
+```
+```{r}
+# ── Build the long-format table for plotting ────────────────────────────────
+conc_long <- bind_rows(
+  # conc_r2   %>% transmute(gene, stat = "Structure (R2_adj)", value = r,
+  #                          is_variable = gene %in% sig_structure_1$gene),
+  conc_amp  %>% transmute(gene, stat = "Amplitude",          value = r,
+                           is_variable = gene %in% sig_amplitude_1$gene)
+  # conc_peak %>% transmute(gene, stat = "Timing (peak, R)",   value = R,
+  #                          is_variable = gene %in% sig_timing_1$gene)
+) %>%
+  filter(!is.na(value)) %>%
+  mutate(is_variable = factor(is_variable, levels = c(FALSE, TRUE),
+                               labels = c("Not significant", "Significant (YPD.1)")))
 
-cat("\nRanked by timing reproducibility:\n")
-validation_targets %>% arrange(desc(R_peak)) %>%
-  select(name, gene, which_phenotype, R_peak, med_shift, sd_peak, trim_excess) %>%
-  head(15) %>% print(n = 15)
+# ── Per-panel n and Wilcoxon p-value, baked into facet labels ───────────────
+panel_stats <- conc_long %>%
+  group_by(stat) %>%
+  summarise(
+    n_sig    = sum(is_variable == "Significant (YPD.1)"),
+    n_notsig = sum(is_variable == "Not significant"),
+    p        = wilcox.test(value ~ is_variable)$p.value,
+    .groups  = "drop"
+  ) %>%
+  mutate(label = sprintf("%s\nn = %d vs %d, p = %s",
+                          stat, n_sig, n_notsig,
+                          ifelse(p < 0.001, "< 0.001", signif(p, 2))))
 
-print(validation_targets %>%
-        select(name, gene, which_phenotype, r_amp, r_r2, R_peak,
-               amp_spread, sd_peak, peak_diff, trim_excess) %>% head(20))
+conc_long <- conc_long %>%
+  left_join(panel_stats %>% select(stat, label), by = "stat") %>%
+  mutate(label = factor(label, levels = panel_stats$label))
 
-top_var <- head(gene_summary$gene, 30)
-bind_rows(conc_r2 %>% mutate(stat = "r2_adj"),
-          conc_amp %>% mutate(stat = "amplitude")) %>%
-  mutate(grp = case_when(gene %in% top_var           ~ "top 30 variable",
-                         gene %in% gene_summary$gene ~ "other well-measured",
-                         TRUE                        ~ "rest")) %>%
-  group_by(stat, grp) %>%
-  summarise(n = n(), median_r = round(median(r, na.rm = TRUE), 3), .groups = "drop") %>%
-  print()
+# ── Plot ──────────────────────────────────────────────────────────────────
+p_concordance <- ggplot(conc_long, aes(is_variable, value, fill = is_variable)) +
+  geom_violin(alpha = 0.5, trim = FALSE, colour = NA) +
+  geom_boxplot(width = 0.15, outlier.size = 0.8, alpha = 0.85) +
+  geom_jitter(width = 0.06, size = 0.6, alpha = 0.3, colour = "grey20") +
+  scale_fill_manual(values = c("Not significant" = "grey70",
+                                "Significant (YPD.1)" = "firebrick"),
+                     guide = "none") +
+  facet_wrap(~label, scales = "free_y", ncol = 3) +
+  labs(x = NULL, y = "Cross-replicate Spearman r\n(per-strain amplitude)",
+       title = "Replicate concordance is higher for permutation-significant genes",
+       subtitle = "YPD.1 amplitude significance vs. reproducibility with YPD.2") +
+  pub_theme +
+  theme(axis.text.x = element_text(angle = 20, hjust = 1))
+
+print(p_concordance)
+
+dir.create("../results", showWarnings = FALSE)
+ggsave("../results/replicate_concordance_by_significance.png", p_concordance,
+       width = 10, height = 5, dpi = 300)
+```
+# Find Best Targets for each phenotype
+
+**Not run (`eval = FALSE`) from here to §12: strain selection for bench validation, the negative-binomial refit and trio plots. Not used in the paper.**
+
+Make sure they have highest min_excess i.e., it is not an outlier effect 
+
+flag low concordance = False 
+```{r, eval = FALSE}
+amplitude_target_significant_in_both <- amplitude_both %>%
+  left_join(conc_amp %>% select(gene, r_amp = r), by = "gene") %>%
+  mutate(flag_low_concordance = is.na(r_amp)) %>% 
+  arrange(flag_low_concordance, desc(min_excess))
+
+timing_target_significant_in_both <- timing_both %>%
+  left_join(conc_peak %>% select(gene, R_peak = R, med_shift = median_abs_shift), by = "gene") %>%
+  mutate(flag_low_concordance = is.na(R_peak) ) %>%
+  arrange(flag_low_concordance, desc(min_excess))
+
+structure_target_significant_in_both <- structure_both %>%
+  left_join(conc_r2 %>% select(gene, r_r2 = r), by = "gene") %>%
+  mutate(flag_low_concordance = is.na(r_r2)) %>%
+  arrange(flag_low_concordance, desc(min_excess))
+
+print(amplitude_target_significant_in_both %>% select(name, gene, min_excess, r_amp, flag_low_concordance), n = Inf)
+print(timing_target_significant_in_both %>% select(name, gene, min_excess, R_peak, flag_low_concordance), n = Inf)
+print(structure_target_significant_in_both %>% select(name, gene, min_excess, r_r2, flag_low_concordance), n = Inf)
+
+## Final table with all three combined but I am not using this list because I choose "has the variability per phenotype (i.e., amp, str, peak) over has many variable phenotype (n = 3) because the amount of variability between strains is also important" 
+final_targets <- bind_rows(
+  amplitude_target_significant_in_both %>%
+    filter(!flag_low_concordance) %>%
+    transmute(gene, name,
+              phenotype   = "amp",
+              min_excess  = min_excess,
+              concordance = r_amp),
+
+  timing_target_significant_in_both %>%
+    filter(!flag_low_concordance) %>%
+    transmute(gene, name,
+              phenotype   = "peak",
+              min_excess  = min_excess,
+              concordance = R_peak),
+
+  structure_target_significant_in_both %>%
+    filter(!flag_low_concordance) %>%
+    transmute(gene, name,
+              phenotype   = "str",
+              min_excess  = min_excess,
+              concordance = r_r2)
+)
+
+# ── Per-gene summary: which phenotypes did it qualify for, and how many ──── 
+phenotype_summary <- final_targets %>%
+  group_by(gene) %>%
+  summarise(
+    name             = first(name),
+    n_phenotypes     = n_distinct(phenotype),
+    which_phenotypes = paste(sort(phenotype), collapse = ", "),
+    best_min_excess  = max(min_excess, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# ── Wide table: one row per gene, each phenotype's stats as its own columns ─ Keeping this
+final_targets_wide <- final_targets %>%
+  select(-name) %>%
+  pivot_wider(
+    id_cols     = gene,
+    names_from  = phenotype,
+    values_from = c(min_excess, concordance),
+    names_glue  = "{phenotype}_{.value}"
+  ) %>%
+  left_join(phenotype_summary, by = "gene") %>%
+  relocate(gene, name, n_phenotypes, which_phenotypes, best_min_excess) %>%
+  arrange(desc(n_phenotypes), desc(best_min_excess))
+
+print(final_targets_wide, n = Inf)
+```
+
+# Pick strains. 
+
+## How did I choose min_cells = 60; 
+
+median strain has 202.5 cells and even the 1st quartile (107) sits well above 60 — so the threshold mostly just cuts off the tail: the ~15% of strains (roughly 11 out of your 74) sitting between the minimum (27) and 60 cells, which are genuinely the thinnest-covered strains where a per-gene estimate would be least trustworthy.
+```{r, eval = FALSE}
+summary(obs1$n_cells)
+mean(obs1$n_cells >= 60)   # fraction of strains that clear the bar
 ```
 
 
-```{r}
-peak_dev_conc <- function(M1, M2, min_strains = 20) {
-  genes   <- intersect(rownames(M1), rownames(M2))
-  strains <- intersect(colnames(M1), colnames(M2))
-  map_dfr(genes, function(g) {
-    p1 <- M1[g, strains]; p2 <- M2[g, strains]
-    ok <- !is.na(p1) & !is.na(p2)
-    if (sum(ok) < min_strains) return(tibble(gene = g, n = sum(ok), r_dev = NA_real_))
-    c1 <- circ_mean_rows(matrix(p1[ok], nrow = 1))
-    c2 <- circ_mean_rows(matrix(p2[ok], nrow = 1))
-    d1 <- ((p1[ok] - c1 + WRAP/2) %% WRAP) - WRAP/2   # signed shift, rep 1
-    d2 <- ((p2[ok] - c2 + WRAP/2) %% WRAP) - WRAP/2   # signed shift, rep 2
-    tibble(gene = g, n = sum(ok), r_dev = cor(d1, d2, method = "spearman"))
+
+First look at the distribution of perentage of gene expressed per strain. You want a gene to be highly expressed but what is the highly expressed ceiling for per strain needs to be know. 
+
+Looks like for MRH1 it is only 60% and Can keep most strains if I keep a percentage of 30% -- same for TIP1 vs HHT2 is highly expressed so I can keep higher percentage expressed like 80%
+
+
+
+```{r, eval = FALSE}
+# moved up from below: used from here on (to_orf_local, name_lookup)
+name_lookup <- gene_summary_1 %>% select(gene, name) %>% distinct()
+to_orf_local <- function(x) {
+  hit <- name_lookup$gene[match(x, name_lookup$name)]
+  ifelse(is.na(hit), x, hit)
+}
+```
+
+```{r, eval = FALSE}
+# ── Detection-rate helper — pct of a strain's cells where the gene is nonzero ─
+gene_detection_by_strain <- function(orf, raw_mat, meta) {
+  if (!orf %in% rownames(raw_mat))
+    return(tibble(strain = character(), pct_detected = numeric()))
+  tibble(cell = colnames(raw_mat), count = as.numeric(raw_mat[orf, ])) %>%
+    left_join(meta %>% select(cell, strain), by = "cell") %>%
+    filter(!is.na(strain)) %>%
+    group_by(strain) %>%
+    summarise(pct_detected = mean(count > 0), .groups = "drop")
+}
+
+orf <- to_orf_local("YDR033W")
+
+det <- gene_detection_by_strain(orf, raw_counts_mat, meta_slim) %>%
+  left_join(tibble(strain = names(obs1$n_cells), n_cells = obs1$n_cells), by = "strain") %>%
+  filter(n_cells >= 60)
+
+cat("Detection-rate distribution among strains with n_cells >= 60:\n")
+print(summary(det$pct_detected))
+
+for (th in c(0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)) {
+  cat(sprintf("pct_detected > %.1f : %d / %d strains survive (%.0f%%)\n",
+              th, sum(det$pct_detected > th), nrow(det),
+              100 * mean(det$pct_detected > th)))
+}
+```
+
+
+## I will choose for pick trio from each individual phenotypes for each genes
+```{r, eval = FALSE}
+best_amp_candidates  <- amplitude_target_significant_in_both %>%
+  filter(!flag_low_concordance) %>% arrange(desc(min_excess))
+
+best_time_candidates <- timing_target_significant_in_both %>%
+  filter(!flag_low_concordance) %>% arrange(desc(min_excess))
+
+best_str_candidates  <- structure_target_significant_in_both %>%
+  filter(!flag_low_concordance) %>% arrange(desc(min_excess))
+
+target_genes <- unique(c(best_amp_candidates$gene, best_time_candidates$gene, best_str_candidates$gene))
+
+cor_with_n <- function(M, ncells) {
+  apply(M[target_genes, , drop = FALSE], 1, function(v) {
+    ok <- !is.na(v)
+    if (sum(ok) < 10) return(NA_real_)
+    cor(v[ok], ncells[ok], method = "spearman")
   })
 }
-conc_dev <- peak_dev_conc(obs$peak, obs2$peak)
 
-shortlist <- gene_summary %>%
-  left_join(conc_amp  %>% select(gene, r_amp = r), by = "gene") %>%
-  left_join(conc_dev  %>% select(gene, r_dev), by = "gene") %>%
-  left_join(conc_peak %>% select(gene, med_shift = median_abs_shift), by = "gene") %>%
-  mutate(snr = sd_trim / med_shift) %>%
-  filter(r_amp > 0.4 | (r_dev > 0.3 & snr > 1)) %>%
-  arrange(desc(pmax(r_amp, r_dev, na.rm = TRUE)))
-print(shortlist %>% select(name, gene, which_phenotype, r_amp, r_dev, snr,
-                           amp_spread, amp_excess) %>% print(n = 30))
+cat("Median |cor(value, n_cells)| across target genes:\n")
+cat("  r2_adj :", round(median(abs(cor_with_n(obs1$r2_adj, obs1$n_cells)), na.rm = TRUE), 3), "\n")
+cat("  amp1_db:", round(median(abs(cor_with_n(AMP1,        obs1$n_cells)), na.rm = TRUE), 3), "\n")
+cat("  peak   :", round(median(abs(cor_with_n(obs1$peak,   obs1$n_cells)), na.rm = TRUE), 3), "\n")
 ```
 
-## 11.1 Choosing strains for the bench
+```{r, eval = FALSE}
+.print_bench <- function(d, bench) {
+  bench_found <- intersect(bench, d$strain)
+  if (length(bench_found) == 0) {
+    cat("Benchmark strains: none of", paste(bench, collapse = ", "), "in eligible set\n")
+  } else {
+    cat("\nBenchmark strains:\n")
+    print(d %>% filter(strain %in% bench_found) %>%
+            select(strain, value, n_cells, pct_detected))
+  }
+}
+```
 
-Pick on effect size in the units you will measure. Poor-coverage strains are
-excluded because their `peak` is partly extrapolated.
 
-```{r pick_trio}
-pick_trio <- function(gene_name, phenotype = c("amp", "peak", "r2"),
-                      min_cells = 60, bench = c("AKM", "BCK", "BDP"),
-                      drop_poor_coverage = TRUE) {
-  phenotype <- match.arg(phenotype)
-  orf <- to_orf(gene_name)
-  M   <- switch(phenotype, amp = AMP, peak = obs$peak, r2 = obs$r2_adj)
+## need this for pick trio function, this is a common function used in all three pick trio function
 
-  d <- tibble(strain = colnames(M), value = M[orf, ], n_cells = n_by_strain) %>%
-    filter(!is.na(value), n_cells >= min_cells)
-  if (drop_poor_coverage && phenotype == "peak")
-    d <- d %>% filter(!strain %in% POOR_COVERAGE)
+```{r, eval = FALSE}
+# ── Shared internals (not meant to be called directly) ─────────────────────
+.build_strain_table <- function(gene_name, phenotype, replicate,
+                                 min_cells = 60, min_pct_detected = 0.3) {
+  orf  <- to_orf_local(gene_name)
+  name <- name_lookup$name[match(orf, name_lookup$gene)]
+  if (is.na(name)) name <- orf   # fall back to the ORF if no common name is on record
 
-  cat("\n===", gene_name, "(", orf, ") -", phenotype, "===\n")
-  cat("Eligible strains:", nrow(d), "\n"); print(summary(d$value))
+  obs_r  <- if (replicate == "ypd1") obs1 else obs2
+  amp_r  <- if (replicate == "ypd1") AMP1 else AMP2
+  raw_r  <- if (replicate == "ypd1") raw_counts_mat else raw_counts_mat_ypd2
+  meta_r <- if (replicate == "ypd1") meta_slim      else meta_slim_ypd2
+  M      <- switch(phenotype, amp = amp_r, peak = obs_r$peak, r2 = obs_r$r2_adj)
+
+  det <- gene_detection_by_strain(orf, raw_r, meta_r)
+
+  d <- tibble(strain = colnames(M), value = M[orf, ],
+              n_cells = obs_r$n_cells[colnames(M)]) %>%
+    left_join(det, by = "strain") %>%
+    filter(!is.na(value), n_cells >= min_cells,
+           !is.na(pct_detected), pct_detected >= min_pct_detected) %>%
+    arrange(desc(n_cells))
+
+  cat("\n===", name, "(", orf, ") -", phenotype, "-", replicate, "===\n")
+  cat("Eligible strains (n_cells >=", min_cells,
+      "& pct_detected >=", min_pct_detected, "):", nrow(d), "\n")
+  print(summary(d$value))
+  cat("Detection rate among eligible strains:\n"); print(summary(d$pct_detected))
   cat("cor(value, n_cells) within eligible set:",
       round(cor(d$value, d$n_cells, method = "spearman"), 3),
-      "  <- if large, the trio is picking on cell count\n")
+      "  <- if large, the trio may be picking on cell count\n")
+
+  d
+}
+```
+
+```{r, eval = FALSE}
+pick_trio_peak <- function(gene_name, replicate = c("ypd1", "ypd2"),
+                            min_cells = 60, min_pct_detected = 0.3,
+                            bench = c("AKM", "BCK", "BDP")) {
+  replicate <- match.arg(replicate)
+  d <- .build_strain_table(gene_name, "peak", replicate, min_cells, min_pct_detected)
+
+  ctr <- circ_mean_rows(matrix(d$value, nrow = 1))
+  d   <- d %>% mutate(dev = ((value - ctr + WRAP/2) %% WRAP) - WRAP/2)
 
   trio <- bind_rows(
-    d %>% slice_max(value, n = 1) %>% mutate(tier = "high"),
-    d %>% slice_min(abs(value - median(d$value)), n = 1) %>% mutate(tier = "mid"),
-    d %>% slice_min(value, n = 1) %>% mutate(tier = "low"))
-  print(trio %>% select(tier, strain, value, n_cells))
+    d %>% slice_max(dev, n = 1, with_ties = FALSE) %>% mutate(tier = "late"),
+    d %>% slice_min(abs(dev), n = 1, with_ties = FALSE) %>% mutate(tier = "mid"),
+    d %>% slice_min(dev, n = 1, with_ties = FALSE) %>% mutate(tier = "early"))
 
-  cat("High-low gap:", round(diff(range(trio$value)), 3),
-      if (phenotype == "peak") "min" else "", "\n")
-  cat("\nBench strains in hand:\n"); print(d %>% filter(strain %in% bench))
+  attr(trio, "consensus_peak") <- ctr   # <- lets plot_trio_dynamics draw the reference line/arrows
+
+  cat("Consensus peak for this gene:", round(ctr, 1), "min\n")
+  print(trio %>% select(tier, strain, value, dev, n_cells, pct_detected))
+  cat("Early-late spread:", round(diff(range(trio$dev)), 1), "min (circular, real)\n")
+
+  .print_bench(d, bench)
   invisible(trio)
 }
-
-pick_trio("SED1", phenotype = "peak")
 ```
 
 
----
+```{r, eval = FALSE}
+# ── Amplitude (linear — no wraparound correction needed) ───────────────────
+pick_trio_amp <- function(gene_name, replicate = c("ypd1", "ypd2"),
+                           min_cells = 60, min_pct_detected = 0.3,
+                           bench = c("AKM", "BCK", "BDP")) {
+  replicate <- match.arg(replicate)
+  d <- .build_strain_table(gene_name, "amp", replicate, min_cells, min_pct_detected)
 
-# 12. Optional — refit candidates on raw counts
+  trio <- bind_rows(
+    d %>% slice_max(value, n = 1, with_ties = FALSE) %>% mutate(tier = "high"),
+    d %>% slice_min(abs(value - median(d$value)), n = 1, with_ties = FALSE) %>% mutate(tier = "mid"),
+    d %>% slice_min(value, n = 1, with_ties = FALSE) %>% mutate(tier = "low"))
 
-For the final shortlist, refit on raw counts with a depth offset under a negative
-binomial model. Gives amplitude in log-fold-change units. Slow; shortlist only.
+  print(trio %>% select(tier, strain, value, n_cells, pct_detected))
+  cat("High-low gap:", round(diff(range(trio$value)), 3), "\n")
 
-```{r nb_refit, eval=FALSE}
+  .print_bench(d, bench)
+  invisible(trio)
+}
+```
+
+```{r, eval = FALSE}
+# ── Structure / R2 (linear — same shape as amplitude) ───────────────────────
+pick_trio_r2 <- function(gene_name, replicate = c("ypd1", "ypd2"),
+                          min_cells = 60, min_pct_detected = 0.3,
+                          bench = c("AKM", "BCK", "BDP")) {
+  replicate <- match.arg(replicate)
+  d <- .build_strain_table(gene_name, "r2", replicate, min_cells, min_pct_detected)
+
+  trio <- bind_rows(
+    d %>% slice_max(value, n = 1, with_ties = FALSE) %>% mutate(tier = "high"),
+    d %>% slice_min(abs(value - median(d$value)), n = 1, with_ties = FALSE) %>% mutate(tier = "mid"),
+    d %>% slice_min(value, n = 1, with_ties = FALSE) %>% mutate(tier = "low"))
+
+  print(trio %>% select(tier, strain, value, n_cells, pct_detected))
+  cat("High-low gap:", round(diff(range(trio$value)), 3), "\n")
+
+  .print_bench(d, bench)
+  invisible(trio)
+}
+```
+
+
+```{r, eval = FALSE}
+pick_trio_peak("YBR067C")
+pick_trio_amp("YBR067C")
+pick_trio_r2("YBR067C")
+```
+##Because MRH1 has all three strains variable
+
+```{r, eval = FALSE}
+check_trio_overlap <- function(gene_name, replicate = "ypd1",
+                                min_cells = 60, min_pct_detected = 0.3) {
+  quiet <- function(expr) { capture.output(out <- expr); out }
+
+  peak_trio <- quiet(pick_trio_peak(gene_name, replicate, min_cells, min_pct_detected))
+  amp_trio  <- quiet(pick_trio_amp (gene_name, replicate, min_cells, min_pct_detected))
+  r2_trio   <- quiet(pick_trio_r2  (gene_name, replicate, min_cells, min_pct_detected))
+
+  all_picks <- bind_rows(
+    peak_trio %>% mutate(phenotype = "peak"),
+    amp_trio  %>% mutate(phenotype = "amp"),
+    r2_trio   %>% mutate(phenotype = "r2")
+  )
+
+  overlap <- all_picks %>%
+    group_by(strain) %>%
+    summarise(n_phenotypes = n_distinct(phenotype),
+              phenotypes = paste(sort(unique(phenotype)), collapse = ","),
+              tiers = paste(tier, collapse = ","), .groups = "drop") %>%
+    arrange(desc(n_phenotypes))
+
+  cat("\n──────────────────────────────────────────────\n")
+  cat("Gene:", gene_name, "| replicate:", replicate, "\n")
+  cat("──────────────────────────────────────────────\n")
+
+  cat("\n[1] Per-phenotype trio picks (raw input — 3 strains x 3 phenotypes)\n")
+  print(all_picks %>% select(phenotype, tier, strain, n_cells, pct_detected))
+
+  cat("\n[2] >>> RESULT: cross-phenotype strain overlap <<<\n")
+  print(overlap)
+
+  invisible(list(all_picks = all_picks, overlap = overlap))
+}
+
+check_trio_overlap("YBR067C")
+
+
+```
+
+```{r, eval = FALSE}
+composite_trio <- function(gene_name, replicate = "ypd1",
+                            min_cells = 60, min_pct_detected = 0.3) {
+  orf   <- to_orf_local(gene_name)
+  obs_r <- if (replicate == "ypd1") obs1 else obs2
+  amp_r <- if (replicate == "ypd1") AMP1 else AMP2
+  raw_r  <- if (replicate == "ypd1") raw_counts_mat else raw_counts_mat_ypd2
+  meta_r <- if (replicate == "ypd1") meta_slim      else meta_slim_ypd2
+
+  det <- gene_detection_by_strain(orf, raw_r, meta_r)
+
+  d <- tibble(
+    strain  = colnames(obs_r$r2_adj),
+    n_cells = obs_r$n_cells[colnames(obs_r$r2_adj)],
+    r2      = obs_r$r2_adj[orf, ],
+    amp     = amp_r[orf, ],
+    peak    = obs_r$peak[orf, ]
+  ) %>%
+    left_join(det, by = "strain") %>%
+    filter(!is.na(r2), !is.na(amp), !is.na(peak),
+           n_cells >= min_cells,
+           !is.na(pct_detected), pct_detected >= min_pct_detected)
+
+  ctr <- circ_mean_rows(matrix(d$peak, nrow = 1))
+  d <- d %>% mutate(
+    peak_dev = ((peak - ctr + WRAP/2) %% WRAP) - WRAP/2,
+    rank_r2   = percent_rank(r2),
+    rank_amp  = percent_rank(amp),
+    rank_peak = percent_rank(abs(peak_dev)),
+    composite = (rank_r2 + rank_amp + rank_peak) / 3
+  ) %>% arrange(desc(composite))
+
+  bind_rows(
+    d %>% slice_max(composite, n = 1, with_ties = FALSE) %>% mutate(tier = "high_overall"),
+    d %>% slice_min(abs(composite - median(composite)), n = 1, with_ties = FALSE) %>% mutate(tier = "mid_overall"),
+    d %>% slice_min(composite, n = 1, with_ties = FALSE) %>% mutate(tier = "low_overall")
+  ) %>% select(tier, strain, n_cells, pct_detected, r2, amp, peak, composite)
+}
+
+composite_trio("YBR067C")
+```
+
+
+```{r, eval = FALSE}
 library(MASS)
 
-raw     <- GetAssayData(Na_va, layer = "counts")[, cells]
-libsize <- meta$nCount
+HARMONICS <- 2
+GRID      <- seq(0, WRAP, length.out = 89)
 
-nb_harmonic <- function(gene, strain, K = HARMONICS) {
-  idx <- which(gvec == strain)
-  y <- as.numeric(raw[gene, idx]); if (sum(y > 0) < 10) return(NULL)
-  X  <- harmonic_design(tvec[idx], K)[, -1, drop = FALSE]
-  df <- as.data.frame(X); df$y <- y; df$off <- log(libsize[idx])
+harmonic_design <- function(t, K = HARMONICS, period = WRAP, depth = NULL) {
+  X <- matrix(1, nrow = length(t), ncol = 1, dimnames = list(NULL, "intercept"))
+  for (k in seq_len(K)) {
+    X <- cbind(X, cos(2 * pi * k * t / period), sin(2 * pi * k * t / period))
+    colnames(X)[(ncol(X) - 1):ncol(X)] <- paste0(c("cos", "sin"), k)
+  }
+  if (!is.null(depth)) X <- cbind(X, depth = depth)
+  X
+}
+
+nb_input1 <- readRDS(file.path(ROOT1, "ypd1_nb_input.rds"))
+nb_input2 <- readRDS(file.path(ROOT2, "ypd2_nb_input.rds"))
+
+nb_harmonic <- function(gene, strain, nb_input, K = HARMONICS) {
+  idx <- which(nb_input$gvec == strain)
+  y <- as.numeric(nb_input$raw[gene, idx]); if (sum(y > 0) < 10) return(NULL)
+  X  <- harmonic_design(nb_input$tvec[idx], K)[, -1, drop = FALSE]
+  df <- as.data.frame(X); df$y <- y; df$off <- log(nb_input$libsize[idx])
   m <- tryCatch(MASS::glm.nb(y ~ . - off + offset(off), data = df),
                 error = function(e) NULL)
   if (is.null(m)) return(NULL)
@@ -195,12 +759,813 @@ nb_harmonic <- function(gene, strain, K = HARMONICS) {
          log_amp = diff(range(pred)), peak = GRID[which.max(pred)], theta = m$theta)
 }
 
-shortlist <- head(genotype_summary$gene, 5)
-nb_res <- map_dfr(shortlist, function(g)
-  map_dfr(names(n_by_strain)[n_by_strain >= 60], ~ nb_harmonic(g, .x)))
+shortlist_nb <- head(gene_summary_1$gene, 5)
 
-nb_res %>% group_by(gene) %>%
+nb_res1 <- map_dfr(shortlist_nb, function(g)
+  map_dfr(names(obs1$n_cells)[obs1$n_cells >= 60], ~ nb_harmonic(g, .x, nb_input1)))
+
+nb_res2 <- map_dfr(shortlist_nb, function(g)
+  map_dfr(names(obs2$n_cells)[obs2$n_cells >= 60], ~ nb_harmonic(g, .x, nb_input2)))
+
+cat("\nYPD.1 negative-binomial refit:\n")
+nb_res1 %>% group_by(gene) %>%
+  summarise(n = n(), mean_log_amp = mean(log_amp), sd_log_amp = sd(log_amp),
+            sd_peak = circ_sd_rows(matrix(peak, nrow = 1)), .groups = "drop") %>%
+  print()
+
+cat("\nYPD.2 negative-binomial refit:\n")
+nb_res2 %>% group_by(gene) %>%
   summarise(n = n(), mean_log_amp = mean(log_amp), sd_log_amp = sd(log_amp),
             sd_peak = circ_sd_rows(matrix(peak, nrow = 1)), .groups = "drop") %>%
   print()
 ```
+
+
+
+
+# plotiing function
+part 1. Phase boundary is important for figure
+```{r, eval = FALSE}
+# defines compute_phase_boundaries(); depends on WRAP/PHASE_LEVELS/PHASE_FILL
+WRAP         <- 88
+PHASE_LEVELS <- c('M-G1', 'G1', 'S', 'G2', 'M')
+PHASE_FILL   <- c('M-G1'='#a8d5a2','G1'='#ffd6a5','S'='#ffadad',
+                  'G2'='#bde0fe','M'='#ffc8dd')
+
+compute_phase_boundaries <- function(meta, wrap = WRAP,
+                                     phase_col = "CC", time_col = "pseudotime",
+                                     levels = PHASE_LEVELS, fills = PHASE_FILL) {
+  df <- meta %>% dplyr::filter(!is.na(.data[[phase_col]]), !is.na(.data[[time_col]]))
+  cmean <- df %>%
+    group_by(phase = .data[[phase_col]]) %>%
+    summarise(ang = atan2(mean(sin(2*pi*.data[[time_col]]/wrap)),
+                          mean(cos(2*pi*.data[[time_col]]/wrap))), .groups = "drop") %>%
+    mutate(mu = (ang %% (2*pi)) * wrap / (2*pi)) %>%
+    filter(phase %in% levels) %>% arrange(mu)
+  P <- nrow(cmean); mu <- cmean$mu; ph <- cmean$phase
+  fwd_mid <- function(a, b) { d <- (b - a) %% wrap; (a + d/2) %% wrap }
+  bnd   <- vapply(seq_len(P), function(i) fwd_mid(mu[i], mu[(i %% P) + 1]), numeric(1))
+  lower <- bnd[c(P, seq_len(P-1))]; upper <- bnd
+  rows <- list()
+  for (i in seq_len(P)) {
+    lo <- lower[i]; up <- upper[i]
+    if (lo <= up) rows[[length(rows)+1]] <- data.frame(xmin=lo, xmax=up, phase=ph[i])
+    else { rows[[length(rows)+1]] <- data.frame(xmin=lo, xmax=wrap, phase=ph[i])
+           rows[[length(rows)+1]] <- data.frame(xmin=0,  xmax=up,   phase=ph[i]) }
+  }
+  pb <- bind_rows(rows); pb$fill <- fills[pb$phase]
+  pb$phase <- factor(pb$phase, levels = levels)
+  pl <- data.frame(x = mu, label = ph) %>%
+    mutate(label = factor(label, levels = levels)) %>% arrange(label)
+  list(boundaries = pb, labels = pl, means = setNames(round(mu, 2), ph))
+}
+
+pb_res           <- compute_phase_boundaries(meta_slim)
+phase_boundaries <- pb_res$boundaries
+phase_labels     <- pb_res$labels
+print(pb_res$means)
+```
+
+# Part 2 theme for the figure
+```{r, eval = FALSE}
+# ── Shared auditorium theme — apply to all plots ───────────────────────────
+theme_auditorium <- function() {
+  # now the publication theme; only the subtitle style and legend position are kept
+  pub_theme +
+  theme(
+    plot.subtitle   = element_text(hjust = 0.5, color = "grey40", lineheight = 1.3),
+    legend.position = "bottom"
+  )
+}
+```
+
+# Part 3 - actual ggplot code
+```{r, eval = FALSE}
+tier_palette <- c(high = "firebrick", late = "firebrick", high_overall = "firebrick",
+                   mid  = "darkorange", mid_overall = "darkorange",
+                   low  = "steelblue",  early = "steelblue", low_overall = "steelblue")
+
+```
+
+# this is gene overall without any trio highlight
+```{r, eval = FALSE}
+plot_gene_overview <- function(gene_name, raw_mat = raw_counts_mat, meta = meta_slim,
+                                scale = c("log10", "raw"), save = FALSE, show = TRUE) {
+  scale <- match.arg(scale)
+  orf <- to_orf_local(gene_name)
+  gene_row <- if (orf %in% rownames(raw_mat)) orf else gene_name
+  if (!gene_row %in% rownames(raw_mat)) {
+    cat("Gene", gene_name, "(", orf, ") not found in raw count matrix\n")
+    return(invisible(NULL))
+  }
+
+  gene_df <- data.frame(
+    cell      = colnames(raw_mat),
+    raw_count = as.numeric(raw_mat[gene_row, ])
+  ) %>%
+    left_join(meta, by = "cell") %>%
+    filter(!is.na(pseudotime), !is.na(strain))
+
+  y_of <- function(x) if (scale == "log10") mean(log10(x + 1), na.rm = TRUE) else mean(x, na.rm = TRUE)
+  y_lab <- if (scale == "log10") "Mean log10(raw count + 1)" else "Mean raw count"
+
+  global_sum <- gene_df %>% mutate(time_bin = round(pseudotime, 0)) %>%
+    group_by(time_bin) %>% summarise(y = y_of(raw_count), .groups = "drop")
+  strain_sum <- gene_df %>% mutate(time_bin = round(pseudotime, 0)) %>%
+    group_by(time_bin, strain) %>% summarise(y = y_of(raw_count), .groups = "drop")
+
+  p <- ggplot() +
+    geom_rect(data = phase_boundaries,
+              aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf, fill = phase),
+              alpha = 0.15, inherit.aes = FALSE) +
+    scale_fill_manual(values = setNames(phase_boundaries$fill, phase_boundaries$phase)) +
+    geom_text(data = phase_labels, aes(x = x, y = Inf, label = label),
+              vjust = 2, size = PUB_LABEL, fontface = "bold", inherit.aes = FALSE) +
+    geom_smooth(data = strain_sum, aes(x = time_bin, y = y, group = strain),
+                method = "loess", span = 0.5, se = FALSE,
+                color = "grey70", linewidth = 0.2, alpha = 0.15) +
+    geom_smooth(data = global_sum, aes(x = time_bin, y = y, group = 1),
+                method = "loess", span = 0.3, se = FALSE,
+                color = "black", linewidth = 1.4) +
+    scale_x_continuous(limits = c(0, 88), breaks = seq(0, 88, 12)) +
+    guides(fill = "none") +
+    labs(x = "Time in cell cycle (min)", y = y_lab,
+         title = paste0(gene_name, " — overall dynamics (", scale, ")"),
+         subtitle = "Black = global average across all strains | grey = individual strains") +
+    theme_auditorium()
+
+  if (save) ggsave(paste0("../results/", gene_name, "_overview_", scale, ".png"),
+                    p, width = 10, height = 6, dpi = 150, bg = "white")
+  if (show) print(p)
+  invisible(p)
+}
+```
+
+
+# this is trio dynamics
+
+```{r, eval = FALSE}
+plot_trio_dynamics <- function(
+    gene_name,
+    trio,
+    raw_mat  = raw_counts_mat,
+    meta     = meta_slim,
+    scale    = c("log10", "raw"),
+    save     = FALSE,
+    show     = TRUE,
+    label    = NULL
+) {
+  scale <- match.arg(scale)
+
+  orf <- to_orf_local(gene_name)
+  gene_row <- if (orf %in% rownames(raw_mat)) orf else gene_name
+  if (!gene_row %in% rownames(raw_mat)) {
+    cat("Gene", gene_name, "(", orf, ") not found in raw count matrix\n")
+    return(invisible(NULL))
+  }
+
+  gene_df <- data.frame(
+    cell      = colnames(raw_mat),
+    raw_count = as.numeric(raw_mat[gene_row, ])
+  ) %>%
+    left_join(meta, by = "cell") %>%
+    filter(!is.na(pseudotime), !is.na(strain))
+
+  y_of <- function(x) if (scale == "log10") mean(log10(x + 1), na.rm = TRUE) else mean(x, na.rm = TRUE)
+  y_lab <- if (scale == "log10") "Mean log10(raw count + 1)" else "Mean raw count"
+
+  global_sum <- gene_df %>%
+    mutate(time_bin = round(pseudotime, 0)) %>%
+    group_by(time_bin) %>% summarise(y = y_of(raw_count), .groups = "drop")
+
+  trio_sum <- gene_df %>%
+    filter(strain %in% trio$strain) %>%
+    mutate(time_bin = round(pseudotime, 0)) %>%
+    left_join(trio %>% select(strain, tier), by = "strain") %>%
+    group_by(time_bin, strain, tier) %>% summarise(y = y_of(raw_count), .groups = "drop")
+
+  label_pos <- trio_sum %>%
+    group_by(strain, tier) %>%
+    slice_max(time_bin, n = 1, with_ties = FALSE) %>%
+    ungroup() %>%
+    mutate(label = paste0(strain, " (", tier, ")"))
+
+  p <- ggplot() +
+    geom_rect(data = phase_boundaries,
+              aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf, fill = phase),
+              alpha = 0.15, inherit.aes = FALSE) +
+    scale_fill_manual(values = setNames(phase_boundaries$fill, phase_boundaries$phase)) +
+    geom_text(data = phase_labels, aes(x = x, y = Inf, label = label),
+              vjust = 2, size = PUB_LABEL, fontface = "bold", inherit.aes = FALSE) +
+
+    geom_smooth(data = trio_sum,
+                aes(x = time_bin, y = y, group = strain, color = tier),
+                method = "loess", span = 0.5, se = FALSE, linewidth = 2.5) +
+
+    geom_smooth(data = global_sum,
+                aes(x = time_bin, y = y, group = 1),
+                method = "loess", span = 0.3, se = FALSE,
+                color = "black", linewidth = 1.2, linetype = "dashed") +
+
+    ggrepel::geom_label_repel(
+      data = label_pos,
+      aes(x = time_bin, y = y, label = label, color = tier),
+      size = PUB_LABEL, fontface = "bold", nudge_x = 3, direction = "y", hjust = 0,
+      segment.color = "grey50", segment.size = 0.4, segment.linetype = "dotted",
+      fill = "white", label.size = 0.4, show.legend = FALSE, min.segment.length = 0
+    ) +
+
+    scale_color_manual(name = "Trio tier", values = tier_palette) +
+    scale_x_continuous(limits = c(0, 108), breaks = seq(0, 88, 12)) +
+    guides(fill = "none") +
+    labs(x = "Time in cell cycle (min)", y = y_lab,
+         title = paste0(gene_name, " — validation trio dynamics (", scale, ")"),
+         subtitle = "Bold = chosen trio | dashed black = global average") +
+    theme_auditorium()
+
+  # ── peak-time arrows + consensus line, only for pick_trio_peak() output ──
+  consensus_peak <- attr(trio, "consensus_peak")
+  if (!is.null(consensus_peak)) {
+    y_range <- range(c(global_sum$y, trio_sum$y), na.rm = TRUE)
+    y_pad   <- diff(y_range) * 0.12
+    y_top   <- y_range[2] + y_pad
+    y_base  <- y_range[2] + y_pad * 0.25
+
+    peak_marks <- trio %>%
+      transmute(tier, strain, value,
+                label = paste0(strain, "\n", round(value, 1), " min"))
+
+    p <- p +
+      geom_vline(xintercept = consensus_peak, linetype = "dashed",
+                 color = "grey30", linewidth = 0.8) +
+      annotate("text", x = consensus_peak, y = y_top, label = "consensus",
+               vjust = -0.3, size = PUB_LABEL, fontface = "italic", color = "grey30") +
+      geom_segment(data = peak_marks,
+                   aes(x = value, xend = value, y = y_top, yend = y_base, color = tier),
+                   arrow = arrow(length = unit(0.25, "cm"), type = "closed"),
+                   linewidth = 1, show.legend = FALSE) +
+      geom_text(data = peak_marks,
+                aes(x = value, y = y_top, label = label, color = tier),
+                vjust = -0.3, size = PUB_LABEL, fontface = "bold", show.legend = FALSE) +
+      scale_y_continuous(expand = expansion(mult = c(0.05, 0.25)))
+  }
+
+  if (save) ggsave(paste0("../results/", gene_name, "_trio_dynamics_",
+                          if (!is.null(label)) paste0(label, "_"), scale, ".png"),
+                    p, width = 12, height = 7, dpi = 150, bg = "white")
+  if (show) print(p)
+  invisible(p)
+}
+```
+
+
+```{r, eval = FALSE}
+trio_amp <- pick_trio_amp("YBR067C")
+plot_trio_dynamics("YBR067C", trio_amp, save = TRUE, label = "amp")
+```
+
+
+```{r, eval = FALSE}
+trio_peak <- pick_trio_peak("YBR067C")
+plot_trio_dynamics("YBR067C", trio_peak, save = TRUE, label = "peak")
+```
+```{r, eval = FALSE}
+trio_str <- pick_trio_r2("YBR067C")
+plot_trio_dynamics("YBR067C", trio_str, save = TRUE, label = "r2")
+```
+
+```{r, eval = FALSE}
+library(gridExtra)
+
+plot_gene_full_panel <- function(gene_name, replicate = "ypd1",
+                                  min_cells = 60, min_pct_detected = 0.3,
+                                  save = TRUE) {
+  p_overview <- plot_gene_overview(gene_name, show = FALSE)
+
+  trio_amp  <- pick_trio_amp (gene_name, replicate, min_cells, min_pct_detected)
+  trio_peak <- pick_trio_peak(gene_name, replicate, min_cells, min_pct_detected)
+  trio_r2   <- pick_trio_r2  (gene_name, replicate, min_cells, min_pct_detected)
+  trio_comp <- composite_trio(gene_name, replicate, min_cells, min_pct_detected)
+
+  p_amp  <- plot_trio_dynamics(gene_name, trio_amp,  show = FALSE) + labs(title = "Amplitude trio")
+  p_peak <- plot_trio_dynamics(gene_name, trio_peak, show = FALSE) + labs(title = "Timing trio")
+  p_r2   <- plot_trio_dynamics(gene_name, trio_r2,   show = FALSE) + labs(title = "Structure (R2) trio")
+  p_comp <- plot_trio_dynamics(gene_name, trio_comp, show = FALSE) + labs(title = "Composite trio")
+
+  combined <- arrangeGrob(
+    p_overview, p_amp, p_peak, p_r2, p_comp,
+    layout_matrix = rbind(c(1, 1, 1),    # overview spans all 3 columns
+                           c(2, 3, 4),    # amp | peak | r2, one per column
+                           c(5, 5, 5)),   # composite spans all 3 columns
+    top = paste0(gene_name, " — full validation panel")
+  )
+
+  # save first — independent of the Plots pane size
+  if (save) {
+    out_file <- paste0("../results/", gene_name, "_full_panel.png")
+    ggsave(out_file, combined, width = 20, height = 18, dpi = 150, bg = "white")
+    cat("Saved:", out_file, "\n")
+  }
+
+  # best-effort inline preview
+  tryCatch(
+    grid::grid.draw(combined),
+    error = function(e) cat("Inline preview skipped (Plots pane too small) — open the saved PNG instead.\n")
+  )
+
+  invisible(combined)
+}
+
+plot_gene_full_panel("YBR067C")
+
+```
+
+```{r, eval = FALSE}
+plot_trio_both_scales <- function(gene_name, trio, save = FALSE) {
+  p_log10 <- plot_trio_dynamics(gene_name, trio, scale = "log10", show = FALSE)
+  p_raw   <- plot_trio_dynamics(gene_name, trio, scale = "raw",   show = FALSE)
+
+  combined <- gridExtra::arrangeGrob(p_log10, p_raw, ncol = 2,
+                                      top = paste0(gene_name, " — log10 vs raw"))
+
+  if (save) ggsave(paste0("../results/", gene_name, "_trio_both_scales.png"),
+                    combined, width = 18, height = 7, dpi = 150, bg = "white")
+
+  grid::grid.draw(combined)
+  invisible(combined)
+}
+
+trio_peak <- pick_trio_peak("YBR067C")
+plot_trio_dynamics("YBR067C", trio_peak)
+plot_trio_both_scales("YBR067C", trio_peak)            # log10 and raw side by side
+```
+```{r, eval = FALSE}
+compare_strain_metrics <- function(gene_name, replicate = "ypd1",
+                                    min_cells = 60, min_pct_detected = 0.3,
+                                    top_n = 15) {
+  orf <- to_orf_local(gene_name)
+
+  obs_r  <- if (replicate == "ypd1") obs1 else obs2
+  amp_r  <- if (replicate == "ypd1") AMP1 else AMP2
+  raw_r  <- if (replicate == "ypd1") raw_counts_mat else raw_counts_mat_ypd2
+  meta_r <- if (replicate == "ypd1") meta_slim      else meta_slim_ypd2
+
+  if (!orf %in% rownames(raw_r)) {
+    cat("Gene", gene_name, "(", orf, ") not found in raw count matrix\n")
+    return(invisible(NULL))
+  }
+
+  # overall per-strain mean expression — all cells, not time-binned
+  expr_by_strain <- tibble(
+    cell      = colnames(raw_r),
+    raw_count = as.numeric(raw_r[orf, ])
+  ) %>%
+    left_join(meta_r %>% select(cell, strain), by = "cell") %>%
+    filter(!is.na(strain)) %>%
+    group_by(strain) %>%
+    summarise(mean_raw   = mean(raw_count, na.rm = TRUE),
+              mean_log10 = mean(log10(raw_count + 1), na.rm = TRUE),
+              .groups = "drop")
+
+  det <- gene_detection_by_strain(orf, raw_r, meta_r)
+
+  out <- expr_by_strain %>%
+    left_join(det, by = "strain") %>%
+    mutate(
+      n_cells  = obs_r$n_cells[strain],
+      r2       = obs_r$r2_adj[orf, strain],
+      amp      = amp_r[orf, strain],
+      peak     = obs_r$peak[orf, strain],
+      eligible = !is.na(n_cells) & n_cells >= min_cells &
+                 !is.na(pct_detected) & pct_detected >= min_pct_detected
+    ) %>%
+    arrange(desc(mean_log10))
+
+  cat("\n===", gene_name, "(", orf, ") — mean expression vs. harmonic-fit phenotypes ===\n")
+  cat("Eligibility requires n_cells >=", min_cells, "and pct_detected >=", min_pct_detected, "\n\n")
+  print(out %>% select(strain, mean_log10, mean_raw, pct_detected, n_cells,
+                        eligible, r2, amp, peak), n = top_n)
+
+  invisible(out)
+}
+
+compare_strain_metrics("YBR067C")
+```
+
+---
+
+# 12. Strain-level reproducibility (paper: reproducibility paragraph)
+
+Everything in the paper's reproducibility paragraph, its supplementary table and
+the two supplementary replicate figures comes from this section.
+
+§11's `circ_conc()` asks whether each strain's peak *time* is the same in both
+replicates. For a gene where every strain peaks at about the same time (the
+histones, ~36 min) that is high even if the early/late strains differ, so it does
+not test whether strain *differences* reproduce. Here timing is instead the
+Spearman correlation, across shared strains, of each strain's signed deviation
+from the gene's consensus peak. Amplitude is the same Spearman correlation as
+§11's `concordance()`, now with a p-value and FDR per gene.
+
+- Genes need >= `MIN_STRAINS` shared strains with a value in both replicates.
+- FDR (BH) is computed within the genes significant in both replicates for that
+  phenotype, the set the text reports on.
+
+```{r repro_table}
+MIN_STRAINS <- 20
+
+peak_dev <- function(v) {          # signed minutes from the circular mean peak
+  ctr <- circ_mean_rows(matrix(v, nrow = 1))
+  ((v - ctr + WRAP / 2) %% WRAP) - WRAP / 2
+}
+
+rep_cor <- function(M1, M2, g, timing = FALSE) {
+  strains <- intersect(colnames(M1), colnames(M2))
+  if (!g %in% rownames(M1) || !g %in% rownames(M2))
+    return(tibble(rho = NA_real_, p = NA_real_, n = 0L))
+  x <- M1[g, strains]; y <- M2[g, strains]; ok <- !is.na(x) & !is.na(y)
+  if (sum(ok) < MIN_STRAINS) return(tibble(rho = NA_real_, p = NA_real_, n = sum(ok)))
+  x <- x[ok]; y <- y[ok]
+  if (timing) { x <- peak_dev(x); y <- peak_dev(y) }   # deviation over shared strains
+  ct <- suppressWarnings(cor.test(x, y, method = "spearman", exact = FALSE))
+  tibble(rho = unname(ct$estimate), p = ct$p.value, n = sum(ok))
+}
+
+bh_within <- function(p, in_set) {
+  out <- rep(NA_real_, length(p)); k <- in_set & !is.na(p)
+  out[k] <- p.adjust(p[k], method = "BH"); out
+}
+
+gene_names <- bind_rows(gene_summary_1 %>% select(gene, name),
+                        gene_summary_2 %>% select(gene, name)) %>% distinct(gene, .keep_all = TRUE)
+to_name <- function(x) { n <- gene_names$name[match(x, gene_names$gene)]; ifelse(is.na(n), x, n) }
+to_orf  <- function(x) { g <- gene_names$gene[match(x, gene_names$name)]; ifelse(is.na(g), x, g) }
+
+A1 <- sig_amplitude_1$gene; A2 <- sig_amplitude_2$gene
+T1 <- sig_timing_1$gene;    T2 <- sig_timing_2$gene
+
+repro <- tibble(gene = sort(union(union(A1, A2), union(T1, T2)))) %>%
+  mutate(name = to_name(gene),
+         amp_sig_ypd1 = gene %in% A1, amp_sig_ypd2 = gene %in% A2,
+         timing_sig_ypd1 = gene %in% T1, timing_sig_ypd2 = gene %in% T2,
+         amp_reproduced = amp_sig_ypd1 & amp_sig_ypd2,
+         timing_reproduced = timing_sig_ypd1 & timing_sig_ypd2,
+         amp = map(gene, ~ rep_cor(AMP1, AMP2, .x)),
+         tim = map(gene, ~ rep_cor(obs1$peak, obs2$peak, .x, timing = TRUE))) %>%
+  unnest_wider(amp, names_sep = "_") %>% unnest_wider(tim, names_sep = "_") %>%
+  dplyr::rename(amp_n_strains = amp_n, timing_rho = tim_rho, timing_p = tim_p,
+                timing_n_strains = tim_n) %>%
+  mutate(amp_fdr    = bh_within(amp_p,    amp_reproduced),
+         timing_fdr = bh_within(timing_p, timing_reproduced)) %>%
+  arrange(desc(amp_reproduced), desc(amp_rho)) %>%
+  select(name, gene, amp_sig_ypd1, amp_sig_ypd2, amp_reproduced,
+         amp_rho, amp_p, amp_fdr, amp_n_strains,
+         timing_sig_ypd1, timing_sig_ypd2, timing_reproduced,
+         timing_rho, timing_p, timing_fdr, timing_n_strains)
+
+write.csv(repro %>% mutate(across(c(amp_rho, timing_rho), ~ round(.x, 3))),
+          file.path(ROOT1, "paper_tables/SuppTable_replicate_reproducibility.csv"),
+          row.names = FALSE)
+
+cat("Shared strains:", length(intersect(colnames(AMP1), colnames(AMP2))), "\n")
+cat("Amplitude: significant YPD.1", length(A1), "| YPD.2", length(A2),
+    "| both", sum(repro$amp_reproduced), "| of those, strain-level FDR < 0.05:",
+    sum(repro$amp_fdr < 0.05, na.rm = TRUE), "\n")
+cat("Timing:    significant YPD.1", length(T1), "| YPD.2", length(T2),
+    "| both", sum(repro$timing_reproduced), "| testable", sum(!is.na(repro$timing_fdr)),
+    "| strain-level FDR < 0.05:", sum(repro$timing_fdr < 0.05, na.rm = TRUE), "\n\n")
+repro %>% filter(name %in% c("MRH1", "TIP1", "CTS1", "HHF1", "HHF2", "HHT2", "HTB2")) %>%
+  select(name, amp_reproduced, amp_rho, amp_fdr, timing_reproduced, timing_rho, timing_fdr) %>%
+  print(width = Inf)
+```
+
+## 12.1 Supplementary replicate figures
+
+YPD.1 and YPD.2 side by side, per-strain curves on top and per-strain peak time
+vs amplitude underneath, drawn exactly as Figure 5 (`cc_panel()` and
+`strain_scatter()` below are copied from `Fig5.cell-cycle-harmonic.Rmd` §9 —
+keep them in sync). The same four strains are coloured in both replicates: for
+amplitude the two highest- and two lowest-amplitude strains in YPD.1, for timing
+the two earliest- and two latest-peaking, among strains with >= `HL_MIN_CELLS`
+cells in both.
+
+Normalised expression is rebuilt from the saved raw Spellman counts
+(`*_nb_input.rds`) the same way Seurat's LogNormalize does,
+log1p(count / nCount_RNA × 1e4); the check below confirms it matches the YPD.1
+Seurat object used in the main analysis.
+
+```{r repro_plot_functions}
+CC_LEVELS  <- c('M-G1', 'G1', 'S', 'G2', 'M')
+PHASE_FILL <- c('M-G1'='#a8d5a2','G1'='#ffd6a5','S'='#ffadad',
+                'G2'='#bde0fe','M'='#ffc8dd')
+HARMONICS  <- 2
+GRID       <- seq(0, WRAP, length.out = 89)
+
+harmonic_design <- function(t, K = HARMONICS, period = WRAP, depth = NULL) {
+  X <- matrix(1, nrow = length(t), ncol = 1, dimnames = list(NULL, "intercept"))
+  for (k in seq_len(K)) {
+    X <- cbind(X, cos(2 * pi * k * t / period), sin(2 * pi * k * t / period))
+    colnames(X)[(ncol(X) - 1):ncol(X)] <- paste0(c("cos", "sin"), k)
+  }
+  if (!is.null(depth)) X <- cbind(X, depth = depth)
+  X
+}
+
+# The anchors given to calculate_times (M-G1 7, G1 22.5, S 39.5, G2 56.5, M 77.5)
+# are the times at each phase's CENTROID, not phase starts. Band edges are the
+# midpoints between consecutive centroids (M -> M-G1 wraps: (77.5 + 7 + 88) / 2).
+PHASE_CENTROIDS <- c('M-G1' = 7, 'G1' = 22.5, 'S' = 39.5, 'G2' = 56.5, 'M' = 77.5)
+.edges <- (PHASE_CENTROIDS + c(PHASE_CENTROIDS[-1], PHASE_CENTROIDS[1] + WRAP)) / 2
+PHASE_BOUNDS <- tibble(
+  xmin  = c(0,           .edges[1:4],  .edges[5]),
+  xmax  = c(.edges[1:4], .edges[5],    WRAP),
+  phase = factor(c('M-G1','G1','S','G2','M','M-G1'), levels = CC_LEVELS)
+)
+
+harmonic_curve <- function(gene, strain = NULL, K = HARMONICS) {
+  idx <- if (is.null(strain)) seq_along(tvec) else which(gvec == strain)
+  y <- Y_cc[idx, gene]
+  if (length(idx) < 2 * K + 4) return(NULL)
+  if (sd(y) == 0)
+    return(tibble(time = GRID, y = mean(y), strain = strain %||% "global", detected = FALSE))
+  X <- harmonic_design(tvec[idx], K)
+  b <- qr.coef(qr(X), y); b[is.na(b)] <- 0
+  tibble(time = GRID, y = as.numeric(harmonic_design(GRID, K) %*% b),
+         strain = strain %||% "global", detected = TRUE)
+}
+
+HIGHLIGHT_COLS <- c("firebrick", "steelblue", "darkorange", "purple4")
+
+# hl_labels (added here, not in the main Rmd): optional legend labels for the
+# highlighted strains, named by strain
+cc_panel <- function(genes, per_strain = TRUE, ncol = 3, title = NULL, highlight = NULL,
+                     hl_labels = NULL) {
+  orfs <- to_orf(genes)
+  orfs <- orfs[orfs %in% colnames(Y_cc)]
+  if (length(orfs) == 0) { message("cc_panel: no genes to plot"); return(invisible(NULL)) }
+
+  global <- map_dfr(orfs, function(g) {
+    hc <- harmonic_curve(g); if (is.null(hc)) return(NULL); mutate(hc, gene = g)
+  })
+  strains <- names(n_by_strain)
+  per <- if (per_strain)
+    map_dfr(orfs, function(g)
+      map_dfr(strains, function(s) {
+        hc <- harmonic_curve(g, s); if (is.null(hc)) return(NULL); mutate(hc, gene = g)
+      })) else NULL
+  binned <- tibble(gene = rep(orfs, each = length(tvec)),
+                   t = rep(round(tvec) %% WRAP, times = length(orfs)),
+                   y = as.vector(Y_cc[, orfs])) %>%
+    group_by(gene, t) %>% summarise(y = mean(y), .groups = "drop")
+
+  p <- ggplot() +
+    geom_rect(data = PHASE_BOUNDS,
+              aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf, fill = phase),
+              alpha = 0.20, inherit.aes = FALSE) +
+    geom_text(data = filter(PHASE_BOUNDS, xmax - xmin > 5),   # skip the 86.25–88 wrap sliver
+              aes(x = (xmin + xmax) / 2, y = Inf, label = phase),
+              vjust = 1.4, size = PUB_LABEL, fontface = "bold", colour = "grey25",
+              inherit.aes = FALSE) +
+    scale_fill_manual(values = PHASE_FILL, guide = "none") +
+    scale_y_continuous(expand = expansion(mult = c(0.04, 0.14)))
+  if (per_strain)
+    p <- p + geom_line(data = per %>% mutate(label = to_name(gene)),
+                       aes(time, y, group = strain, linetype = detected),
+                       colour = "grey45", alpha = 0.4, linewidth = 0.3) +
+      scale_linetype_manual(values = c(`TRUE` = "solid", `FALSE` = "22"), guide = "none")
+  if (per_strain && length(highlight))
+    p <- p + geom_line(data = per %>% filter(strain %in% highlight) %>%
+                         mutate(label = to_name(gene)),
+                       aes(time, y, group = strain, colour = strain), linewidth = 0.9) +
+      scale_colour_manual(values = setNames(HIGHLIGHT_COLS[seq_along(highlight)], highlight),
+                          breaks = highlight,
+                          labels = if (is.null(hl_labels)) highlight else unname(hl_labels[highlight]),
+                          name = "Strain")
+  p +
+    geom_point(data = binned %>% mutate(label = to_name(gene)),
+               aes(t, y), size = 1, alpha = 0.6, colour = "grey20") +
+    geom_line(data = global %>% mutate(label = to_name(gene)),
+              aes(time, y), colour = "black", linewidth = 1) +
+    scale_x_continuous(breaks = seq(0, WRAP, 11)) +
+    coord_cartesian(xlim = c(0, WRAP)) +
+    facet_wrap(~label, scales = "free_y", ncol = ncol) +
+    labs(x = "Time in cell cycle (min)", y = "Normalized expression", title = title) +
+    pub_theme + theme(legend.position = "bottom")
+}
+
+# hl_labels (added here, not in the main Rmd): optional point labels for the
+# highlighted strains, named by strain
+strain_scatter <- function(gene_ids, title, subtitle = NULL, highlight = NULL, ncol = 3,
+                           hl_labels = NULL) {
+  df <- map_dfr(gene_ids, ~ tibble(gene = .x, strain = colnames(AMP),
+                                   amp = AMP[.x, ], peak = obs$peak[.x, ],
+                                   n_cells = n_by_strain,
+                                   poor_cov = colnames(AMP) %in% POOR_COVERAGE)) %>%
+    filter(!is.na(amp)) %>%
+    mutate(name = to_name(gene),
+           hl_label = if (is.null(hl_labels)) strain else unname(hl_labels[strain]))
+  hl_layers <- if (length(highlight)) list(
+    geom_point(data = filter(df, strain %in% highlight),
+               aes(fill = strain), shape = 21, size = 3.5, colour = "black"),
+    ggrepel::geom_text_repel(data = filter(df, strain %in% highlight),
+                             aes(label = hl_label), size = PUB_LABEL,
+                             min.segment.length = 0),
+    scale_fill_manual(values = setNames(HIGHLIGHT_COLS[seq_along(highlight)], highlight))
+  )
+  ggplot(df, aes(peak, amp)) +
+    geom_point(aes(size = n_cells, colour = poor_cov), alpha = 0.6) +
+    scale_colour_manual(values = c(`FALSE` = "black", `TRUE` = "firebrick"),
+                        guide = "none") +
+    hl_layers +
+    facet_wrap(~name, scales = "free_y", ncol = ncol) +
+    scale_x_continuous(breaks = seq(0, WRAP, 11)) +
+    coord_cartesian(xlim = c(0, WRAP)) +
+    labs(x = "Peak time (min)", y = "Amplitude (bias-corrected)",
+         title = title, subtitle = subtitle) +
+    pub_theme + theme(legend.position = "none")
+}
+```
+
+```{r repro_figures}
+HL_MIN_CELLS <- 50   # highlight only strains with >= 50 cells in both replicates
+
+# per-replicate data, set as globals for cc_panel() / strain_scatter()
+load_rep <- function(root, tag, obs) {
+  nb  <- readRDS(file.path(root, paste0(tag, "_nb_input.rds")))
+  Y   <- t(as.matrix(log1p(nb$raw %*% Matrix::Diagonal(x = 1e4 / nb$libsize))))
+  rownames(Y) <- colnames(nb$raw)
+  strains <- colnames(obs$amp1_db)
+  list(Y_cc = Y, tvec = nb$tvec, gvec = nb$gvec, libsize = nb$libsize,
+       n_by_strain = setNames(as.integer(table(nb$gvec)[strains]), strains),
+       AMP = obs$amp1_db, obs = obs,
+       POOR_COVERAGE = readRDS(file.path(root, paste0(tag, "_poor_coverage.rds"))))
+}
+reps <- list("YPD.1" = load_rep(ROOT1, "ypd1", obs1),
+             "YPD.2" = load_rep(ROOT2, "ypd2", obs2))
+use_rep <- function(name) list2env(reps[[name]], envir = globalenv())
+
+# check: rebuilt YPD.1 expression matches the Seurat object the analysis used
+Na_va_norm <- readRDS("../results/ypd1_Na_va_with_cc_time_normalized.rds")
+chk <- intersect(colnames(reps$YPD.1$Y_cc), c("YBR009C", "YLR286C", "YCR089W"))
+cat("Max |rebuilt - Seurat| normalised expression:",
+    signif(max(abs(t(as.matrix(GetAssayData(Na_va_norm, layer = "data")[chk, rownames(reps$YPD.1$Y_cc)])) -
+                   reps$YPD.1$Y_cc[, chk])), 3), "\n")
+rm(Na_va_norm)
+
+# highlighted strains: amplitude — the two highest in YPD.1;
+# timing — the two earliest + two latest in YPD.1
+n1 <- reps$YPD.1$n_by_strain; n2 <- reps$YPD.2$n_by_strain
+hl_pool <- intersect(names(n1)[n1 >= HL_MIN_CELLS], names(n2)[n2 >= HL_MIN_CELLS])
+pick_extremes <- function(v) { v <- sort(v[!is.na(v)]); c(head(names(v), 2), tail(names(v), 2)) }
+hl_amp    <- function(g) {
+  v <- sort(AMP1[g, intersect(hl_pool, colnames(AMP1))], decreasing = TRUE)
+  head(names(v), 2)
+}
+# timing: strains >= TIMING_SHIFT min early (or late) of the consensus in BOTH replicates
+TIMING_SHIFT <- 3
+hl_timing <- function(g) {
+  s  <- intersect(hl_pool, intersect(names(which(!is.na(obs1$peak[g, ]))),
+                                     names(which(!is.na(obs2$peak[g, ])))))
+  d1 <- peak_dev(obs1$peak[g, s]); d2 <- peak_dev(obs2$peak[g, s])
+  s[(d1 <= -TIMING_SHIFT & d2 <= -TIMING_SHIFT) | (d1 >= TIMING_SHIFT & d2 >= TIMING_SHIFT)]
+}
+
+# one gene: YPD.1 | YPD.2 columns, curves over scatter, one shared strain legend.
+# Highlighted strains carry their cell counts: both replicates in the shared
+# legend, that replicate's count on the scatter labels.
+rep_block <- function(gene_name, highlight) {
+  orf <- to_orf(gene_name)
+  legend_lab <- setNames(sprintf("%s (YPD.1 %d, YPD.2 %d cells)", highlight,
+                                 n1[highlight], n2[highlight]), highlight)
+  cols <- lapply(names(reps), function(r) {
+    use_rep(r)
+    point_lab <- setNames(sprintf("%s (%d cells)", highlight, n_by_strain[highlight]), highlight)
+    list(top = cc_panel(orf, ncol = 1, highlight = highlight, hl_labels = legend_lab) +
+           labs(title = r, x = "Time in cell cycle (min)"),
+         bottom = strain_scatter(orf, title = NULL, highlight = highlight, ncol = 1,
+                                 hl_labels = point_lab) +
+           guides(size = "none", fill = "none", colour = "none"))
+  })
+  patchwork::wrap_plots(cols[[1]]$top, cols[[2]]$top,
+                        cols[[1]]$bottom, cols[[2]]$bottom, ncol = 2) +
+    patchwork::plot_layout(guides = "collect") &
+    theme(legend.position = "bottom")
+}
+
+dir.create(file.path(ROOT1, "paper_panels"), showWarnings = FALSE, recursive = TRUE)
+
+hl_mrh1 <- hl_amp(to_orf("MRH1")); hl_tip1 <- hl_amp(to_orf("TIP1"))
+cat("Highlighted strains — MRH1:", hl_mrh1, "| TIP1:", hl_tip1, "\n")
+p_rep_amp <- patchwork::wrap_plots(rep_block("MRH1", hl_mrh1), rep_block("TIP1", hl_tip1), ncol = 2)
+print(p_rep_amp)
+ggsave(file.path(ROOT1, "paper_panels/Supp_replicate_amplitude_MRH1_TIP1.png"), p_rep_amp,
+       width = 20, height = 10, dpi = 300)
+
+hl_cts1 <- hl_timing(to_orf("CTS1"))
+cat("Highlighted strains — CTS1:", hl_cts1, "\n")
+p_rep_tim <- rep_block("CTS1", hl_cts1)
+print(p_rep_tim)
+ggsave(file.path(ROOT1, "paper_panels/Supp_replicate_timing_CTS1.png"), p_rep_tim,
+       width = 10, height = 10, dpi = 300)
+```
+
+## 12.2 Values of the highlighted strains, and CTS1 strains early or late in both
+
+Amplitude rank is among strains with a value in both replicates (1 = highest).
+For the highlighted MRH1 and TIP1 strains, each replicate's curve is refit exactly as in
+the analysis (two harmonics + within-strain centred log-depth, read at depth 0)
+and its two highest local maxima are reported, so a switch between two
+peaks shows up directly. Peak deviation is minutes from that replicate's
+consensus CTS1 peak (negative = earlier).
+
+```{r repro_highlighted_strains}
+# two highest local maxima of a strain's fitted curve (circular, 1-min grid)
+humps <- function(rep_name, g, s) {
+  r <- reps[[rep_name]]; i <- which(r$gvec == s)
+  dep <- log1p(r$libsize[i]); dep <- dep - mean(dep)
+  b  <- qr.coef(qr(harmonic_design(r$tvec[i], depth = dep)), r$Y_cc[i, g]); b[is.na(b)] <- 0
+  cv <- as.numeric(harmonic_design(GRID, depth = rep(0, length(GRID))) %*% b)
+  v  <- cv[-length(cv)]                                    # drop 88 (= 0)
+  is_max <- v > c(v[length(v)], v[-length(v)]) & v >= c(v[-1], v[1])
+  m <- order(v[is_max], decreasing = TRUE)[1:2]
+  tibble(peak_main = GRID[which(is_max)[m[1]]], height_main = round(v[is_max][m[1]], 2),
+         peak_second = GRID[which(is_max)[m[2]]], height_second = round(v[is_max][m[2]], 2))
+}
+
+amp_rank_tbl <- function(gene_name, strains) {
+  g <- to_orf(gene_name)
+  a1 <- AMP1[g, ]; a2 <- AMP2[g, ]
+  s  <- intersect(names(a1)[!is.na(a1)], names(a2)[!is.na(a2)])
+  r1 <- rank(-a1[s], ties.method = "min"); r2 <- rank(-a2[s], ties.method = "min")
+  map_dfr(strains, function(st)
+    bind_cols(
+      tibble(gene = gene_name, strain = st, n_ranked = length(s),
+             ypd1_amp = round(a1[st], 2), ypd1_rank = r1[st], ypd1_peak = obs1$peak[g, st],
+             ypd2_amp = round(a2[st], 2), ypd2_rank = r2[st], ypd2_peak = obs2$peak[g, st]),
+      humps("YPD.1", g, st) %>% rename_with(~ paste0("ypd1_", .x)),
+      humps("YPD.2", g, st) %>% rename_with(~ paste0("ypd2_", .x))))
+}
+highlight_amp_tbl <- bind_rows(amp_rank_tbl("MRH1", hl_mrh1), amp_rank_tbl("TIP1", hl_tip1))
+stopifnot(all(highlight_amp_tbl$ypd1_peak == highlight_amp_tbl$ypd1_peak_main),
+          all(highlight_amp_tbl$ypd2_peak == highlight_amp_tbl$ypd2_peak_main))  # refit = analysis
+print(highlight_amp_tbl, width = Inf)
+
+cts1 <- to_orf("CTS1")
+s_cts1 <- intersect(names(which(!is.na(obs1$peak[cts1, ]))), names(which(!is.na(obs2$peak[cts1, ]))))
+cts1_tbl <- tibble(gene = "CTS1", strain = s_cts1,
+                   ypd1_peak = obs1$peak[cts1, s_cts1], ypd1_dev = round(peak_dev(obs1$peak[cts1, s_cts1]), 1),
+                   ypd2_peak = obs2$peak[cts1, s_cts1], ypd2_dev = round(peak_dev(obs2$peak[cts1, s_cts1]), 1),
+                   ypd1_n_cells = reps$YPD.1$n_by_strain[s_cts1],
+                   ypd2_n_cells = reps$YPD.2$n_by_strain[s_cts1]) %>%
+  mutate(pattern = case_when(ypd1_dev <= -TIMING_SHIFT & ypd2_dev <= -TIMING_SHIFT ~ "early in both",
+                             ypd1_dev >=  TIMING_SHIFT & ypd2_dev >=  TIMING_SHIFT ~ "late in both",
+                             abs(ypd1_dev) >= TIMING_SHIFT & abs(ypd2_dev) >= TIMING_SHIFT ~ "opposite",
+                             TRUE ~ ""),
+         highlighted = strain %in% hl_cts1)
+cat("CTS1 consensus peak — YPD.1:", round(circ_mean_rows(matrix(obs1$peak[cts1, s_cts1], 1)), 1),
+    "min | YPD.2:", round(circ_mean_rows(matrix(obs2$peak[cts1, s_cts1], 1)), 1), "min\n")
+print(cts1_tbl %>% filter(pattern != "" | highlighted) %>% arrange(pattern, ypd1_dev), n = Inf)
+
+write.csv(highlight_amp_tbl, file.path(ROOT1, "paper_tables/SuppTable_replicate_highlighted_amplitude.csv"),
+          row.names = FALSE)
+write.csv(cts1_tbl, file.path(ROOT1, "paper_tables/SuppTable_replicate_CTS1_peak_by_strain.csv"),
+          row.names = FALSE)
+```
+
+## 12.3 Peak width and timing reproducibility
+
+Peak width is the number of minutes per cycle that a gene's curve, fitted to all
+YPD.1 cells (two harmonics + centred log-depth, evaluated at mean depth on a
+0.1-minute grid), spends above half its height (midpoint of minimum and maximum).
+Smaller = sharper peak. Tested across the genes whose timing was significant in
+both replicates and could be correlated between them.
+
+```{r repro_peak_width}
+nb1   <- readRDS(file.path(ROOT1, "ypd1_nb_input.rds"))
+fine  <- seq(0, WRAP, by = 0.1)
+dep   <- log1p(nb1$libsize); dep <- dep - mean(dep)
+qr_p  <- qr(harmonic_design(nb1$tvec, depth = dep))
+G_p   <- harmonic_design(fine, depth = rep(0, length(fine)))
+
+peak_width <- function(g) {
+  cv <- as.numeric(G_p %*% qr.coef(qr_p, reps$YPD.1$Y_cc[, g]))
+  tibble(gene = g, width_min = round(mean(cv > (max(cv) + min(cv)) / 2) * WRAP, 1),
+         pooled_peak_min = fine[which.max(cv)])
+}
+width_tbl <- repro %>%
+  filter(timing_reproduced | name %in% c("HHF1", "HHF2", "HHT2", "HTB2", "MRH1", "TIP1")) %>%
+  filter(gene %in% colnames(reps$YPD.1$Y_cc)) %>%
+  select(name, gene, timing_reproduced, timing_rho, timing_fdr) %>%
+  left_join(map_dfr(.$gene, peak_width), by = "gene") %>%
+  arrange(width_min)
+print(width_tbl, n = Inf)
+
+wt <- width_tbl %>% filter(timing_reproduced, !is.na(timing_rho))
+ct <- suppressWarnings(cor.test(wt$width_min, wt$timing_rho, method = "spearman", exact = FALSE))
+cat("\nPeak width vs timing reproducibility (n =", nrow(wt), "genes): Spearman rho =",
+    round(ct$estimate, 2), ", p =", signif(ct$p.value, 2), "\n")
+
+write.csv(width_tbl, file.path(ROOT1, "paper_tables/SuppTable_timing_peak_width.csv"),
+          row.names = FALSE)
+```
+

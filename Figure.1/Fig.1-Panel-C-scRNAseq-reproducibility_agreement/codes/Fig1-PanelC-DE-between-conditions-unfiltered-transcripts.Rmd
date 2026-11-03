@@ -1,0 +1,944 @@
+---
+title: "Fig.1 Panel C — differential expression between conditions (unfiltered transcripts)"
+output: html_document
+---
+
+Pseudobulk differential expression between YPD, fluconazole and synthetic
+complete 2% glucose (sc2glu), using the pseudobulk matrices **before** the
+"reliable transcripts" filter (`pseudobulk_<dataset>_without_filtering_transcripts.txt`).
+The filtered matrices drop key fluconazole-response genes (ERG11, ERG3, UPC2, ...),
+so the DE here is run on all genes, with a light expression filter per comparison.
+
+Five datasets: YPD.1, YPD.2, Flu.1, Flu.2 and sc2glu.2.
+
+- YPD.1 and YPD.2 are true replicates.
+- Flu.1 (16 ug/ml fluconazole) and Flu.2 (8 ug/ml) are **not** replicates: they
+  are two doses, each a single 10x run, so dose and batch are confounded between them.
+- sc2glu.1 is a true replicate of sc2glu.2 but is left out of the DE: it is small
+  (~1,700 cells after doublet removal) and, in DE against it, lowly expressed
+  genes are systematically inflated (median log2FC ~ +0.9 vs ~ +0.1 against
+  sc2glu.2), which produces many artefactual "up in sc2glu.1" genes. sc2glu.1 is
+  used only for the PCA and reproducibility checks in
+  `Fig1-PanelC-does-gene-experession-differ-bwn-condition.Rmd`.
+
+Comparisons:
+
+- 8 cross-condition comparisons: YPD vs Flu (each YPD replicate against each
+  Flu dose, 4), YPD vs sc2glu.2 (2) and Flu vs sc2glu.2 (one per dose, 2).
+- 1 replicate control: YPD.1 vs YPD.2. Each dataset is its own 10x run, so this
+  shows how many DE genes batch alone produces; a real condition effect should
+  give many more.
+- 1 dose comparison: Flu.2 vs Flu.1 (log2FC = 16 / 8 ug/ml). Its DE genes are a
+  mix of dose effect and batch effect, which this design cannot separate.
+
+Galactose (scgal.1, synthetic complete with galactose; a single run with no
+replicate and 55 strains) is added in a separate section at the end
+("Galactose"): YPD vs Galactose (2), Fluconazole vs Galactose (one per dose, 2)
+and sc2glu.2 vs Galactose (1). These comparisons use the strains shared by all
+six datasets including scgal.1, so the comparisons above keep their original
+strain set and results; the galactose section has its own figures.
+
+Genes that are DE in the same direction in every comparison of a condition pair
+(4 for YPD vs Flu, 2 for the sc2glu.2 pairs) are reported as the consensus
+condition genes. For the Flu pairs this means "responds at both doses", not
+"reproducible across replicates"; genes that respond at only one dose are
+reported separately.
+
+Method: DESeq2 on pseudobulk counts with a paired design `~ strain + condition`
+(the same strain is measured in both datasets, so each strain is its own control).
+log2FC = log2(test / ref), where "ref vs test" is the comparison name.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = TRUE, warning = FALSE,
+                      fig.width = 6, fig.height = 5, dpi = 300)
+```
+
+```{r}
+library(tidyverse)
+library(DESeq2)
+library(BiocParallel)
+library(patchwork)
+library(ggrepel)
+library(clusterProfiler)
+library(org.Sc.sgd.db)
+
+select <- dplyr::select
+filter <- dplyr::filter  # often masked too
+first  <- dplyr::first   # masked by S4Vectors
+count  <- dplyr::count   # masked by matrixStats
+```
+
+# Configuration
+
+```{r config}
+BASE <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all"
+
+PATHS <- list(
+  YPD.1    = file.path(BASE, "YPD.1/fastlmm/data/pheno_data/pseudobulk_YPD.1_all_strains_no_cell_filter.txt"),
+  YPD.2    = file.path(BASE, "YPD.2/fastlmm/data/pheno_data/pseudobulk_YPD.2_all_strains_no_cell_filter.txt"),
+  Flu.1    = file.path(BASE, "Flu.1/fastlmm/data/pheno_data/pseudobulk_flu.1_all_strains_no_cell_filter.txt"),
+  Flu.2    = file.path(BASE, "Flu.2/fastlmm/data/pheno_data/pseudobulk_flu.2_all_strains_no_cell_filter.txt"),
+  sc2glu.2 = file.path(BASE, "sc2glu.2/fastlmm/data/pheno_data/pseudobulk_sc2glu.2_only_without_filtering_transcripts.txt"),
+  scgal.1  = file.path(BASE, "scgal.1/fastlmm/data/pheno_data/pseudobulk_scgal.1_all_strains_no_cell_filter.txt")
+)
+
+# Datasets of the original comparisons; scgal.1 is only used in the Galactose section
+BASE_DATASETS <- c("YPD.1", "YPD.2", "Flu.1", "Flu.2", "sc2glu.2")
+
+ANNOT <- "/scratch/aa9679/SingleCell_cerevisiae/Gene_exp_analysis/yeast_custom_annotations.csv"
+
+dataset_condition <- c(YPD.1 = "YPD", YPD.2 = "YPD",
+                       Flu.1 = "Fluconazole", Flu.2 = "Fluconazole",
+                       sc2glu.2 = "sc2glu", scgal.1 = "Galactose")
+
+# Flu.1 and Flu.2 are different doses, not replicates
+flu_dose <- c(Flu.1 = "16 ug/ml", Flu.2 = "8 ug/ml")
+
+# "all_shared": the same strains (present in all 5 datasets) in every comparison,
+#               so DE gene counts are comparable across comparisons.
+#               Galactose comparisons use the strains present in all 6 datasets
+#               (the 5 + scgal.1).
+# "per_pair":   all strains shared by the two datasets of each comparison (more power).
+STRAIN_MODE <- "all_shared"
+
+# expression filter applied per comparison: keep genes with >= MIN_COUNT counts
+# in >= MIN_FRAC of the samples in that comparison
+MIN_COUNT <- 10
+MIN_FRAC  <- 0.25
+
+PADJ_CUT <- 0.05
+LFC_CUT  <- 1
+
+N_CORES <- as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", "4"))
+
+OUT_DIR <- "../results/DE_unfiltered"
+dir.create(OUT_DIR, showWarnings = FALSE, recursive = TRUE)
+```
+
+# Load
+
+```{r load}
+read_pseudobulk <- function(path, sep = "\t") {
+  if (!file.exists(path)) {
+    stop("File not found: ", path, "\n  (getwd(): ", getwd(), ")")
+  }
+  read.csv(path, sep = sep, row.names = 1, header = TRUE, check.names = FALSE)
+}
+
+raw <- lapply(PATHS, read_pseudobulk)
+
+for (nm in names(raw)) {
+  cat(sprintf("%-9s %5d genes x %4d strains\n", nm, nrow(raw[[nm]]), ncol(raw[[nm]])))
+}
+```
+
+All matrices mix ORF IDs and common gene names; convert everything to ORF IDs
+so genes match across datasets (same conversion as the Panel C/D Rmd).
+
+```{r orf_conversion}
+all_custom_gene_annotations <- read.csv(ANNOT, stringsAsFactors = FALSE)
+
+common_to_orf <- all_custom_gene_annotations %>%
+  filter(!is.na(gene_name), !is.na(gene_id)) %>%
+  distinct(gene_name, gene_id) %>%
+  deframe()
+
+to_orf <- function(mat, label) {
+  ids    <- rownames(mat)
+  is_orf <- grepl("^Y[A-Z]{2}\\d{3}[WC](-[A-Z])?$", ids)
+  orf    <- ifelse(is_orf, ids,
+                   ifelse(ids %in% names(common_to_orf), common_to_orf[ids], ids))
+  dup <- duplicated(orf)
+  cat(sprintf("%-9s converted %4d names to ORFs | %3d IDs left unconverted | dropped %d duplicates\n",
+              label, sum(!is_orf & orf != ids), sum(!grepl("^Y[A-Z]{2}\\d{3}[WC]", orf)), sum(dup)))
+  mat <- mat[!dup, , drop = FALSE]
+  rownames(mat) <- orf[!dup]
+  mat
+}
+
+raw <- imap(raw, to_orf)
+stopifnot(all(map_lgl(raw, ~ !any(duplicated(rownames(.x))))))
+```
+
+# Shared strains
+
+```{r shared}
+all_shared_strains     <- Reduce(intersect, lapply(raw[BASE_DATASETS], colnames))
+all_shared_strains_gal <- Reduce(intersect, lapply(raw, colnames))
+cat("Strains shared across the 5 original datasets:", length(all_shared_strains), "\n")
+cat("Strains shared across all 6 datasets (with galactose):", length(all_shared_strains_gal), "\n")
+cat("Strain mode:", STRAIN_MODE, "\n")
+
+strains_for <- function(ref, test) {
+  if (STRAIN_MODE != "all_shared") return(intersect(colnames(raw[[ref]]), colnames(raw[[test]])))
+  if ("scgal.1" %in% c(ref, test)) all_shared_strains_gal else all_shared_strains
+}
+```
+
+# Ergosterol gene set
+
+Genes annotated to GO:0006696 "ergosterol biosynthetic process" (including child
+terms) in SGD.
+
+```{r ergosterol_set}
+erg_set <- AnnotationDbi::select(org.Sc.sgd.db, keys = "GO:0006696", keytype = "GOALL",
+                                 columns = c("ORF", "GENENAME")) %>%
+  filter(!is.na(ORF)) %>%
+  distinct(orf = ORF, gene_name = GENENAME) %>%
+  mutate(gene_name = coalesce(gene_name, orf)) %>%
+  arrange(gene_name)
+erg_orfs <- erg_set$orf
+
+genes_in_all <- Reduce(intersect, lapply(raw[BASE_DATASETS], rownames))
+cat("Ergosterol genes (GO:0006696):", nrow(erg_set),
+    "| present in all 5 datasets:", sum(erg_orfs %in% genes_in_all), "\n")
+cat("Missing:", paste(erg_set$gene_name[!erg_orfs %in% genes_in_all], collapse = ", "), "\n")
+
+# ORF -> common name for labelling
+gene_label <- function(orfs) {
+  nm <- suppressMessages(AnnotationDbi::mapIds(org.Sc.sgd.db, keys = orfs, keytype = "ORF",
+                                                column = "GENENAME", multiVals = "first"))
+  coalesce(unname(nm), orfs)
+}
+```
+
+# Differential expression
+
+```{r de_fn}
+# Add comparison name, conditions, Flu doses, type and condition pair to a
+# table of ref / test datasets
+annotate_comparisons <- function(cmp) {
+  cmp %>%
+    mutate(comparison     = paste(ref, "vs", test),
+           ref_condition  = dataset_condition[ref],
+           test_condition = dataset_condition[test],
+           flu_doses      = map2_chr(ref, test, ~ paste(na.omit(flu_dose[c(.x, .y)]), collapse = " vs ")),
+           type = case_when(ref_condition != test_condition ~ "cross-condition",
+                            ref_condition == "Fluconazole"  ~ "dose comparison",
+                            TRUE                            ~ "replicate control"),
+           condition_pair = case_when(type == "cross-condition"   ~ paste(ref_condition, "vs", test_condition),
+                                      type == "dose comparison"   ~ "Flu dose (16 vs 8 ug/ml)",
+                                      TRUE                        ~ "Replicate control"))
+}
+
+de_comparisons <- bind_rows(
+  crossing(ref = c("YPD.1", "YPD.2"), test = c("Flu.1", "Flu.2")),
+  crossing(ref = c("YPD.1", "YPD.2"), test = "sc2glu.2"),
+  crossing(ref = c("Flu.1", "Flu.2"), test = "sc2glu.2"),
+  tibble(ref = "YPD.1", test = "YPD.2"),
+  tibble(ref = "Flu.2", test = "Flu.1")   # log2FC = 16 / 8 ug/ml
+) %>%
+  annotate_comparisons()
+
+knitr::kable(de_comparisons %>% select(comparison, flu_doses, condition_pair, type))
+
+run_de <- function(ref, test) {
+  label   <- paste(ref, "vs", test)
+  strains <- strains_for(ref, test)
+  genes   <- intersect(rownames(raw[[ref]]), rownames(raw[[test]]))
+
+  counts <- round(cbind(as.matrix(raw[[ref]][genes, strains]),
+                        as.matrix(raw[[test]][genes, strains])))
+  colnames(counts) <- paste(rep(strains, 2), rep(c(ref, test), each = length(strains)), sep = "|")
+  keep   <- rowSums(counts >= MIN_COUNT) >= MIN_FRAC * ncol(counts)
+  counts <- counts[keep, , drop = FALSE]
+
+  col_data <- data.frame(
+    row.names = colnames(counts),
+    strain    = factor(rep(strains, 2)),
+    condition = factor(rep(c(ref, test), each = length(strains)), levels = c(ref, test))
+  )
+
+  dds <- DESeqDataSetFromMatrix(counts, col_data, design = ~ strain + condition)
+  dds <- tryCatch(
+    estimateSizeFactors(dds),
+    error = function(e) {
+      message(label, ": standard size factors failed, using type = 'poscounts'")
+      estimateSizeFactors(dds, type = "poscounts")
+    }
+  )
+  dds <- DESeq(dds, quiet = TRUE, parallel = N_CORES > 1,
+               BPPARAM = MulticoreParam(N_CORES))
+
+  res <- results(dds, contrast = c("condition", test, ref), alpha = PADJ_CUT)
+
+  out <- as.data.frame(res) %>%
+    rownames_to_column("gene") %>%
+    mutate(comparison = label,
+           n_strains  = length(strains),
+           direction  = case_when(
+             padj < PADJ_CUT & log2FoldChange >  LFC_CUT ~ paste("up in", test),
+             padj < PADJ_CUT & log2FoldChange < -LFC_CUT ~ paste("up in", ref),
+             TRUE ~ "not DE"))
+
+  cat(sprintf("%-22s %3d strains | %4d genes | up in %-9s %4d | up in %-9s %4d\n",
+              label, length(strains), nrow(counts),
+              test, sum(out$direction == paste("up in", test)),
+              ref,  sum(out$direction == paste("up in", ref))))
+  out
+}
+```
+
+```{r run_de}
+de_res <- map2(de_comparisons$ref, de_comparisons$test, run_de)
+names(de_res) <- de_comparisons$comparison
+
+de_all <- bind_rows(de_res) %>%
+  left_join(de_comparisons %>% select(comparison, condition_pair, type), by = "comparison") %>%
+  mutate(comparison = factor(comparison, levels = de_comparisons$comparison))
+
+gene_names <- setNames(gene_label(unique(de_all$gene)), unique(de_all$gene))
+de_all <- de_all %>% mutate(gene_name = gene_names[gene], .after = gene)
+
+de_summary <- de_all %>%
+  group_by(comparison, condition_pair, type) %>%
+  summarise(n_strains      = first(n_strains),
+            n_genes_tested = sum(!is.na(padj)),
+            n_up_in_test   = sum(padj < PADJ_CUT & log2FoldChange >  LFC_CUT, na.rm = TRUE),
+            n_up_in_ref    = sum(padj < PADJ_CUT & log2FoldChange < -LFC_CUT, na.rm = TRUE),
+            n_DE_total     = n_up_in_test + n_up_in_ref,
+            .groups = "drop")
+knitr::kable(de_summary,
+             caption = "DE genes per comparison (padj < 0.05, |log2FC| > 1); log2FC = test / ref")
+
+for (nm in names(de_res)) {
+  write.csv(de_all %>% filter(comparison == nm) %>% arrange(padj),
+            file.path(OUT_DIR, paste0("DE_", gsub(" ", "_", nm), ".csv")), row.names = FALSE)
+}
+write.csv(de_summary, file.path(OUT_DIR, "DE_summary.csv"), row.names = FALSE)
+```
+
+## Condition effect vs batch baseline
+
+YPD.1 vs YPD.2 is the only true replicate control, so it is the batch baseline.
+Flu.2 vs Flu.1 is shown separately: it measures dose and batch together.
+
+```{r de_counts_plot, fig.width = 9, fig.height = 5}
+p_de_counts <- de_summary %>%
+  mutate(comparison = fct_reorder(comparison, n_DE_total)) %>%
+  ggplot(aes(n_DE_total, comparison, fill = condition_pair)) +
+  geom_col() +
+  scale_fill_manual(values = c("YPD vs Fluconazole"    = "#E15759",
+                               "YPD vs sc2glu"         = "#59A14F",
+                               "Fluconazole vs sc2glu" = "#F28E2B",
+                               "Flu dose (16 vs 8 ug/ml)" = "#B07AA1",
+                               "Replicate control"     = "grey60")) +
+  labs(x = "DE genes (padj < 0.05, |log2FC| > 1)", y = NULL, fill = NULL) +
+  theme_classic(base_size = 13)
+p_de_counts
+
+ggsave(file.path(OUT_DIR, "DE_counts_vs_replicate_controls.pdf"), p_de_counts,
+       width = 9, height = 5, units = "in")
+```
+
+## Volcano plots
+
+```{r de_volcano, fig.width = 16, fig.height = 10}
+volcano_df <- de_all %>%
+  filter(!is.na(padj)) %>%
+  mutate(sig = case_when(
+    padj < PADJ_CUT & log2FoldChange >  LFC_CUT ~ "up in test",
+    padj < PADJ_CUT & log2FoldChange < -LFC_CUT ~ "up in ref",
+    TRUE ~ "not DE"),
+    neg_log10_padj = pmin(-log10(padj), 50))   # cap so a few genes don't squash the y-axis
+
+p_volcano <- ggplot(volcano_df, aes(log2FoldChange, neg_log10_padj, color = sig)) +
+  geom_point(size = 0.4, alpha = 0.5, shape = 16) +
+  geom_point(data = ~ filter(.x, gene %in% erg_orfs), color = "black", size = 0.9, shape = 1) +
+  geom_vline(xintercept = c(-LFC_CUT, LFC_CUT), linetype = "dashed", linewidth = 0.3) +
+  geom_hline(yintercept = -log10(PADJ_CUT), linetype = "dashed", linewidth = 0.3) +
+  scale_color_manual(values = c("up in test" = "#D6604D", "up in ref" = "#2166AC", "not DE" = "grey75")) +
+  facet_wrap(~ comparison, ncol = 4) +
+  labs(x = "log2 fold change (test / ref)", y = "-log10 padj (capped at 50)", color = NULL,
+       caption = "Black circles: ergosterol genes (GO:0006696)") +
+  theme_classic(base_size = 12) +
+  theme(strip.background = element_blank(), strip.text = element_text(face = "bold"),
+        legend.position = "bottom")
+p_volcano
+
+ggsave(file.path(OUT_DIR, "DE_volcano_all_comparisons.pdf"), p_volcano,
+       width = 16, height = 10, units = "in")
+```
+
+## Do the comparisons agree?
+
+Spearman correlation of log2FC across genes between comparisons. Comparisons
+that share a dataset correlate partly because they share that dataset's noise;
+the cleanest checks are pairs with no dataset in common (e.g. YPD.1 vs Flu.1 and
+YPD.2 vs Flu.2). For YPD vs Flu, such pairs also differ in Flu dose (16 vs 8 ug/ml),
+so their agreement reflects the response shared by both doses.
+
+```{r de_agreement, fig.width = 10, fig.height = 9}
+lfc_mat <- de_all %>%
+  select(gene, comparison, log2FoldChange) %>%
+  pivot_wider(names_from = comparison, values_from = log2FoldChange) %>%
+  column_to_rownames("gene") %>%
+  as.matrix()
+
+lfc_cor <- cor(lfc_mat, use = "pairwise.complete.obs", method = "spearman")
+
+p_lfc_cor <- as.data.frame(lfc_cor) %>%
+  rownames_to_column("a") %>%
+  pivot_longer(-a, names_to = "b", values_to = "rho") %>%
+  mutate(a = factor(a, levels = de_comparisons$comparison),
+         b = factor(b, levels = rev(de_comparisons$comparison))) %>%
+  ggplot(aes(a, b, fill = rho)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = sprintf("%.2f", rho)), size = 2.6) +
+  scale_fill_gradient2(low = "#2166AC", mid = "white", high = "#B2182B",
+                       midpoint = 0, limits = c(-1, 1)) +
+  labs(x = NULL, y = NULL, fill = "Spearman\nrho (log2FC)") +
+  coord_fixed() +
+  theme_minimal(base_size = 11) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), panel.grid = element_blank())
+p_lfc_cor
+
+ggsave(file.path(OUT_DIR, "DE_log2FC_correlation.pdf"), p_lfc_cor,
+       width = 10, height = 9, units = "in")
+```
+
+## Consensus genes per condition pair
+
+A gene is a consensus DE gene for a condition pair if it passes the DE cutoff
+in the same direction in every comparison of that pair: for YPD vs Fluconazole,
+both YPD replicates against both Flu doses (4); for YPD vs sc2glu, both YPD
+replicates against sc2glu.2 (2); for Fluconazole vs sc2glu, both Flu doses
+against sc2glu.2 (2). For the Fluconazole pairs a consensus gene responds at
+both 8 and 16 ug/ml; dose-specific genes are in the next section.
+
+```{r consensus}
+n_cmp_per_pair <- de_comparisons %>%
+  filter(type == "cross-condition") %>%
+  count(condition_pair, name = "n_expected")
+
+consensus <- de_all %>%
+  filter(type == "cross-condition") %>%
+  group_by(condition_pair, gene, gene_name) %>%
+  summarise(n_comparisons = n(),
+            n_up   = sum(padj < PADJ_CUT & log2FoldChange >  LFC_CUT, na.rm = TRUE),
+            n_down = sum(padj < PADJ_CUT & log2FoldChange < -LFC_CUT, na.rm = TRUE),
+            mean_log2FC = mean(log2FoldChange),
+            min_abs_log2FC = min(abs(log2FoldChange)),
+            .groups = "drop") %>%
+  left_join(n_cmp_per_pair, by = "condition_pair") %>%
+  filter(n_comparisons == n_expected, n_up == n_expected | n_down == n_expected) %>%
+  mutate(direction = ifelse(n_up == n_expected,
+                            paste("up in", str_remove(condition_pair, "^.* vs ")),
+                            paste("up in", str_remove(condition_pair, " vs .*$")))) %>%
+  arrange(condition_pair, desc(abs(mean_log2FC)))
+
+knitr::kable(consensus %>% count(condition_pair, direction),
+             caption = "Consensus DE genes (same direction in every comparison of the pair)")
+
+for (cp in unique(consensus$condition_pair)) {
+  print(knitr::kable(consensus %>% filter(condition_pair == cp) %>% head(20) %>%
+                       select(gene, gene_name, direction, mean_log2FC, min_abs_log2FC),
+                     digits = 2, caption = paste("Top consensus genes:", cp)))
+}
+
+write.csv(consensus, file.path(OUT_DIR, "DE_consensus_genes_per_condition_pair.csv"), row.names = FALSE)
+```
+
+## Dose-specific genes (YPD vs Fluconazole)
+
+For each Flu dose, a gene's call against YPD is "up" or "down" if it passes the
+DE cutoff in that direction against both YPD replicates, "none" if it passes
+against neither, and "partial" otherwise. A gene is specific to one dose if it is
+up (or down) at that dose and "none" at the other; "both doses" is the same set
+as the YPD vs Fluconazole consensus genes.
+
+`log2FC_16_vs_8` / `padj_16_vs_8` come from the direct Flu.2 vs Flu.1 comparison;
+`supported_16_vs_8` is TRUE when that comparison is significant in the expected
+direction. Each dose is a single 10x run, so a dose-specific gene may reflect
+dose, batch, or both.
+
+```{r dose_specific}
+dose_calls <- de_all %>%
+  filter(condition_pair == "YPD vs Fluconazole") %>%
+  left_join(de_comparisons %>% select(comparison, test), by = "comparison") %>%
+  mutate(dose = recode(test, Flu.1 = "16", Flu.2 = "8"),
+         call = case_when(padj < PADJ_CUT & log2FoldChange >  LFC_CUT ~ "up",
+                          padj < PADJ_CUT & log2FoldChange < -LFC_CUT ~ "down",
+                          TRUE ~ "none")) %>%
+  group_by(gene, gene_name, dose) %>%
+  summarise(call = case_when(n() < 2           ~ NA_character_,   # not tested vs both YPD replicates
+                             all(call == "up")   ~ "up",
+                             all(call == "down") ~ "down",
+                             all(call == "none") ~ "none",
+                             TRUE                ~ "partial"),
+            mean_log2FC = mean(log2FoldChange),
+            .groups = "drop") %>%
+  pivot_wider(names_from = dose, values_from = c(call, mean_log2FC))
+
+direct_16_vs_8 <- de_all %>%
+  filter(comparison == "Flu.2 vs Flu.1") %>%
+  select(gene, log2FC_16_vs_8 = log2FoldChange, padj_16_vs_8 = padj)
+
+dose_specific <- dose_calls %>%
+  mutate(dose_class = case_when(
+    call_16 %in% c("up", "down") & call_8 == "none"  ~ paste(call_16, "in Flu at 16 ug/ml only"),
+    call_8  %in% c("up", "down") & call_16 == "none" ~ paste(call_8,  "in Flu at 8 ug/ml only"),
+    call_16 %in% c("up", "down") & call_16 == call_8 ~ paste(call_16, "in Flu at both doses"),
+    TRUE ~ NA_character_)) %>%
+  filter(!is.na(dose_class)) %>%
+  left_join(direct_16_vs_8, by = "gene") %>%
+  mutate(expected_sign = case_when(
+           dose_class == "up in Flu at 16 ug/ml only"   ~  1,
+           dose_class == "down in Flu at 16 ug/ml only" ~ -1,
+           dose_class == "up in Flu at 8 ug/ml only"    ~ -1,
+           dose_class == "down in Flu at 8 ug/ml only"  ~  1),
+         supported_16_vs_8 = !is.na(expected_sign) & !is.na(padj_16_vs_8) &
+           padj_16_vs_8 < PADJ_CUT & sign(log2FC_16_vs_8) == expected_sign) %>%
+  select(-expected_sign) %>%
+  arrange(dose_class, desc(abs(coalesce(mean_log2FC_16, 0) - coalesce(mean_log2FC_8, 0))))
+
+knitr::kable(dose_specific %>%
+               group_by(dose_class) %>%
+               summarise(n_genes = n(), n_supported_16_vs_8 = sum(supported_16_vs_8), .groups = "drop"),
+             caption = "YPD vs Fluconazole genes by dose (up/down = in Flu relative to YPD)")
+
+for (cl in grep("only", unique(dose_specific$dose_class), value = TRUE)) {
+  print(knitr::kable(dose_specific %>% filter(dose_class == cl) %>% head(15) %>%
+                       select(gene, gene_name, mean_log2FC_16, mean_log2FC_8,
+                              log2FC_16_vs_8, padj_16_vs_8, supported_16_vs_8),
+                     digits = 3, caption = paste("Top genes:", cl)))
+}
+
+write.csv(dose_specific, file.path(OUT_DIR, "DE_YPD_vs_Flu_dose_specific_genes.csv"), row.names = FALSE)
+```
+
+# Ergosterol enrichment in fluconazole
+
+Fluconazole inhibits Erg11; cells respond by inducing the ergosterol pathway
+(via Upc2/Ecm22). Two one-sided tests per YPD vs Flu comparison, on genes DESeq2
+tested (non-NA padj):
+
+- Fisher's exact test: are ergosterol genes over-represented among the genes up
+  in Flu (padj < 0.05, log2FC > 1)?
+- Wilcoxon rank-sum test: are ergosterol genes' log2FC higher than other genes'?
+  Uses every ergosterol gene, so it detects a moderate pathway-wide induction.
+
+Two further comparisons use a two-sided Wilcoxon:
+
+- YPD.1 vs YPD.2 (replicate control): ergosterol genes should not differ between
+  replicates; "up" means higher in YPD.2.
+- Flu.2 vs Flu.1 (dose comparison): "up" means higher at 16 than at 8 ug/ml. A
+  stronger ergosterol induction at the higher dose is expected, but each dose is a
+  single 10x run, so a difference here could also be batch.
+
+```{r ergosterol_enrichment}
+erg_test <- function(d, alternative) {
+  is_erg <- d$gene %in% erg_orfs
+  is_up  <- d$padj < PADJ_CUT & d$log2FoldChange > LFC_CUT
+  ft <- fisher.test(table(factor(is_erg, c(TRUE, FALSE)), factor(is_up, c(TRUE, FALSE))),
+                    alternative = "greater")
+  wt <- wilcox.test(d$log2FoldChange[is_erg], d$log2FoldChange[!is_erg],
+                    alternative = alternative)
+  tibble(n_tested         = nrow(d),
+         n_up_in_test     = sum(is_up),
+         n_erg_tested     = sum(is_erg),
+         n_erg_up_in_test = sum(is_erg & is_up),
+         pct_erg_up       = 100 * mean(is_up[is_erg]),
+         pct_other_up     = 100 * mean(is_up[!is_erg]),
+         fisher_OR        = unname(ft$estimate),
+         fisher_p         = ft$p.value,
+         median_lfc_erg   = median(d$log2FoldChange[is_erg]),
+         median_lfc_other = median(d$log2FoldChange[!is_erg]),
+         wilcox_p         = wt$p.value)
+}
+
+flu_cmp  <- de_comparisons$comparison[de_comparisons$condition_pair == "YPD vs Fluconazole"]
+ctrl_cmp <- c("Flu.2 vs Flu.1", "YPD.1 vs YPD.2")   # dose comparison, replicate control
+
+erg_enrich <- bind_rows(
+  de_all %>% filter(comparison %in% flu_cmp, !is.na(padj)) %>%
+    group_by(comparison) %>% group_modify(~ erg_test(.x, "greater")) %>% ungroup(),
+  de_all %>% filter(comparison %in% ctrl_cmp, !is.na(padj)) %>%
+    group_by(comparison) %>% group_modify(~ erg_test(.x, "two.sided")) %>% ungroup()
+)
+
+knitr::kable(erg_enrich %>% mutate(across(c(fisher_p, wilcox_p), ~ format(.x, digits = 2))),
+             digits = 3, caption = "Ergosterol genes among genes up in the test dataset")
+write.csv(erg_enrich, file.path(OUT_DIR, "DE_ergosterol_enrichment_Flu.csv"), row.names = FALSE)
+```
+
+```{r ergosterol_plots, fig.width = 13, fig.height = 8}
+erg_cmp <- c(flu_cmp, ctrl_cmp)
+
+erg_lfc <- de_all %>%
+  filter(comparison %in% erg_cmp, gene %in% erg_orfs) %>%
+  mutate(comparison = factor(comparison, levels = erg_cmp),
+         sig = ifelse(!is.na(padj) & padj < PADJ_CUT & abs(log2FoldChange) > LFC_CUT, "*", ""))
+
+gene_order <- erg_lfc %>% filter(comparison %in% flu_cmp) %>%
+  group_by(gene_name) %>% summarise(m = mean(log2FoldChange), .groups = "drop") %>%
+  arrange(m) %>% pull(gene_name)
+
+p_erg_heat <- erg_lfc %>%
+  mutate(gene_name = factor(gene_name, levels = gene_order)) %>%
+  ggplot(aes(comparison, gene_name, fill = log2FoldChange)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = sig), size = 4, vjust = 0.75) +
+  geom_vline(xintercept = length(flu_cmp) + 0.5, linewidth = 0.6) +
+  scale_fill_gradient2(low = "#2166AC", mid = "white", high = "#B2182B", midpoint = 0) +
+  labs(x = NULL, y = NULL, fill = "log2FC\n(test / ref)",
+       caption = paste("* padj < 0.05 and |log2FC| > 1; right of the line: Flu dose comparison",
+                       "(Flu.1 = 16, Flu.2 = 8 ug/ml) and YPD replicate control")) +
+  theme_minimal(base_size = 11) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), panel.grid = element_blank())
+
+p_erg_dist <- de_all %>%
+  filter(comparison %in% erg_cmp, !is.na(padj)) %>%
+  mutate(comparison = factor(comparison, levels = erg_cmp),
+         is_erg = gene %in% erg_orfs) %>%
+  ggplot(aes(comparison, log2FoldChange)) +
+  geom_violin(data = ~ filter(.x, !is_erg), fill = "grey90", color = "grey60") +
+  geom_jitter(data = ~ filter(.x, is_erg), width = 0.12, color = "#E15759", size = 1.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", linewidth = 0.3) +
+  geom_text(data = erg_enrich %>% mutate(comparison = factor(comparison, levels = erg_cmp)),
+            aes(x = comparison, y = Inf, label = sprintf("W: %.2g\nF: %.2g", wilcox_p, fisher_p)),
+            vjust = 1.3, size = 3, inherit.aes = FALSE) +
+  labs(x = NULL, y = "log2FC (test / ref)",
+       caption = "W = Wilcoxon p (ergosterol vs other genes); F = Fisher p (DE up in test)") +
+  theme_classic(base_size = 11) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+p_erg <- p_erg_heat | p_erg_dist
+p_erg
+
+ggsave(file.path(OUT_DIR, "DE_ergosterol_Flu.pdf"), p_erg, width = 13, height = 8, units = "in")
+```
+
+# GO enrichment of consensus genes
+
+Unbiased check: GO biological-process enrichment of the consensus genes in each
+direction for each condition pair (background: genes tested in that condition
+pair). For YPD vs Fluconazole (genes responding at both doses), sterol terms
+should come up without being chosen.
+
+```{r consensus_go, fig.width = 13, fig.height = 11}
+run_go <- function(genes, universe, label) {
+  if (length(genes) < 5) {
+    cat(label, ": fewer than 5 genes, skipped\n")
+    return(NULL)
+  }
+  ego <- enrichGO(genes, OrgDb = org.Sc.sgd.db, keyType = "ORF", ont = "BP",
+                  universe = universe, pvalueCutoff = 0.05, qvalueCutoff = 0.2,
+                  minGSSize = 5, maxGSSize = 500)
+  if (is.null(ego) || nrow(as.data.frame(ego)) == 0) {
+    cat(label, ": no enriched GO terms\n")
+    return(NULL)
+  }
+  as.data.frame(ego) %>% mutate(gene_list = label)
+}
+
+go_lists <- consensus %>%
+  mutate(list = paste0(condition_pair, ": ", direction)) %>%
+  split(.$list)
+
+consensus_go <- bind_rows(imap(go_lists, function(d, label) {
+  universe <- unique(de_all$gene[de_all$condition_pair == d$condition_pair[1] & !is.na(de_all$padj)])
+  run_go(d$gene, universe, label)
+}))
+
+if (nrow(consensus_go) > 0) {
+  consensus_go <- consensus_go %>%
+    mutate(sterol_term = grepl("sterol|steroid", Description, ignore.case = TRUE))
+
+  knitr::kable(consensus_go %>% group_by(gene_list) %>%
+                 slice_min(p.adjust, n = 8, with_ties = FALSE) %>%
+                 select(gene_list, Description, GeneRatio, BgRatio, p.adjust),
+               digits = 4, caption = "Top GO BP terms per consensus gene list")
+
+  p_go <- consensus_go %>%
+    group_by(gene_list) %>% slice_min(p.adjust, n = 8, with_ties = FALSE) %>% ungroup() %>%
+    mutate(Description = str_trunc(Description, 50)) %>%
+    ggplot(aes(-log10(p.adjust), reorder(Description, -log10(p.adjust)),
+               size = Count, color = sterol_term)) +
+    geom_point() +
+    scale_color_manual(values = c("TRUE" = "#E15759", "FALSE" = "#4E79A7"),
+                       labels = c("TRUE" = "sterol / steroid", "FALSE" = "other")) +
+    facet_wrap(~ gene_list, scales = "free_y", ncol = 2) +
+    labs(x = "-log10 padj", y = NULL, size = "Genes", color = NULL) +
+    theme_classic(base_size = 11) +
+    theme(axis.text.y = element_text(size = 8), strip.background = element_blank(),
+          strip.text = element_text(face = "bold"))
+  print(p_go)
+
+  ggsave(file.path(OUT_DIR, "DE_GO_consensus_genes.pdf"), p_go, width = 13, height = 11, units = "in")
+  write.csv(consensus_go, file.path(OUT_DIR, "DE_GO_consensus_genes.csv"), row.names = FALSE)
+}
+```
+
+# Galactose
+
+Galactose (scgal.1) against YPD (both replicates), against each fluconazole
+dose and against sc2glu.2. log2FC = galactose / ref, so positive = higher in
+galactose. sc2glu.2 vs Galactose is the cleanest carbon-source contrast (same
+synthetic complete medium, glucose vs galactose). Galactose has a single run, so
+every comparison here is condition + batch, and its "consensus" genes are
+reproducible across the reference datasets, not across galactose replicates.
+
+These comparisons use the strains shared by all six datasets including scgal.1,
+fewer than the original comparisons; compare DE gene counts with that in mind
+(`n_strains` in the table).
+
+As a positive control, genes annotated to GO:0006012 "galactose metabolic
+process" (GAL1, GAL7, GAL10, ...) should be strongly up in galactose against
+every glucose-grown reference.
+
+```{r gal_de}
+de_comparisons_gal <- bind_rows(
+  crossing(ref = c("YPD.1", "YPD.2"), test = "scgal.1"),
+  crossing(ref = c("Flu.1", "Flu.2"), test = "scgal.1"),
+  tibble(ref = "sc2glu.2", test = "scgal.1")
+) %>%
+  annotate_comparisons()
+
+knitr::kable(de_comparisons_gal %>% select(comparison, flu_doses, condition_pair, type))
+
+de_res_gal <- map2(de_comparisons_gal$ref, de_comparisons_gal$test, run_de)
+names(de_res_gal) <- de_comparisons_gal$comparison
+
+# Original + galactose comparisons together
+cmp_all_gal <- bind_rows(de_comparisons, de_comparisons_gal)
+
+de_all_gal <- bind_rows(c(de_res, de_res_gal)) %>%
+  left_join(cmp_all_gal %>% select(comparison, condition_pair, type), by = "comparison") %>%
+  mutate(comparison = factor(comparison, levels = cmp_all_gal$comparison))
+
+gene_names_gal <- setNames(gene_label(unique(de_all_gal$gene)), unique(de_all_gal$gene))
+de_all_gal <- de_all_gal %>% mutate(gene_name = gene_names_gal[gene], .after = gene)
+
+de_summary_gal <- de_all_gal %>%
+  group_by(comparison, condition_pair, type) %>%
+  summarise(n_strains      = first(n_strains),
+            n_genes_tested = sum(!is.na(padj)),
+            n_up_in_test   = sum(padj < PADJ_CUT & log2FoldChange >  LFC_CUT, na.rm = TRUE),
+            n_up_in_ref    = sum(padj < PADJ_CUT & log2FoldChange < -LFC_CUT, na.rm = TRUE),
+            n_DE_total     = n_up_in_test + n_up_in_ref,
+            .groups = "drop")
+knitr::kable(de_summary_gal,
+             caption = "DE genes per comparison, with galactose (padj < 0.05, |log2FC| > 1); log2FC = test / ref")
+
+for (nm in names(de_res_gal)) {
+  write.csv(de_all_gal %>% filter(comparison == nm) %>% arrange(padj),
+            file.path(OUT_DIR, paste0("DE_", gsub(" ", "_", nm), ".csv")), row.names = FALSE)
+}
+write.csv(de_summary_gal, file.path(OUT_DIR, "DE_summary_with_galactose.csv"), row.names = FALSE)
+
+# Galactose metabolism gene set (positive control)
+gal_set <- AnnotationDbi::select(org.Sc.sgd.db, keys = "GO:0006012", keytype = "GOALL",
+                                 columns = c("ORF", "GENENAME")) %>%
+  filter(!is.na(ORF)) %>%
+  distinct(orf = ORF, gene_name = GENENAME) %>%
+  mutate(gene_name = coalesce(gene_name, orf)) %>%
+  arrange(gene_name)
+gal_orfs <- gal_set$orf
+cat("Galactose metabolism genes (GO:0006012):", nrow(gal_set), "\n")
+```
+
+## Condition effect vs batch baseline, with galactose
+
+```{r gal_de_counts_plot, fig.width = 10, fig.height = 7}
+p_de_counts_gal <- de_summary_gal %>%
+  mutate(comparison = fct_reorder(comparison, n_DE_total)) %>%
+  ggplot(aes(n_DE_total, comparison, fill = condition_pair)) +
+  geom_col() +
+  scale_fill_manual(values = c("YPD vs Fluconazole"       = "#E15759",
+                               "YPD vs sc2glu"            = "#59A14F",
+                               "Fluconazole vs sc2glu"    = "#F28E2B",
+                               "Flu dose (16 vs 8 ug/ml)" = "#B07AA1",
+                               "YPD vs Galactose"         = "#4E79A7",
+                               "Fluconazole vs Galactose" = "#EDC948",
+                               "sc2glu vs Galactose"      = "#76B7B2",
+                               "Replicate control"        = "grey60")) +
+  labs(x = "DE genes (padj < 0.05, |log2FC| > 1)", y = NULL, fill = NULL) +
+  theme_classic(base_size = 13)
+p_de_counts_gal
+
+ggsave(file.path(OUT_DIR, "DE_counts_vs_replicate_controls_with_galactose.pdf"), p_de_counts_gal,
+       width = 10, height = 7, units = "in")
+```
+
+## Volcano plots, galactose comparisons
+
+```{r gal_volcano, fig.width = 18, fig.height = 5.5}
+volcano_gal_df <- de_all_gal %>%
+  filter(comparison %in% de_comparisons_gal$comparison, !is.na(padj)) %>%
+  mutate(comparison = droplevels(comparison),
+         sig = case_when(
+           padj < PADJ_CUT & log2FoldChange >  LFC_CUT ~ "up in Galactose",
+           padj < PADJ_CUT & log2FoldChange < -LFC_CUT ~ "up in ref",
+           TRUE ~ "not DE"),
+         neg_log10_padj = pmin(-log10(padj), 50))
+
+p_volcano_gal <- ggplot(volcano_gal_df, aes(log2FoldChange, neg_log10_padj, color = sig)) +
+  geom_point(size = 0.4, alpha = 0.5, shape = 16) +
+  geom_point(data = ~ filter(.x, gene %in% gal_orfs), color = "black", size = 0.9, shape = 1) +
+  geom_text_repel(data = ~ filter(.x, gene %in% gal_orfs, sig != "not DE"),
+                  aes(label = gene_name), color = "black", size = 2.5, max.overlaps = 20) +
+  geom_vline(xintercept = c(-LFC_CUT, LFC_CUT), linetype = "dashed", linewidth = 0.3) +
+  geom_hline(yintercept = -log10(PADJ_CUT), linetype = "dashed", linewidth = 0.3) +
+  scale_color_manual(values = c("up in Galactose" = "#D6604D", "up in ref" = "#2166AC", "not DE" = "grey75")) +
+  facet_wrap(~ comparison, nrow = 1) +
+  labs(x = "log2 fold change (Galactose / ref)", y = "-log10 padj (capped at 50)", color = NULL,
+       caption = "Black circles: galactose metabolism genes (GO:0006012)") +
+  theme_classic(base_size = 12) +
+  theme(strip.background = element_blank(), strip.text = element_text(face = "bold"),
+        legend.position = "bottom")
+p_volcano_gal
+
+ggsave(file.path(OUT_DIR, "DE_volcano_galactose_comparisons.pdf"), p_volcano_gal,
+       width = 18, height = 5.5, units = "in")
+```
+
+## Do the comparisons agree? With galactose
+
+```{r gal_agreement, fig.width = 12, fig.height = 11}
+lfc_cor_gal <- de_all_gal %>%
+  select(gene, comparison, log2FoldChange) %>%
+  pivot_wider(names_from = comparison, values_from = log2FoldChange) %>%
+  column_to_rownames("gene") %>%
+  as.matrix() %>%
+  cor(use = "pairwise.complete.obs", method = "spearman")
+
+p_lfc_cor_gal <- as.data.frame(lfc_cor_gal) %>%
+  rownames_to_column("a") %>%
+  pivot_longer(-a, names_to = "b", values_to = "rho") %>%
+  mutate(a = factor(a, levels = cmp_all_gal$comparison),
+         b = factor(b, levels = rev(cmp_all_gal$comparison))) %>%
+  ggplot(aes(a, b, fill = rho)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = sprintf("%.2f", rho)), size = 2.3) +
+  scale_fill_gradient2(low = "#2166AC", mid = "white", high = "#B2182B",
+                       midpoint = 0, limits = c(-1, 1)) +
+  labs(x = NULL, y = NULL, fill = "Spearman\nrho (log2FC)") +
+  coord_fixed() +
+  theme_minimal(base_size = 11) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), panel.grid = element_blank())
+p_lfc_cor_gal
+
+ggsave(file.path(OUT_DIR, "DE_log2FC_correlation_with_galactose.pdf"), p_lfc_cor_gal,
+       width = 12, height = 11, units = "in")
+```
+
+## Galactose metabolism genes
+
+```{r gal_genes, fig.width = 7, fig.height = 7}
+gal_lfc <- de_all_gal %>%
+  filter(comparison %in% de_comparisons_gal$comparison, gene %in% gal_orfs) %>%
+  mutate(comparison = droplevels(comparison),
+         sig = ifelse(!is.na(padj) & padj < PADJ_CUT & abs(log2FoldChange) > LFC_CUT, "*", ""))
+
+# One-sided Wilcoxon per comparison: are galactose metabolism genes' log2FC
+# (Galactose / ref) higher than other genes'?
+gal_wilcox <- de_all_gal %>%
+  filter(comparison %in% de_comparisons_gal$comparison, !is.na(padj)) %>%
+  group_by(comparison) %>%
+  summarise(n_gal_tested   = sum(gene %in% gal_orfs),
+            n_gal_up       = sum(gene %in% gal_orfs & padj < PADJ_CUT & log2FoldChange > LFC_CUT),
+            median_lfc_gal = median(log2FoldChange[gene %in% gal_orfs]),
+            median_lfc_other = median(log2FoldChange[!gene %in% gal_orfs]),
+            wilcox_p = wilcox.test(log2FoldChange[gene %in% gal_orfs],
+                                   log2FoldChange[!gene %in% gal_orfs],
+                                   alternative = "greater")$p.value,
+            .groups = "drop")
+knitr::kable(gal_wilcox %>% mutate(wilcox_p = format(wilcox_p, digits = 2)), digits = 2,
+             caption = "Galactose metabolism genes (GO:0006012) in Galactose vs each reference")
+write.csv(gal_wilcox, file.path(OUT_DIR, "DE_galactose_metabolism_genes.csv"), row.names = FALSE)
+
+gal_gene_order <- gal_lfc %>%
+  group_by(gene_name) %>% summarise(m = mean(log2FoldChange), .groups = "drop") %>%
+  arrange(m) %>% pull(gene_name)
+
+p_gal_heat <- gal_lfc %>%
+  mutate(gene_name = factor(gene_name, levels = gal_gene_order)) %>%
+  ggplot(aes(comparison, gene_name, fill = log2FoldChange)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = sig), size = 4, vjust = 0.75) +
+  scale_fill_gradient2(low = "#2166AC", mid = "white", high = "#B2182B", midpoint = 0) +
+  labs(x = NULL, y = NULL, fill = "log2FC\n(Galactose / ref)",
+       caption = "* padj < 0.05 and |log2FC| > 1") +
+  theme_minimal(base_size = 11) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), panel.grid = element_blank())
+p_gal_heat
+
+ggsave(file.path(OUT_DIR, "DE_galactose_metabolism_genes.pdf"), p_gal_heat,
+       width = 7, height = 7, units = "in")
+```
+
+## Consensus genes, galactose pairs
+
+Same rule as above: DE in the same direction in every comparison of the pair
+(YPD vs Galactose: 2, Fluconazole vs Galactose: 2, sc2glu vs Galactose: 1, so
+for sc2glu this is simply the DE genes of sc2glu.2 vs scgal.1).
+
+```{r gal_consensus, fig.width = 13, fig.height = 11}
+gal_pairs <- unique(de_comparisons_gal$condition_pair)
+
+n_cmp_per_pair_gal <- de_comparisons_gal %>% count(condition_pair, name = "n_expected")
+
+consensus_gal <- de_all_gal %>%
+  filter(condition_pair %in% gal_pairs) %>%
+  group_by(condition_pair, gene, gene_name) %>%
+  summarise(n_comparisons = n(),
+            n_up   = sum(padj < PADJ_CUT & log2FoldChange >  LFC_CUT, na.rm = TRUE),
+            n_down = sum(padj < PADJ_CUT & log2FoldChange < -LFC_CUT, na.rm = TRUE),
+            mean_log2FC = mean(log2FoldChange),
+            min_abs_log2FC = min(abs(log2FoldChange)),
+            .groups = "drop") %>%
+  left_join(n_cmp_per_pair_gal, by = "condition_pair") %>%
+  filter(n_comparisons == n_expected, n_up == n_expected | n_down == n_expected) %>%
+  mutate(direction = ifelse(n_up == n_expected,
+                            paste("up in", str_remove(condition_pair, "^.* vs ")),
+                            paste("up in", str_remove(condition_pair, " vs .*$")))) %>%
+  arrange(condition_pair, desc(abs(mean_log2FC)))
+
+knitr::kable(consensus_gal %>% count(condition_pair, direction),
+             caption = "Consensus DE genes, galactose pairs")
+
+for (cp in unique(consensus_gal$condition_pair)) {
+  print(knitr::kable(consensus_gal %>% filter(condition_pair == cp) %>% head(20) %>%
+                       select(gene, gene_name, direction, mean_log2FC, min_abs_log2FC),
+                     digits = 2, caption = paste("Top consensus genes:", cp)))
+}
+
+write.csv(consensus_gal, file.path(OUT_DIR, "DE_consensus_genes_galactose_pairs.csv"), row.names = FALSE)
+
+# GO enrichment of the galactose consensus genes (background: genes tested in that pair)
+go_lists_gal <- consensus_gal %>%
+  mutate(list = paste0(condition_pair, ": ", direction)) %>%
+  split(.$list)
+
+consensus_go_gal <- bind_rows(imap(go_lists_gal, function(d, label) {
+  universe <- unique(de_all_gal$gene[de_all_gal$condition_pair == d$condition_pair[1] &
+                                       !is.na(de_all_gal$padj)])
+  run_go(d$gene, universe, label)
+}))
+
+if (nrow(consensus_go_gal) > 0) {
+  consensus_go_gal <- consensus_go_gal %>%
+    mutate(galactose_term = grepl("galactose", Description, ignore.case = TRUE))
+
+  p_go_gal <- consensus_go_gal %>%
+    group_by(gene_list) %>% slice_min(p.adjust, n = 8, with_ties = FALSE) %>% ungroup() %>%
+    mutate(Description = str_trunc(Description, 50)) %>%
+    ggplot(aes(-log10(p.adjust), reorder(Description, -log10(p.adjust)),
+               size = Count, color = galactose_term)) +
+    geom_point() +
+    scale_color_manual(values = c("TRUE" = "#7B3F9E", "FALSE" = "#4E79A7"),
+                       labels = c("TRUE" = "galactose", "FALSE" = "other")) +
+    facet_wrap(~ gene_list, scales = "free_y", ncol = 2) +
+    labs(x = "-log10 padj", y = NULL, size = "Genes", color = NULL) +
+    theme_classic(base_size = 11) +
+    theme(axis.text.y = element_text(size = 8), strip.background = element_blank(),
+          strip.text = element_text(face = "bold"))
+  print(p_go_gal)
+
+  ggsave(file.path(OUT_DIR, "DE_GO_consensus_genes_galactose_pairs.pdf"), p_go_gal,
+         width = 13, height = 11, units = "in")
+  write.csv(consensus_go_gal, file.path(OUT_DIR, "DE_GO_consensus_genes_galactose_pairs.csv"),
+            row.names = FALSE)
+}
+```

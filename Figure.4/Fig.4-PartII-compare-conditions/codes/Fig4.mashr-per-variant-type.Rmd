@@ -1,0 +1,393 @@
+---
+title: "mashr per variant type vs combined analysis"
+author: "Akriti Agrawal"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    code_folding: show
+---
+
+**Question.** The main mashr analysis (`Fig4.mashr-condition-specific-eQTLs.Rmd`, run A, six
+datasets) analyses eQTLs of all four variant types together: one lead variant per gene, of any
+type, and a random set containing all types. Does analysing each variant type separately change
+the conclusions? If not, the combined analysis is used.
+
+**Per-type runs.** For each variant type (SNPs, InDels, SVs, gene-based CNVs), mashr is fitted
+with exactly the settings of run A, using only that type:
+
+- strong set: for each gene with a significant eQTL *of that type* in at least one dataset, that
+  type's lead variant (lowest P across datasets);
+- random set: the random pairs of that type (5,000 drawn, those tested in all datasets used);
+- the same noise-correlation estimate, data-driven (PCA + extreme deconvolution) and canonical
+  patterns, weights fitted on the random set, applied to the strong set.
+
+**Comparison.** For each type: pattern weights, sharing by sign and by magnitude between datasets,
+number of datasets in which significant eQTLs are shared, condition-specific and replicate-based
+calls. The combined run is shown both overall and restricted to the genes whose lead variant is of
+that type (the subset that is directly comparable with the per-type run).
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(tidyverse); library(data.table); library(parallel); library(patchwork); library(mashr)
+source("/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Agrawal_single_cell_eqtl_cell_cycle/shared_code/arial_font.R")  # Arial for all plots, as in Figs 2 and 5
+select <- dplyr::select; filter <- dplyr::filter
+```
+
+```{r config}
+ROOT <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all"
+MAIN_DIR <- "../results/mashr"                         # combined analysis (run A) and its caches
+OUTPUT_DIR <- "../results/mashr/per_variant_type"
+dir.create(OUTPUT_DIR, showWarnings = FALSE, recursive = TRUE)
+N_CORES <- as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", "16"))
+set.seed(42)
+
+SNP_DIR   <- "results_SNPs_96_MAF15_from_969_strains_with_double_id_final_filtered_for_ncount_less_than_5"
+INDEL_DIR <- "results_Indels_96_MAF15_with_double_id_final_filtered_for_ncount_less_than_5"
+CNV_DIR   <- "results_CNVs_with_double_id_is_not_needed_final_filtered_for_ncount_less_than_5_run_from_new_plink_files_no_chr17"
+SV_DIR    <- "results_SVs_with_double_id_is_not_needed_final_filtered_for_ncount_less_than_5_run_from_new_plink_files"
+VARIANTS  <- c("SNPs", "InDels", "SVs", "CNVs")
+make_cond <- function(res, tag, indel_dir = INDEL_DIR,
+                      indel_file = paste0("all_signif_Indels_", tag, "_96_MAF15_with_double_id_final_filtered_for_ncount_less_than_5_with_threshold.txt")) {
+  res <- file.path(ROOT, res)
+  list(signif = c(
+         SNPs   = file.path(res, paste0("all_signif_SNPs_", tag, "_96_MAF15_from_969_strains_with_double_id_final_filtered_for_ncount_less_than_5_with_threshold.txt")),
+         InDels = file.path(res, indel_file),
+         SVs    = file.path(res, paste0("all_signif_SVs_", tag, "_with_double_id_is_not_needed_final_filtered_for_ncount_less_than_5_run_from_new_plink_files_with_threshold.txt")),
+         CNVs   = file.path(res, paste0("all_signif_CNV_", tag, "_with_double_id_is_not_needed_final_filtered_for_ncount_less_than_5_run_from_new_plink_files_no_chr17_with_threshold.txt"))),
+       dirs = c(SNPs = file.path(res, SNP_DIR), InDels = file.path(res, indel_dir),
+                SVs = file.path(res, SV_DIR), CNVs = file.path(res, CNV_DIR)))
+}
+CONDS <- list(
+  YPD.1     = make_cond("YPD.1/fastlmm/results", "YPD.1",
+                        indel_dir  = "results_Indels_with_double_id_final_filtered_for_ncount_less_than_5",
+                        indel_file = "all_signif_Indels_YPD.1_with_double_id_final_filtered_for_ncount_less_than_5_with_threshold.txt"),
+  YPD.2     = make_cond("YPD.2/fastlmm/results", "YPD.2"),
+  Flu_16ug  = make_cond("Flu.1/fastlmm/results", "Flu.1"),
+  Flu_8ug   = make_cond("Flu.2/fastlmm/results", "Flu.2"),
+  sc2glu.2  = make_cond("sc2glu.2/fastlmm_sc2.glu.2_only/results", "sc2glu.2_only"),
+  galactose = make_cond("scgal.1/fastlmm/results", "scgal.1"))
+conds <- names(CONDS)
+LABELS <- c(YPD.1 = "YPD.1", YPD.2 = "YPD.2", Flu_16ug = "fluconazole_16ug", Flu_8ug = "fluconazole_8ug",
+            sc2glu.2 = "synthetic complete with glucose", galactose = "synthetic complete with galactose")
+
+signif <- lapply(CONDS, function(cfg) bind_rows(lapply(VARIANTS, function(vt)
+  fread(cfg$signif[[vt]], sep = "\t", quote = "", data.table = FALSE) %>%
+    transmute(Gene = Source_Phenotype, SNP, Variant_Type = vt, P = PValue))) %>%
+  distinct(Gene, SNP, Variant_Type, .keep_all = TRUE))
+random_pairs <- readRDS(file.path(MAIN_DIR, "random_pairs.rds"))       # same random pairs as run A
+```
+
+# 1. Strong sets per variant type and extraction
+
+```{r sets-extract}
+strong_vt <- lapply(setNames(VARIANTS, VARIANTS), function(vt) bind_rows(signif) %>%
+  filter(Variant_Type == vt) %>% group_by(Gene) %>% slice_min(P, n = 1, with_ties = FALSE) %>% ungroup() %>%
+  select(Gene, SNP, Variant_Type))
+knitr::kable(tibble(variant_type = VARIANTS, strong_genes = sapply(strong_vt, nrow),
+                    random_pairs = sapply(VARIANTS, function(vt) sum(random_pairs$Variant_Type == vt))))
+
+# effect sizes and SEs: reuse the combined analysis' extraction, read only the missing pairs
+key <- function(d) paste(d$Gene, d$SNP, d$Variant_Type, sep = "|")
+need <- bind_rows(strong_vt) %>% distinct()
+extracted <- lapply(setNames(conds, conds), function(cn) {
+  cache <- file.path(OUTPUT_DIR, paste0("extract_", cn, ".rds"))
+  if (file.exists(cache)) return(readRDS(cache))
+  base <- readRDS(file.path(MAIN_DIR, paste0("extract_", cn, ".rds")))
+  todo <- need[!key(need) %in% key(base), ]
+  jobs <- todo %>% group_by(Variant_Type, Gene) %>% summarise(snps = list(SNP), .groups = "drop")
+  add <- rbindlist(mclapply(seq_len(nrow(jobs)), function(i) {
+    vt <- jobs$Variant_Type[i]; g <- jobs$Gene[i]
+    f <- file.path(CONDS[[cn]]$dirs[[vt]], g, paste0(g, ".first_assoc.txt"))
+    if (!file.exists(f)) return(NULL)
+    d <- tryCatch(fread(f, select = c("SNP", "SnpWeight", "SnpWeightSE", "PValue"), showProgress = FALSE), error = function(e) NULL)
+    if (is.null(d)) return(NULL)
+    d <- d[SNP %in% jobs$snps[[i]]]; if (!nrow(d)) return(NULL)
+    d[, `:=`(Gene = g, Variant_Type = vt)]
+  }, mc.cores = N_CORES))
+  ex <- bind_rows(base, as.data.frame(add)) %>% distinct(Gene, SNP, Variant_Type, .keep_all = TRUE)
+  saveRDS(ex, cache); ex
+})
+```
+
+# 2. Fit mashr per variant type (run A settings)
+
+```{r fit}
+make_mats <- function(pairs) {
+  k <- key(pairs)
+  B <- S <- matrix(NA_real_, length(k), length(conds), dimnames = list(k, conds))
+  for (cn in conds) { e <- extracted[[cn]]; m <- match(k, key(e)); B[, cn] <- e$SnpWeight[m]; S[, cn] <- e$SnpWeightSE[m] }
+  list(B = B, S = S, bad = is.na(B) | is.na(S) | !is.finite(S) | S <= 0)
+}
+fit_vt <- function(vt) {
+  cache <- file.path(OUTPUT_DIR, paste0("mash_", vt, ".rds"))
+  if (file.exists(cache)) return(readRDS(cache))
+  ms <- make_mats(strong_vt[[vt]]); n_miss <- sum(rowSums(ms$bad) > 0); ms$B[ms$bad] <- 0; ms$S[ms$bad] <- 1e3
+  mr <- make_mats(random_pairs[random_pairs$Variant_Type == vt, ]); keep <- rowSums(mr$bad) == 0
+  d_tmp <- mash_set_data(mr$B[keep, ], mr$S[keep, ]); Vhat <- estimate_null_correlation_simple(d_tmp)
+  d_r <- mash_set_data(mr$B[keep, ], mr$S[keep, ], V = Vhat); d_s <- mash_set_data(ms$B, ms$S, V = Vhat)
+  U_ed <- cov_ed(d_s, cov_pca(d_s, npc = 5))
+  m_r <- mash(d_r, Ulist = c(U_ed, cov_canonical(d_r)), outputlevel = 1)
+  m_s <- mash(d_s, g = get_fitted_g(m_r), fixg = TRUE)
+  out <- list(vt = vt, Vhat = Vhat, m_random = m_r, m_strong = m_s, n_strong = nrow(ms$B), n_missing = n_miss, n_random = sum(keep))
+  saveRDS(out, cache); out
+}
+fits <- lapply(setNames(VARIANTS, VARIANTS), fit_vt)
+fitA <- readRDS(file.path(MAIN_DIR, "mash_A_main.rds"))                 # combined analysis
+knitr::kable(tibble(variant_type = VARIANTS, strong_genes = sapply(fits, `[[`, "n_strong"),
+                    with_missing_dataset = sapply(fits, `[[`, "n_missing"), random_pairs_used = sapply(fits, `[[`, "n_random")),
+             caption = "Per-type fits")
+```
+
+# 3. Comparison with the combined analysis
+
+```{r compare}
+shared_mag <- function(a, b) sign(a) == sign(b) & abs(a / b) >= 0.5 & abs(a / b) <= 2
+summarise_fit <- function(pm, lf, label) {
+  sig <- rowSums(lf < 0.05) > 0
+  s <- pm[sig, , drop = FALSE]; rel <- if (nrow(s)) t(apply(s, 1, function(x) x / x[which.max(abs(x))])) else s
+  sh_sign <- function(a, b) { k <- lf[, a] < 0.05 | lf[, b] < 0.05; mean(sign(pm[k, a]) == sign(pm[k, b])) }
+  sh_mag  <- function(a, b) { k <- lf[, a] < 0.05 | lf[, b] < 0.05; mean(shared_mag(pm[k, a], pm[k, b])) }
+  spec <- sapply(conds, function(cn) sum(lf[, cn] < 0.05 & Reduce(`&`, lapply(setdiff(conds, cn), function(o) !shared_mag(pm[, cn], pm[, o])))))
+  dose <- function(d) lf[, d] < 0.05 & !shared_mag(pm[, "YPD.1"], pm[, d]) & !shared_mag(pm[, "YPD.2"], pm[, d])
+  tibble(analysis = label, strong_genes = nrow(pm), sig_any = sum(sig), pct_sig_any = 100 * mean(sig),
+         sig_all_6 = sum(rowSums(lf < 0.05) == 6),
+         pct_same_sign_all_6 = 100 * mean(rowSums(rel > 0) == 6), pct_magnitude_all_6 = 100 * mean(rowSums(rel >= 0.5) == 6),
+         sign_YPD1_YPD2 = sh_sign("YPD.1", "YPD.2"), sign_flu_YPD = mean(c(sh_sign("Flu_16ug", "YPD.1"), sh_sign("Flu_8ug", "YPD.1"), sh_sign("Flu_16ug", "YPD.2"), sh_sign("Flu_8ug", "YPD.2"))),
+         sign_SC_YPD = mean(c(sh_sign("sc2glu.2", "YPD.1"), sh_sign("sc2glu.2", "YPD.2"))),
+         sign_gal_YPD = mean(c(sh_sign("galactose", "YPD.1"), sh_sign("galactose", "YPD.2"))),
+         mag_YPD1_YPD2 = sh_mag("YPD.1", "YPD.2"), mag_flu_YPD = mean(c(sh_mag("Flu_16ug", "YPD.1"), sh_mag("Flu_8ug", "YPD.1"), sh_mag("Flu_16ug", "YPD.2"), sh_mag("Flu_8ug", "YPD.2"))),
+         mag_SC_YPD = mean(c(sh_mag("sc2glu.2", "YPD.1"), sh_mag("sc2glu.2", "YPD.2"))),
+         mag_gal_YPD = mean(c(sh_mag("galactose", "YPD.1"), sh_mag("galactose", "YPD.2"))),
+         specific_YPD.1 = spec[["YPD.1"]], specific_YPD.2 = spec[["YPD.2"]], specific_flu16 = spec[["Flu_16ug"]],
+         specific_flu8 = spec[["Flu_8ug"]], specific_SC = spec[["sc2glu.2"]], specific_gal = spec[["galactose"]],
+         flu_specific_both_doses = sum(dose("Flu_16ug") & dose("Flu_8ug")))
+}
+pmA <- get_pm(fitA$m_strong); lfA <- get_lfsr(fitA$m_strong)
+typeA <- sub("^.*\\|", "", rownames(pmA))
+cmp <- bind_rows(
+  summarise_fit(pmA, lfA, "Combined (all types)"),
+  bind_rows(lapply(VARIANTS, function(vt) bind_rows(
+    summarise_fit(get_pm(fits[[vt]]$m_strong), get_lfsr(fits[[vt]]$m_strong), paste(vt, "- separate run")),
+    summarise_fit(pmA[typeA == vt, , drop = FALSE], lfA[typeA == vt, , drop = FALSE], paste(vt, "- combined run, genes led by this type")))))) %>%
+  mutate(across(where(is.double), ~ round(.x, 2)))
+write.csv(cmp, file.path(OUTPUT_DIR, "per_variant_type_vs_combined.csv"), row.names = FALSE)
+knitr::kable(cmp %>% select(analysis, strong_genes, sig_any, pct_sig_any, sig_all_6, pct_same_sign_all_6, pct_magnitude_all_6),
+             caption = "Detection and sharing across all six datasets")
+knitr::kable(cmp %>% select(analysis, starts_with("sign_"), starts_with("mag_")),
+             caption = "Pairwise sharing by sign and by magnitude (fluconazole/SC/galactose vs YPD: mean over YPD.1 and YPD.2)")
+knitr::kable(cmp %>% select(analysis, starts_with("specific_"), flu_specific_both_doses),
+             caption = "Condition-specific calls (single-dataset definition) and fluconazole-specific at both doses")
+```
+
+## Pattern weights
+
+```{r weights, fig.width = 13, fig.height = 6}
+w <- bind_rows(
+  tibble(analysis = "Combined", pattern = names(get_estimated_pi(fitA$m_random)), weight = get_estimated_pi(fitA$m_random)),
+  bind_rows(lapply(VARIANTS, function(vt) { p <- get_estimated_pi(fits[[vt]]$m_random); tibble(analysis = vt, pattern = names(p), weight = p) }))) %>%
+  mutate(kind = case_when(pattern == "null" ~ "No effect", grepl("^ED_", pattern) ~ "Learned (data-driven)",
+                          pattern %in% c("equal_effects", "identity") | grepl("^simple_het", pattern) ~ "Shared (canonical)",
+                          TRUE ~ "One dataset only"))
+wk <- w %>% group_by(analysis, kind) %>% summarise(weight = 100 * sum(weight), .groups = "drop") %>%
+  mutate(analysis = factor(analysis, c("Combined", VARIANTS)))
+write.csv(w, file.path(OUTPUT_DIR, "pattern_weights_per_variant_type.csv"), row.names = FALSE)
+knitr::kable(wk %>% pivot_wider(names_from = kind, values_from = weight), digits = 2, caption = "Pattern weights (% of gene-variant pairs), summed by kind")
+p <- ggplot(wk %>% filter(kind != "No effect"), aes(analysis, weight, fill = kind)) +
+  geom_col(colour = "grey30", linewidth = 0.2) +
+  scale_fill_manual(values = c("Learned (data-driven)" = "#2C7FB8", "Shared (canonical)" = "#41AB5D", "One dataset only" = "#E6550D"), name = NULL) +
+  labs(title = "Weights of non-null sharing patterns: combined vs per variant type", x = NULL, y = "Weight (% of gene-variant pairs)") +
+  theme_classic(base_size = 13) + theme(plot.title = element_text(face = "bold", hjust = 0.5), legend.position = "top")
+print(p)
+ggsave(file.path(OUTPUT_DIR, "Fig_pattern_weights_per_variant_type.png"), p, width = 10, height = 6, dpi = 200, bg = "white")
+```
+
+# 4. Publication panels per variant type
+
+The panels of the combined analysis (`Fig4.mashr-condition-specific-eQTLs.Rmd`, sections 9.1,
+9.2c, 9.6b), drawn from each per-type fit in the same theme, size and dataset names. Files in
+`results/mashr/per_variant_type/<type>/`, prefix `Fig_mash_pub_<type>_`:
+
+- `pattern_weights`: weights of the sharing patterns, fitted on the random set of that type
+  (grey = no effect, blue = data-driven, green = equal effects, orange = one dataset only)
+- `<pattern>_heatmap`, `<pattern>_eigenvector`: correlation of effects between datasets and leading
+  eigenvector, for each data-driven pattern with a non-zero weight (up to three). For a type whose
+  data-driven patterns all have zero weight, no heatmap or eigenvector is drawn.
+- `n_datasets_significant`, `n_datasets_shared_sign`, `n_datasets_shared_magnitude`
+- `specific_vs_replicate_noise`: condition-specific eQTLs (defined with replicates) vs replicate noise
+
+Summary tables: `pub_panel_summary_per_variant_type.csv` (weights by kind, eQTL counts, and the
+share of each pattern's variance carried by its leading eigenvector, for the legends).
+
+```{r pub-panels-per-type, results = "asis"}
+AXIS_SIZE <- 18; PUB_SMALL <- 16; PUB_LABEL <- 5.5; PANEL_W <- 8.5; PANEL_H <- 8
+pub_theme <- theme_classic(base_size = 14) +
+  theme(axis.title   = element_text(face = "bold", size = AXIS_SIZE, color = "black"),
+        axis.text    = element_text(face = "bold", size = AXIS_SIZE, color = "black"),
+        plot.title   = element_text(hjust = 0.5, face = "bold", size = AXIS_SIZE),
+        legend.title = element_text(face = "bold", size = PUB_SMALL),
+        legend.text  = element_text(face = "bold", size = PUB_SMALL),
+        plot.background  = element_rect(fill = "white", color = NA),
+        panel.background = element_rect(fill = "white", color = NA))
+# dataset names and colours as in the combined analysis' publication panels
+PUB_LAB  <- c(YPD.1 = "YPD.1", YPD.2 = "YPD.2", Flu_16ug = "fluconazole.16", Flu_8ug = "fluconazole.8",
+              sc2glu.2 = "synthetic complete with glucose", galactose = "synthetic complete with galactose")
+PUB_COLS <- setNames(c("#81C784", "#2E7D32", "#BA68C8", "#6A1B9A", "#E53935", "#F9C80E"), PUB_LAB[conds])
+KIND_COLS <- c("No effect" = "grey75", "Data-driven pattern of sharing" = "#2C7FB8",
+               "Equal effects" = "#41AB5D", "One dataset only" = "#E6550D")
+wrap_lab <- function(x) stringr::str_wrap(x, 18)   # "synthetic complete with glucose" on two lines
+VT_NAME <- c(SNPs = "SNPs", InDels = "InDels", SVs = "SVs", CNVs = "gene-based CNVs")
+
+pub_panels <- function(vt) {
+  pl <- list()   # panels for the combined per-type figure
+  f <- fits[[vt]]; pi_hat <- get_estimated_pi(f$m_random); U <- f$m_random$fitted_g$Ulist
+  pm <- get_pm(f$m_strong); lf <- get_lfsr(f$m_strong)
+  out_dir <- file.path(OUTPUT_DIR, vt); dir.create(out_dir, showWarnings = FALSE)
+  save_fig <- function(p, name, w = PANEL_W, h = PANEL_H) {
+    fn <- file.path(out_dir, paste0("Fig_mash_pub_", vt, "_", name))
+    ggsave(paste0(fn, ".tiff"), p, width = w, height = h, dpi = 600, compression = "lzw", bg = "white")
+    ggsave(paste0(fn, ".png"),  p, width = w, height = h, dpi = 200, bg = "white")
+  }
+  pattern_title <- function(nm) { w <- 100 * pi_hat[[nm]]
+    sprintf("%s (weight %s%%)", nm, if (w >= 1) sprintf("%.1f", w) else sprintf("%.2f", w)) }
+
+  # (A) pattern weights
+  w <- tibble(pattern = names(pi_hat), weight = pi_hat) %>% filter(weight > 0) %>%
+    mutate(kind = case_when(pattern == "null" ~ "No effect",
+                            grepl("^ED_", pattern) ~ "Data-driven pattern of sharing",
+                            pattern %in% c("equal_effects", "identity") | grepl("^simple_het", pattern) ~ "Equal effects",
+                            TRUE ~ "One dataset only"),
+           label = case_when(pattern == "null" ~ "No effect", pattern == "equal_effects" ~ "Equal effects",
+                             pattern %in% conds ~ paste(PUB_LAB[pattern], "only"), TRUE ~ pattern),
+           label = fct_reorder(label, weight))
+  p <- ggplot(w, aes(weight * 100, label, fill = kind)) +
+    geom_col(colour = "black", linewidth = 0.4, width = 0.7) +
+    geom_text(aes(label = ifelse(weight >= 0.01, sprintf("%.1f%%", weight * 100), sprintf("%.2f%%", weight * 100))),
+              hjust = -0.15, size = PUB_LABEL, fontface = "bold") +
+    scale_fill_manual(values = KIND_COLS, name = NULL) +
+    scale_x_continuous(expand = expansion(mult = c(0, 0.3))) +
+    scale_y_discrete(labels = function(x) stringr::str_wrap(x, 22)) +   # long dataset names on two lines
+    labs(title = sprintf("%s: random set, %s pairs", VT_NAME[[vt]], format(f$n_random, big.mark = ",")),
+         x = "Weight (%)", y = NULL) +
+    # legend below the plot (inside the panel it covered the lowest y-axis labels)
+    pub_theme + theme(legend.position = "bottom") + guides(fill = guide_legend(nrow = 2))
+  print(p); save_fig(p, "pattern_weights"); pl$weights <- p
+
+  # (B-D) data-driven patterns: all non-zero ones go in the summary table; the leading one and any other
+  # with weight >= 1% get a correlation heatmap and leading eigenvector (smaller ones describe almost no pairs)
+  ed <- names(sort(pi_hat[grepl("^ED_", names(pi_hat)) & pi_hat > 0], decreasing = TRUE))
+  ed_show <- head(unique(c(head(ed, 1), ed[pi_hat[ed] >= 0.01])), 3)
+  for (nm in ed_show) {
+    cm <- cov2cor(U[[nm]]); dimnames(cm) <- list(PUB_LAB[conds], PUB_LAB[conds])
+    d <- as.data.frame(as.table(cm)) %>% setNames(c("c1", "c2", "r")) %>%
+      mutate(c1 = factor(c1, PUB_LAB[conds]), c2 = factor(c2, rev(PUB_LAB[conds])))
+    p <- ggplot(d, aes(c1, c2, fill = r)) + geom_tile(colour = "white", linewidth = 0.6) +
+      geom_text(aes(label = sprintf("%.2f", r)), size = PUB_LABEL - 0.5, fontface = "bold") +
+      scale_fill_gradient2(low = "#2166AC", mid = "white", high = "#B2182B", limits = c(-1, 1),
+                           breaks = c(-1, -0.5, 0, 0.5, 1), name = "Correlation") +
+      coord_fixed() + labs(title = pattern_title(nm), x = NULL, y = NULL) + pub_theme +
+      scale_x_discrete(labels = wrap_lab) + scale_y_discrete(labels = wrap_lab) +
+      theme(axis.line = element_blank(), axis.ticks = element_blank(), axis.text.x = element_text(angle = 45, hjust = 1))
+    print(p); save_fig(p, paste0(nm, "_heatmap")); pl[[paste0(nm, "_heatmap")]] <- p
+    e <- eigen(U[[nm]]); v <- e$vectors[, 1]; if (sum(v) < 0) v <- -v
+    d <- tibble(condition = factor(PUB_LAB[conds], PUB_LAB[conds]), loading = v)
+    p <- ggplot(d, aes(condition, loading, fill = condition)) +
+      geom_col(colour = "black", linewidth = 0.4, width = 0.7) + geom_hline(yintercept = 0, linewidth = 0.5) +
+      scale_fill_manual(values = PUB_COLS, guide = "none") + scale_x_discrete(labels = wrap_lab) +
+      labs(title = pattern_title(nm), x = NULL, y = "Loading (leading eigenvector)") +
+      pub_theme + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    print(p); save_fig(p, paste0(nm, "_eigenvector")); pl[[paste0(nm, "_eigenvector")]] <- p
+  }
+  if (!length(ed_show)) cat(sprintf("\n\n%s: no data-driven pattern with weight >= 1%%; no heatmap or eigenvector panels.\n\n", vt))
+
+  # (E) number of datasets: significant, shared by sign, shared by magnitude
+  sig_d <- tibble(n = rowSums(lf < 0.05)) %>% count(n, name = "eQTLs") %>%
+    complete(n = 0:length(conds), fill = list(eQTLs = 0)) %>% mutate(group = ifelse(n == 0, "none", "significant"))
+  p <- ggplot(sig_d, aes(factor(n), eQTLs, fill = group)) +
+    geom_col(colour = "black", linewidth = 0.4, width = 0.7) +
+    geom_text(aes(label = eQTLs), vjust = -0.4, size = PUB_LABEL, fontface = "bold") +
+    scale_fill_manual(values = c(none = "grey75", significant = "#2C7FB8"), guide = "none") +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+    labs(title = "Significant (lfsr < 0.05)", x = "Number of datasets", y = "Number of eQTLs") + pub_theme
+  print(p); save_fig(p, "n_datasets_significant"); pl$significant <- p
+  pms <- pm[rowSums(lf < 0.05) > 0, , drop = FALSE]
+  rel <- t(apply(pms, 1, function(x) x / x[which.max(abs(x))]))
+  for (def in c("Shared by sign", "Shared by magnitude (within 2-fold)")) {
+    d <- tibble(n = if (def == "Shared by sign") rowSums(rel > 0) else rowSums(rel >= 0.5)) %>%
+      count(n, name = "eQTLs") %>% complete(n = 1:length(conds), fill = list(eQTLs = 0))
+    p <- ggplot(d, aes(factor(n), eQTLs)) +
+      geom_col(fill = "#2C7FB8", colour = "black", linewidth = 0.4, width = 0.7) +
+      geom_text(aes(label = eQTLs), vjust = -0.4, size = PUB_LABEL, fontface = "bold") +
+      scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+      labs(title = def, x = "Number of datasets", y = "Number of eQTLs") + pub_theme
+    print(p); save_fig(p, if (def == "Shared by sign") "n_datasets_shared_sign" else "n_datasets_shared_magnitude")
+    pl[[if (def == "Shared by sign") "sign" else "magnitude"]] <- p
+  }
+
+  # (G) condition-specific eQTLs (defined with replicates) vs replicate noise
+  sg <- function(c) lf[, c] < 0.05
+  sh <- function(a, b) sign(pm[, a]) == sign(pm[, b]) & abs(pm[, b] / pm[, a]) >= 0.5 & abs(pm[, b] / pm[, a]) <= 2
+  nonY <- setdiff(conds, c("YPD.1", "YPD.2")); nonF <- setdiff(conds, c("Flu_16ug", "Flu_8ug"))
+  calls <- list(
+    "YPD (both replicates)"    = sg("YPD.1") & sg("YPD.2") & Reduce(`&`, lapply(nonY, function(o) !sh("YPD.1", o) & !sh("YPD.2", o))),
+    "fluconazole (both doses)" = sg("Flu_16ug") & sg("Flu_8ug") & Reduce(`&`, lapply(nonF, function(o) !sh("Flu_16ug", o) & !sh("Flu_8ug", o))),
+    "synthetic complete with galactose" = sg("galactose") & Reduce(`&`, lapply(setdiff(conds, "galactose"), function(o) !sh("galactose", o))),
+    "synthetic complete with glucose" = sg("sc2glu.2") & Reduce(`&`, lapply(setdiff(conds, "sc2glu.2"), function(o) !sh("sc2glu.2", o))),
+    "YPD.1, not shared with YPD.2" = sg("YPD.1") & !sh("YPD.1", "YPD.2"),
+    "YPD.2, not shared with YPD.1" = sg("YPD.2") & !sh("YPD.2", "YPD.1"))
+  noise_d <- tibble(call = names(calls), n = sapply(calls, sum, na.rm = TRUE)) %>%
+    mutate(kind = ifelse(grepl("not shared", call), "Replicate noise (same condition)", "Condition-specific"))
+  p <- ggplot(noise_d, aes(n, fct_rev(factor(call, unique(call))), fill = kind)) +
+    geom_col(colour = "black", linewidth = 0.4, width = 0.7) +
+    geom_text(aes(label = n), hjust = -0.2, size = PUB_LABEL, fontface = "bold") +
+    scale_fill_manual(values = c("Condition-specific" = "#E6550D", "Replicate noise (same condition)" = "grey60"), name = NULL) +
+    scale_x_continuous(expand = expansion(mult = c(0, 0.12))) +
+    labs(x = "Number of genes", y = NULL) + pub_theme + theme(legend.position = "bottom")
+  print(p); save_fig(p, "specific_vs_replicate_noise", 2 * PANEL_W); pl$specific <- p
+
+  # combined figure, three panels per row: weights | heatmap, eigenvector of each pattern shown |
+  # significant | shared by sign | shared by magnitude | condition-specific vs replicate noise (two columns wide)
+  ed_panels <- unlist(lapply(ed_show, function(nm) list(pl[[paste0(nm, "_heatmap")]], pl[[paste0(nm, "_eigenvector")]])),
+                      recursive = FALSE)
+  panels <- c(list(pl$weights + theme(legend.position = "bottom", legend.direction = "vertical")),
+              ed_panels, list(pl$significant, pl$sign, pl$magnitude,
+                              pl$specific + guides(fill = guide_legend(nrow = 2))))
+  cells <- c(LETTERS[seq_len(length(panels) - 1)], rep(LETTERS[length(panels)], 2))
+  if ((length(panels) - 1) %% 3 == 2) cells <- append(cells, "#", length(panels) - 1)  # wide panel starts a new row
+  cells <- c(cells, rep("#", (-length(cells)) %% 3))
+  design <- paste(apply(matrix(cells, ncol = 3, byrow = TRUE), 1, paste, collapse = ""), collapse = "\n")
+  n_rows <- length(cells) / 3
+  # wrap_elements: each panel keeps its own axis titles (no alignment across panels of different shapes)
+  comb <- wrap_plots(lapply(panels, function(p) wrap_elements(full = p)), design = design) +
+    plot_annotation(title = sprintf("mashr, %s analysed separately", VT_NAME[[vt]]),
+                    tag_levels = "A",
+                    theme = theme(plot.title = element_text(face = "bold", size = AXIS_SIZE + 6, hjust = 0.5))) &
+    theme(plot.tag = element_text(face = "bold", size = AXIS_SIZE + 4))
+  save_fig(comb, "combined", 3 * PANEL_W + 2, n_rows * PANEL_H + 1)
+
+  wk <- w %>% group_by(kind) %>% summarise(weight = 100 * sum(weight), .groups = "drop")
+  tibble(variant_type = vt, random_pairs = f$n_random, strong_eQTLs = nrow(pm),
+         sig_any = sum(rowSums(lf < 0.05) > 0),
+         pct_no_effect = sum(wk$weight[wk$kind == "No effect"]),
+         pct_data_driven = sum(wk$weight[wk$kind == "Data-driven pattern of sharing"]),
+         pct_equal_effects = sum(wk$weight[wk$kind == "Equal effects"]),
+         pct_one_dataset = sum(wk$weight[wk$kind == "One dataset only"]),
+         data_driven_patterns = paste(sprintf("%s %.2f%% (leading eigenvector %.0f%% of variance)", ed, 100 * pi_hat[ed],
+                                              sapply(ed, function(nm) { ev <- eigen(U[[nm]], only.values = TRUE)$values; 100 * ev[1] / sum(ev) })),
+                                      collapse = "; "),
+         shared_magnitude_all_6 = sum(rowSums(rel >= 0.5) == length(conds)),
+         specific_YPD = noise_d$n[1], specific_flu = noise_d$n[2], specific_gal = noise_d$n[3], specific_SC = noise_d$n[4],
+         noise_YPD1 = noise_d$n[5], noise_YPD2 = noise_d$n[6])
+}
+
+pub_summary <- bind_rows(lapply(VARIANTS, function(vt) { cat("\n\n## ", VT_NAME[[vt]], "\n\n", sep = ""); pub_panels(vt) })) %>%
+  mutate(across(starts_with("pct_"), ~ round(.x, 2)))
+write.csv(pub_summary, file.path(OUTPUT_DIR, "pub_panel_summary_per_variant_type.csv"), row.names = FALSE)
+knitr::kable(pub_summary)
+```
+
+```{r session}
+sessionInfo()
+```

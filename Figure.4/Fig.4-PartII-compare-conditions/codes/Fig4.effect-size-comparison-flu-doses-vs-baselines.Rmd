@@ -1,0 +1,356 @@
+---
+title: "Effect-size comparison by variant type: Flu.1 and Flu.2 vs YPD.1, YPD.2 and sc2glu.2"
+author: "Akriti Agrawal"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    code_folding: show
+---
+
+Replaces the integrated-dataset comparison in `Fig4.effect-size-comparison-flu-sc2glu.Rmd`
+(merged fluconazole vs YPD.1 and integrated sc2glu). Here each fluconazole dose is its own
+dataset. Baselines: both YPD replicates (YPD.1, YPD.2) and the better SC-2% glucose replicate,
+sc2glu.2:
+
+| Comparison | Condition 1 (significant eQTLs) | Condition 2 (lookup) |
+|---|---|---|
+| YPD.1 vs Flu.1 | Flu.1 (16 ug/ml) | YPD.1 |
+| YPD.1 vs Flu.2 | Flu.2 (8 ug/ml) | YPD.1 |
+| YPD.2 vs Flu.1 | Flu.1 (16 ug/ml) | YPD.2 |
+| YPD.2 vs Flu.2 | Flu.2 (8 ug/ml) | YPD.2 |
+| sc2glu.2 vs Flu.1 | Flu.1 (16 ug/ml) | sc2glu.2 |
+| sc2glu.2 vs Flu.2 | Flu.2 (8 ug/ml) | sc2glu.2 |
+
+**Direction.** As in the integrated version, the starting set is the fluconazole dataset: every
+variant-gene pair that is a significant eQTL in Flu.1 (or Flu.2) is looked up among *all tested*
+variants of the baseline (`first_assoc` files) for the same gene. The pair does not have to be
+significant in the baseline; the baseline only provides its effect size. So the question is
+"do fluconazole eQTLs have the same effect in the baseline?", not "are baseline eQTLs
+also found in fluconazole" (that reverse direction is in `concordance_all_pairs.rds` as
+"YPD.1 vs Flu.1_16ug" etc.).
+In the plots the baseline effect size is on the x axis and the fluconazole effect size on the y
+axis. Every statistic is computed for each variant type separately (SNPs, InDels, SVs, CNVs)
+and for all variants pooled.
+
+The variant-gene lookups are read from `replicates_concordance/concordance_all_pairs.rds`,
+written by `Fig4.effect-size-comparison-replicates.Rmd` (all six datasets, including YPD.2; same
+genotype files and FaST-LMM settings as YPD.1). Knit that Rmd first.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(tidyverse)
+source("/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Agrawal_single_cell_eqtl_cell_cycle/shared_code/arial_font.R")  # Arial for all plots, as in Figs 2 and 5
+library(data.table)
+library(patchwork)
+
+select <- dplyr::select
+filter <- dplyr::filter
+```
+
+# 1. Inputs
+
+```{r config}
+ROOT <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all"
+CONC_RDS   <- "../results/replicates_concordance/concordance_all_pairs.rds"
+OUTPUT_DIR <- "../results/effect_size_flu_doses_vs_baselines"
+dir.create(OUTPUT_DIR, showWarnings = FALSE, recursive = TRUE)
+
+VARIANTS <- c("SNPs", "InDels", "SVs", "CNVs")
+N_PERMS  <- 5000
+set.seed(42)
+
+# significant eQTLs of each fluconazole dose (totals per variant type, for "% found")
+signif_files <- function(res, tag) {
+  res <- file.path(ROOT, res)
+  c(SNPs   = file.path(res, paste0("all_signif_SNPs_", tag, "_96_MAF15_from_969_strains_with_double_id_final_filtered_for_ncount_less_than_5_with_threshold.txt")),
+    InDels = file.path(res, paste0("all_signif_Indels_", tag, "_96_MAF15_with_double_id_final_filtered_for_ncount_less_than_5_with_threshold.txt")),
+    SVs    = file.path(res, paste0("all_signif_SVs_", tag, "_with_double_id_is_not_needed_final_filtered_for_ncount_less_than_5_run_from_new_plink_files_with_threshold.txt")),
+    CNVs   = file.path(res, paste0("all_signif_CNV_", tag, "_with_double_id_is_not_needed_final_filtered_for_ncount_less_than_5_run_from_new_plink_files_no_chr17_with_threshold.txt")))
+}
+SIGNIF <- list(Flu.1_16ug = signif_files("Flu.1/fastlmm/results", "Flu.1"),
+               Flu.2_8ug  = signif_files("Flu.2/fastlmm/results", "Flu.2"))
+
+# the six comparisons: key in concordance_all_pairs.rds -> labels
+COMP <- tribble(
+  ~key,                     ~comparison,          ~flu,         ~flu_lab,            ~base,      ~base_lab,
+  "Flu.1_16ug vs YPD.1",    "YPD.1 vs Flu.1",     "Flu.1_16ug", "Flu.1 (16 ug/ml)",  "YPD.1",    "YPD.1",
+  "Flu.2_8ug vs YPD.1",     "YPD.1 vs Flu.2",     "Flu.2_8ug",  "Flu.2 (8 ug/ml)",   "YPD.1",    "YPD.1",
+  "Flu.1_16ug vs YPD.2",    "YPD.2 vs Flu.1",     "Flu.1_16ug", "Flu.1 (16 ug/ml)",  "YPD.2",    "YPD.2",
+  "Flu.2_8ug vs YPD.2",     "YPD.2 vs Flu.2",     "Flu.2_8ug",  "Flu.2 (8 ug/ml)",   "YPD.2",    "YPD.2",
+  "Flu.1_16ug vs sc2glu.2", "sc2glu.2 vs Flu.1",  "Flu.1_16ug", "Flu.1 (16 ug/ml)",  "sc2glu.2", "SC2Glu.2",
+  "Flu.2_8ug vs sc2glu.2",  "sc2glu.2 vs Flu.2",  "Flu.2_8ug",  "Flu.2 (8 ug/ml)",   "sc2glu.2", "SC2Glu.2")
+COMP_LEVELS <- COMP$comparison
+
+missing <- c(CONC_RDS, unlist(SIGNIF)); missing <- missing[!file.exists(missing)]
+if (length(missing)) stop("Missing inputs:\n", paste(missing, collapse = "\n"))
+
+conc_all <- readRDS(CONC_RDS)
+stopifnot(all(COMP$key %in% names(conc_all)))
+
+conc <- bind_rows(lapply(seq_len(nrow(COMP)), function(i)
+  conc_all[[COMP$key[i]]] %>% mutate(comparison = COMP$comparison[i]))) %>%
+  left_join(COMP %>% select(comparison, flu, flu_lab, base_lab), by = "comparison") %>%
+  mutate(comparison   = factor(comparison, levels = COMP_LEVELS),
+         Variant_Type = factor(Variant_Type, levels = VARIANTS),
+         # x = baseline, y = fluconazole
+         Beta_Base = Beta_Cond2, Beta_Flu = Beta_Cond1,
+         direction = ifelse(sign(Beta_Base) == sign(Beta_Flu), "Concordant", "Discordant"))
+
+# significant eQTLs per dose and variant type (unique gene x variant pairs, as in the lookup)
+signif_totals <- bind_rows(lapply(names(SIGNIF), function(fk) bind_rows(lapply(VARIANTS, function(vt)
+  fread(SIGNIF[[fk]][[vt]], sep = "\t", quote = "", select = c("Source_Phenotype", "SNP")) %>%
+    distinct() %>% summarise(n_signif = n()) %>% mutate(flu = fk, Variant_Type = vt)))))
+
+conc %>% count(comparison, Variant_Type) %>% pivot_wider(names_from = Variant_Type, values_from = n)
+```
+
+# 2. Concordance statistics per variant type
+
+For each comparison and variant type: fraction of fluconazole eQTLs found among the baseline's
+tested variants, sign concordance with a one-sided binomial test against 50%, Pearson r and
+Spearman rho of the effect sizes, and a permutation test for each (baseline effect sizes
+shuffled across eQTLs, `r N_PERMS` permutations). P-values are BH-adjusted over the 24
+comparison x variant-type tests (pooled "All variants" rows are adjusted separately).
+
+```{r stats}
+conc_stats <- function(d, n_signif) {
+  n  <- nrow(d)
+  if (n < 3) return(tibble(n_signif = n_signif, n_found = n))
+  same  <- sign(d$Beta_Base) == sign(d$Beta_Flu)
+  r     <- cor(d$Beta_Base, d$Beta_Flu, method = "pearson")
+  rho   <- cor(d$Beta_Base, d$Beta_Flu, method = "spearman")
+  perm  <- replicate(N_PERMS, {
+    b <- sample(d$Beta_Base)
+    c(sign = mean(sign(b) == sign(d$Beta_Flu)), r = cor(b, d$Beta_Flu))
+  })
+  tibble(n_signif = n_signif, n_found = n, pct_found = 100 * n / n_signif,
+         n_concordant = sum(same), pct_concordant = 100 * mean(same),
+         binom_p = binom.test(sum(same), n, p = 0.5, alternative = "greater")$p.value,
+         perm_p_sign = (sum(perm["sign", ] >= mean(same)) + 1) / (N_PERMS + 1),
+         pearson_r = r, spearman_rho = rho,
+         pearson_p = cor.test(d$Beta_Base, d$Beta_Flu, method = "pearson")$p.value,
+         perm_p_r = (sum(perm["r", ] >= r) + 1) / (N_PERMS + 1),
+         perm_sign = list(perm["sign", ]), perm_r = list(perm["r", ]))
+}
+
+stats_vt <- conc %>% group_by(comparison, flu, Variant_Type) %>%
+  group_modify(~ conc_stats(.x, signif_totals$n_signif[signif_totals$flu == .y$flu &
+                                                       signif_totals$Variant_Type == .y$Variant_Type])) %>%
+  ungroup() %>%
+  mutate(binom_p_BH = p.adjust(binom_p, "BH"), pearson_p_BH = p.adjust(pearson_p, "BH"))
+
+stats_all <- conc %>% group_by(comparison, flu) %>%
+  group_modify(~ conc_stats(.x, sum(signif_totals$n_signif[signif_totals$flu == .y$flu]))) %>%
+  ungroup() %>% mutate(Variant_Type = "All variants",
+                       binom_p_BH = p.adjust(binom_p, "BH"), pearson_p_BH = p.adjust(pearson_p, "BH"))
+
+stats_table <- bind_rows(stats_vt %>% mutate(Variant_Type = as.character(Variant_Type)), stats_all) %>%
+  mutate(Variant_Type = factor(Variant_Type, levels = c(VARIANTS, "All variants"))) %>%
+  arrange(comparison, Variant_Type)
+
+out_table <- stats_table %>% select(-flu, -perm_sign, -perm_r)
+write.csv(out_table, file.path(OUTPUT_DIR, "Effect_size_concordance_by_variant_type.csv"), row.names = FALSE)
+knitr::kable(out_table %>% select(comparison, Variant_Type, n_signif, n_found, pct_found,
+                                  pct_concordant, binom_p_BH, pearson_r, spearman_rho, perm_p_r),
+             digits = c(0, 0, 0, 0, 1, 1, 3, 3, 3, 4),
+             caption = "Effect-size concordance, fluconazole eQTLs looked up in the baseline")
+```
+
+# 3. Scatter plots by variant type
+
+One panel per comparison (rows) and variant type (columns). Points: concordant (same sign)
+or discordant; solid line: least-squares fit; dashed line: 1:1.
+
+```{r scatter-fns}
+DIR_COLS <- c(Concordant = "#27AE60", Discordant = "#E74C3C")
+VT_COLS  <- c(SNPs = "#3498DB", InDels = "#9B59B6", SVs = "#B7950B", CNVs = "#E67E22")
+lim <- max(abs(c(conc$Beta_Base, conc$Beta_Flu)), na.rm = TRUE) * 1.05
+
+panel_lab <- function(st) st %>%
+  filter(!is.na(pearson_r)) %>%
+  mutate(label = sprintf("n = %d\nr = %.2f, rho = %.2f\nsame sign = %.0f%%",
+                         n_found, pearson_r, spearman_rho, pct_concordant))
+
+scatter_theme <- theme_bw(base_size = 13) +
+  theme(strip.text = element_text(face = "bold", size = 12),
+        strip.background = element_rect(fill = "grey92", colour = NA),
+        axis.title = element_text(face = "bold"), panel.grid.minor = element_blank(),
+        legend.position = "top", plot.title = element_text(face = "bold", hjust = 0.5))
+
+plot_scatter <- function(d, st, x_lab, y_lab, title = NULL, subtitle = NULL, facet = ~ Variant_Type, ...) {
+  ggplot(d, aes(Beta_Base, Beta_Flu)) +
+    geom_hline(yintercept = 0, colour = "grey75", linewidth = 0.3) +
+    geom_vline(xintercept = 0, colour = "grey75", linewidth = 0.3) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", colour = "grey45") +
+    geom_point(aes(colour = direction), size = 1.3, alpha = 0.45) +
+    geom_smooth(method = "lm", se = FALSE, colour = "black", linewidth = 0.8) +
+    geom_label(data = panel_lab(st), aes(x = -Inf, y = Inf, label = label), inherit.aes = FALSE,
+               hjust = -0.03, vjust = 1.05, size = 3.1, fontface = "bold",
+               label.size = 0, fill = alpha("white", 0.8)) +
+    facet_wrap(facet, ...) +
+    scale_colour_manual(values = DIR_COLS, name = NULL) +
+    coord_equal(xlim = c(-lim, lim), ylim = c(-lim, lim)) +
+    guides(colour = guide_legend(override.aes = list(size = 3, alpha = 1))) +
+    labs(x = x_lab, y = y_lab, title = title, subtitle = subtitle) +
+    scatter_theme +
+    theme(plot.subtitle = element_text(hjust = 0.5, colour = "grey40"))
+}
+```
+
+```{r scatter-grid, fig.width = 15, fig.height = 23}
+p_grid <- plot_scatter(conc, stats_vt,
+                       x_lab = expression(bold("Effect size "*beta*", baseline (YPD.1, YPD.2 or SC2Glu.2)")),
+                       y_lab = expression(bold("Effect size "*beta*", fluconazole")),
+                       title = "Effect-size concordance of fluconazole eQTLs, by variant type",
+                       subtitle = "Significant eQTLs of the fluconazole dose, looked up among all tested variants of the baseline",
+                       facet = comparison ~ Variant_Type) +
+  facet_grid(comparison ~ Variant_Type)
+print(p_grid)
+ggsave(file.path(OUTPUT_DIR, "Fig_effect_size_by_variant_type_all_comparisons.tiff"), p_grid,
+       width = 15, height = 23, dpi = 600, compression = "lzw", bg = "white")
+```
+
+```{r scatter-per-comparison, fig.width = 10, fig.height = 10, results = "asis"}
+for (i in seq_len(nrow(COMP))) {
+  cm <- COMP$comparison[i]
+  cat("\n\n## ", cm, "\n\n", sep = "")
+  p <- plot_scatter(conc %>% filter(comparison == cm), stats_vt %>% filter(comparison == cm),
+                    x_lab = bquote(bold("Effect size "*beta*", "*.(COMP$base_lab[i]))),
+                    y_lab = bquote(bold("Effect size "*beta*", "*.(COMP$flu_lab[i]))),
+                    title = cm, ncol = 2)
+  print(p)
+  ggsave(file.path(OUTPUT_DIR, paste0("Fig_effect_size_by_variant_type_", gsub("[^A-Za-z0-9]+", "_", cm), ".tiff")),
+         p, width = 10, height = 10, dpi = 600, compression = "lzw", bg = "white")
+}
+```
+
+# 4. Summary across variant types
+
+```{r summary-plot, fig.width = 14, fig.height = 5.5}
+sum_long <- stats_table %>%
+  select(comparison, Variant_Type, `Sign concordance (%)` = pct_concordant,
+         `Pearson r` = pearson_r, `Found in baseline (%)` = pct_found) %>%
+  pivot_longer(-c(comparison, Variant_Type), names_to = "metric", values_to = "value") %>%
+  mutate(metric = factor(metric, levels = c("Found in baseline (%)", "Sign concordance (%)", "Pearson r")))
+
+COMP_COLS <- setNames(c("#81C784", "#2E7D32", "#64B5F6", "#1565C0", "#FFB74D", "#E65100"), COMP_LEVELS)
+p_sum <- ggplot(sum_long, aes(Variant_Type, value, fill = comparison)) +
+  geom_col(position = position_dodge(0.85), width = 0.8, colour = "grey30", linewidth = 0.2) +
+  geom_text(aes(label = ifelse(metric == "Pearson r", sprintf("%.2f", value), sprintf("%.0f", value))),
+            position = position_dodge(0.85), vjust = -0.3, size = 2.6, fontface = "bold") +
+  facet_wrap(~ metric, scales = "free_y") +
+  scale_fill_manual(values = COMP_COLS, name = NULL) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
+  labs(x = NULL, y = NULL, title = "Concordance of fluconazole eQTL effect sizes with the baselines") +
+  theme_classic(base_size = 13) +
+  theme(legend.position = "top", strip.text = element_text(face = "bold"),
+        strip.background = element_blank(), axis.text.x = element_text(face = "bold", angle = 30, hjust = 1),
+        plot.title = element_text(face = "bold", hjust = 0.5))
+print(p_sum)
+ggsave(file.path(OUTPUT_DIR, "Fig_concordance_summary_by_variant_type.tiff"), p_sum,
+       width = 14, height = 5.5, dpi = 600, compression = "lzw", bg = "white")
+```
+
+# 5. One combined figure per comparison
+
+All variant types in one panel, one figure per comparison. Points: each fluconazole eQTL,
+coloured by whether its effect has the same sign in the baseline (concordant) or the opposite
+sign (discordant). Lines: least-squares fit per variant type; the legend gives each variant
+type's Pearson r and % same direction. Dashed line: 1:1.
+
+**What the numbers mean.** Each point is one variant-gene pair with two signed effect sizes
+(beta): baseline on x, fluconazole on y.
+
+- *Same direction (%)*: fraction of eQTLs whose beta has the same sign in both conditions.
+  Direction only; magnitude is ignored.
+- *Pearson r*: correlation of the signed betas. High r means eQTLs with a larger (or more
+  negative) effect in the baseline also have a larger (or more negative) effect in fluconazole,
+  i.e. the eQTLs keep their direction **and** their relative size. It does not test whether
+  the betas are equal: r = 1 also when every fluconazole effect is twice the baseline effect.
+- *Spearman rho*: the same on ranks, so less driven by the few largest effects.
+- Whether the magnitudes are equal is shown by the points against the dashed 1:1 line. It is
+  not a good test here: only eQTLs significant in fluconazole are plotted, so their fluconazole
+  |beta| is always large (>= ~0.4) and sits above the line (selection effect). Absolute effect
+  sizes |beta| per condition are compared in `Fig4.PartII-compare-conditions-best-replicates.Rmd`.
+
+```{r pooled-scatter, fig.width = 8.5, fig.height = 7, results = "asis"}
+pooled_plot <- function(i) {
+  cm <- COMP$comparison[i]
+  d  <- conc %>% filter(comparison == cm)
+  st <- stats_all %>% filter(comparison == cm)
+  vt <- stats_vt %>% filter(comparison == cm)
+  vt_lab <- setNames(sprintf("%s (n = %d, r = %.2f, %.0f%% same dir.)", vt$Variant_Type, vt$n_found,
+                             vt$pearson_r, vt$pct_concordant), as.character(vt$Variant_Type))
+  ggplot(d, aes(Beta_Base, Beta_Flu)) +
+    geom_hline(yintercept = 0, colour = "grey75", linewidth = 0.3) +
+    geom_vline(xintercept = 0, colour = "grey75", linewidth = 0.3) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", colour = "grey45") +
+    geom_point(aes(colour = direction), size = 1.4, alpha = 0.35) +
+    scale_colour_manual(values = DIR_COLS, name = "Direction", labels = c(
+      Concordant = "Same direction", Discordant = "Opposite direction")) +
+    guides(colour = guide_legend(order = 1, override.aes = list(size = 3, alpha = 1))) +
+    ggnewscale::new_scale_colour() +
+    geom_smooth(aes(colour = Variant_Type), method = "lm", se = FALSE, linewidth = 1.2) +
+    scale_colour_manual(values = VT_COLS, labels = vt_lab, name = "Variant type (fit)") +
+    guides(colour = guide_legend(order = 2)) +
+    annotate("label", x = -Inf, y = Inf, hjust = -0.03, vjust = 1.05, size = 4, fontface = "bold",
+             label.size = 0, fill = alpha("white", 0.85),
+             label = sprintf("All variants, n = %d\nSame direction = %.1f%%\nPearson r = %.2f\nSpearman rho = %.2f",
+                             st$n_found, st$pct_concordant, st$pearson_r, st$spearman_rho)) +
+    coord_equal(xlim = c(-lim, lim), ylim = c(-lim, lim)) +
+    labs(title = cm,
+         subtitle = sprintf("Significant %s eQTLs, effect size looked up in %s", COMP$flu_lab[i], COMP$base_lab[i]),
+         x = bquote(bold("Effect size "*beta*", "*.(COMP$base_lab[i]))),
+         y = bquote(bold("Effect size "*beta*", "*.(COMP$flu_lab[i])))) +
+    scatter_theme +
+    theme(legend.position = "right", plot.subtitle = element_text(hjust = 0.5, colour = "grey40"),
+          axis.title = element_text(size = 14), axis.text = element_text(size = 12, colour = "black"))
+}
+for (i in seq_len(nrow(COMP))) {
+  cm <- COMP$comparison[i]
+  cat("\n\n## ", cm, "\n\n", sep = "")
+  p <- pooled_plot(i); print(p)
+  ggsave(file.path(OUTPUT_DIR, paste0("Fig_effect_size_concordance_", gsub("[^A-Za-z0-9]+", "_", cm), ".tiff")),
+         p, width = 11, height = 7, dpi = 600, compression = "lzw", bg = "white")
+}
+```
+
+# 6. Permutation null distributions (all variants pooled)
+
+```{r null-plots, fig.width = 12, fig.height = 4.5, results = "asis"}
+null_plot <- function(st) {
+  pd <- tibble(sign = st$perm_sign[[1]], r = st$perm_r[[1]])
+  a <- ggplot(pd, aes(sign)) +
+    geom_histogram(bins = 50, fill = "grey70", colour = "white", linewidth = 0.2) +
+    geom_vline(xintercept = st$pct_concordant / 100, colour = "#E74C3C", linewidth = 1.1) +
+    geom_vline(xintercept = 0.5, linetype = "dashed") +
+    annotate("label", x = Inf, y = Inf, hjust = 1.05, vjust = 1.2, size = 3.3, fontface = "bold", label.size = 0,
+             label = sprintf("Observed = %.3f\npermutation p = %.1e", st$pct_concordant / 100, st$perm_p_sign)) +
+    labs(title = "Sign concordance", x = "Sign concordance (permuted)", y = "Frequency") +
+    theme_classic(base_size = 12) + theme(plot.title = element_text(face = "bold"))
+  b <- ggplot(pd, aes(r)) +
+    geom_histogram(bins = 50, fill = "grey70", colour = "white", linewidth = 0.2) +
+    geom_vline(xintercept = st$pearson_r, colour = "#27AE60", linewidth = 1.1) +
+    geom_vline(xintercept = 0, linetype = "dashed") +
+    annotate("label", x = Inf, y = Inf, hjust = 1.05, vjust = 1.2, size = 3.3, fontface = "bold", label.size = 0,
+             label = sprintf("Observed = %.3f\npermutation p = %.1e", st$pearson_r, st$perm_p_r)) +
+    labs(title = "Pearson r", x = "Pearson r (permuted)", y = "Frequency") +
+    theme_classic(base_size = 12) + theme(plot.title = element_text(face = "bold"))
+  (a | b) + plot_annotation(title = as.character(st$comparison),
+                            theme = theme(plot.title = element_text(face = "bold", hjust = 0.5)))
+}
+for (i in seq_len(nrow(stats_all))) {
+  cm <- as.character(stats_all$comparison[i])
+  cat("\n\n## ", cm, "\n\n", sep = "")
+  p <- null_plot(stats_all[i, ]); print(p)
+  ggsave(file.path(OUTPUT_DIR, paste0("Fig_null_distribution_", gsub("[^A-Za-z0-9]+", "_", cm), ".tiff")),
+         p, width = 12, height = 4.5, dpi = 600, compression = "lzw", bg = "white")
+}
+```
+
+```{r session}
+sessionInfo()
+```

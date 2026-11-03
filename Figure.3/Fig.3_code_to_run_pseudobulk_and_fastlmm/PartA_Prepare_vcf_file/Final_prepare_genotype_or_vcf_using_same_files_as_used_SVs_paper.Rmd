@@ -1,0 +1,134 @@
+---
+title: "Final_prepare_genotype_or_vcf_using_same_files_as_used_SVs_paper"
+output: html_document
+---
+
+
+## SAMPLE USED in the present study
+
+Some samples are written as SACE_YCK i.e., with an underscore
+```{r}
+sample_used <- read.table("/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/sample_used_split.txt", header = FALSE, stringsAsFactors = FALSE)
+str(sample_used)
+```
+
+# Plink files used in the structural variant paper are (Victor 2025 paper), this includes all the strains
+
+
+## Work with CNVs and SV files 
+
+CNVs
+```
+/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/structural_variant_vcf/SVcalls2/SVcalls/full1086.CNVs.MAC1.plink.bed
+/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/structural_variant_vcf/SVcalls2/SVcalls/full1086.CNVs.MAC1.plink.bim
+/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/structural_variant_vcf/SVcalls2/SVcalls/full1086.CNVs.MAC1.plink.fam
+```
+
+where
+FID     IID
+SACE    YCK
+
+And
+40368 full1086.CNVs.MAC1.plink.bim
+1086 full1086.CNVs.MAC1.plink.fam
+
+
+## filter to 96 strains
+```{}
+cd /projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/structural_variant_vcf/SVcalls2/SVcalls
+module load bioinformatics/20260810
+
+# build keep file (FID IID); AVI is stored as "AVI 1a" in this .fam
+awk 'NF{ if($1=="AVI" && $2=="AVI") $2="1a"; print $1, $2 }' \
+    /projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/sample_used_split.txt \
+    > CNVs_96_strains/keep_96_strains.txt
+
+plink --bfile full1086.CNVs.MAC1.plink \
+      --keep CNVs_96_strains/keep_96_strains.txt \
+      --allow-extra-chr \
+      --make-bed \
+      --out CNVs_96_strains/CNVs.96strains.plink
+
+```
+##### filter to maf 15 for 96 strains
+```{}
+cd /projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/structural_variant_vcf/SVcalls2/SVcalls/CNVs_96_strains
+module load bioinformatics/20260810
+
+plink --bfile CNVs.96strains.plink \
+      --maf 0.15 \
+      --allow-extra-chr \
+      --make-bed \
+      --out CNV_96strains_maf15/CNVs.96strains.maf15.plink
+
+```
+
+
+
+### Work with structural variants
+```{}
+cd /projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/structural_variant_vcf/SVcalls2/SVcalls
+module load bioinformatics/20260810
+
+plink --vcf SV.1087Samples.vcf --make-bed --allow-extra-chr --out SVs_1087/SV.1087samples.plink
+
+plink --bfile SVs_1087/SV.1087samples.plink --keep SVs_1087/SVs_96/keep_96_strains.txt \
+      --allow-extra-chr --make-bed --out SVs_1087/SVs_96/SV.96strains.plink
+
+plink --bfile SVs_1087/SVs_96/SV.96strains.plink --maf 0.15 \
+      --allow-extra-chr --make-bed --out SVs_1087/SVs_96/SV_96_maf_15/SV.96strains.maf15.plink
+
+```
+
+
+##Work with Indels
+```{}
+cd /projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/vcf_files_from_3034_natural_isolates_of_S.cerevisiae_victor_2024/indels_3034
+module load bioinformatics/20260810
+
+awk 'NF{print $1, $2}' /projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/sample_used_split.txt > indels_96/keep_96_strains.txt
+
+plink --bfile indels_3034 --keep indels_96/keep_96_strains.txt \
+      --allow-extra-chr --make-bed --out indels_96/indels_96
+
+plink --bfile indels_96/indels_96 --maf 0.15 \
+      --allow-extra-chr --make-bed --out indels_96/indels_96_maf_15/indels_96_maf_15
+
+```
+
+##SNPs
+```{}
+same as all other
+
+wget the vcf file and covert to plink files
+
+```
+
+
+#Strip chromosome from chromosome column of .bim file
+```{}
+V=/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs
+
+# 1. Chromosome names: strip the "chromosome" prefix from column 1 of each .bim that has it
+BIMS=$(find $V/vcf_files_from_3034_natural_isolates_of_S.cerevisiae_victor_2024 \
+            $V/structural_variant_vcf/SVcalls2/SVcalls/SVs_1087 \
+            $V/structural_variant_vcf/SVcalls2/SVcalls/CNVs_96_strains -name "*.bim")
+
+for b in $BIMS; do
+    if cut -f1 $b | grep -q "^chromosome"; then
+        cp -p $b $b.orig
+        awk 'BEGIN{FS=OFS="\t"} {sub(/^chromosome/, "", $1)} 1' $b.orig > $b
+    fi
+done
+
+# 2. AVI: rename "AVI 1a" -> "AVI AVI" in the 96-strain CNV and SV .fam files
+for f in $V/structural_variant_vcf/SVcalls2/SVcalls/CNVs_96_strains/CNVs.96strains.plink.fam \
+         $V/structural_variant_vcf/SVcalls2/SVcalls/CNVs_96_strains/CNV_96strains_maf15/CNVs.96strains.maf15.plink.fam \
+         $V/structural_variant_vcf/SVcalls2/SVcalls/SVs_1087/SVs_96/SV.96strains.plink.fam \
+         $V/structural_variant_vcf/SVcalls2/SVcalls/SVs_1087/SVs_96/SV_96_maf_15/SV.96strains.maf15.plink.fam; do
+    cp -p $f $f.orig
+    awk '{ if ($1=="AVI" && $2=="1a") $2="AVI"; print }' $f.orig > $f
+done
+
+```
+

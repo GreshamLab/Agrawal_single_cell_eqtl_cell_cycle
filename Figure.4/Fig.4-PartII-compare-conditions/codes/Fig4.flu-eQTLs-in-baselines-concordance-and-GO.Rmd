@@ -1,0 +1,951 @@
+---
+title: "Fluconazole eQTLs in other conditions: effect-size concordance and sharing"
+author: "Akriti Agrawal"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    theme: flatly
+    code_folding: show
+---
+
+One analysis for every comparison of fluconazole with another condition. It replaces
+`Fig4.effect-size-comparison-replicates.Rmd`, `Fig4.effect-size-comparison-best-replicates.Rmd`
+and `Fig4.effect-size-comparison-flu-doses-vs-baselines.Rmd`.
+
+**Direction (the same everywhere in this file).** Every comparison starts from the
+fluconazole eQTLs: each variant-gene pair that is significant in fluconazole_16ug (16 ug/ml) or
+fluconazole_8ug (8 ug/ml) is looked up in another condition (e.g. YPD.1) among *all tested*
+variants of the same gene (`first_assoc` files). The pair does not need to be significant in that
+condition. The question is always "are fluconazole eQTLs seen in the other condition, and with the
+same effect?". A comparison is named after the condition the eQTLs come from and the condition they
+are looked up in, e.g. "fluconazole_16ug eQTLs in YPD.1"; in every scatter plot the condition looked
+up in is on x and fluconazole on y.
+
+| Significant eQTLs of | Looked up in |
+|---|---|
+| fluconazole_16ug, fluconazole_8ug (two drug doses, not replicates) | YPD.1, YPD.2, synthetic complete (sc2glu.2), YPD (integrated YPD.1 + YPD.2), synthetic complete (integrated sc2glu.1 + sc2glu.2) |
+| Galactose (scgal.1), Section 5 | the same five conditions, plus fluconazole_16ug and fluconazole_8ug |
+| YPD.1 and YPD.2, Section 6 (replicate reference) | the other YPD replicate |
+
+Section 5 repeats Sections 2-4 with the galactose eQTLs in place of the fluconazole eQTLs
+(galactose eQTLs looked up in each of the other conditions; that condition on x, galactose on y).
+Its outputs go to `../results/flu_eQTLs_in_baselines/galactose/`. Section 6 runs the same comparison
+between the two YPD replicates (expected agreement from replication alone), Section 7 puts
+all comparisons in one table, and Section 8 is the summary table.
+
+All eight datasets use the YPD.1 genotype files, FaST-LMM settings and pseudobulk steps.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(tidyverse)
+source("/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Agrawal_single_cell_eqtl_cell_cycle/shared_code/arial_font.R")  # Arial for all plots, as in Figs 2 and 5
+library(data.table)
+library(parallel)
+library(patchwork)
+
+bind_rows <- dplyr::bind_rows
+count     <- dplyr::count
+select    <- dplyr::select
+filter    <- dplyr::filter
+first     <- dplyr::first
+rename    <- dplyr::rename
+recode    <- dplyr::recode
+```
+
+# 1. Datasets and inputs
+
+```{r config}
+ROOT <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all"
+OUTPUT_DIR <- "../results/flu_eQTLs_in_baselines"
+dir.create(OUTPUT_DIR, showWarnings = FALSE, recursive = TRUE)
+N_CORES <- as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", "8"))
+N_PERMS <- 5000
+set.seed(42)
+
+SNP_DIR   <- "results_SNPs_96_MAF15_from_969_strains_with_double_id_final_filtered_for_ncount_less_than_5"
+INDEL_DIR <- "results_Indels_96_MAF15_with_double_id_final_filtered_for_ncount_less_than_5"
+CNV_DIR   <- "results_CNVs_with_double_id_is_not_needed_final_filtered_for_ncount_less_than_5_run_from_new_plink_files_no_chr17"   # CNV GWAS re-run without chr17
+SV_DIR    <- "results_SVs_with_double_id_is_not_needed_final_filtered_for_ncount_less_than_5_run_from_new_plink_files"
+
+make_cond <- function(res, tag, indel_dir = INDEL_DIR,
+                      indel_file = paste0("all_signif_Indels_", tag, "_96_MAF15_with_double_id_final_filtered_for_ncount_less_than_5_with_threshold.txt")) {
+  res <- file.path(ROOT, res)
+  list(signif = c(
+         SNPs   = file.path(res, paste0("all_signif_SNPs_", tag, "_96_MAF15_from_969_strains_with_double_id_final_filtered_for_ncount_less_than_5_with_threshold.txt")),
+         InDels = file.path(res, indel_file),
+         SVs    = file.path(res, paste0("all_signif_SVs_", tag, "_with_double_id_is_not_needed_final_filtered_for_ncount_less_than_5_run_from_new_plink_files_with_threshold.txt")),
+         CNVs   = file.path(res, paste0("all_signif_CNV_", tag, "_with_double_id_is_not_needed_final_filtered_for_ncount_less_than_5_run_from_new_plink_files_no_chr17_with_threshold.txt"))),
+       dirs = c(SNPs = file.path(res, SNP_DIR), InDels = file.path(res, indel_dir),
+                SVs = file.path(res, SV_DIR), CNVs = file.path(res, CNV_DIR)))
+}
+
+CONDS <- list(
+  Flu.1             = make_cond("Flu.1/fastlmm/results", "Flu.1"),
+  Flu.2             = make_cond("Flu.2/fastlmm/results", "Flu.2"),
+  YPD.1             = make_cond("YPD.1/fastlmm/results", "YPD.1",   # YPD.1's InDel run: other folder, same indels.96samples
+                                indel_dir  = "results_Indels_with_double_id_final_filtered_for_ncount_less_than_5",
+                                indel_file = "all_signif_Indels_YPD.1_with_double_id_final_filtered_for_ncount_less_than_5_with_threshold.txt"),
+  YPD.2             = make_cond("YPD.2/fastlmm/results", "YPD.2"),
+  sc2glu.2          = make_cond("sc2glu.2/fastlmm_sc2.glu.2_only/results", "sc2glu.2_only"),
+  YPD_integrated    = make_cond("merged_YPD/fastlmm/results", "merged_YPD"),
+  sc2glu_integrated = make_cond("sc2glu.2/fastlmm/results", "sc2glu.2"),
+  scgal.1           = make_cond("scgal.1/fastlmm/results", "scgal.1"))
+
+FLU   <- c(Flu.1 = "fluconazole_16ug", Flu.2 = "fluconazole_8ug")   # 16 ug/ml, 8 ug/ml
+BASE  <- c(YPD.1 = "YPD.1", YPD.2 = "YPD.2", sc2glu.2 = "synthetic complete",
+           YPD_integrated = "YPD (integrated)", sc2glu_integrated = "synthetic complete (integrated)")
+VARIANTS <- c("SNPs", "InDels", "SVs", "CNVs")
+
+# one row per comparison (eQTL condition x condition looked up in); `flu` / `flu_lab` hold the query dataset (fluconazole
+# here, galactose in Section 5), `short` = its short label;
+# `bases` = the datasets the query is looked up in (BASE, plus both doses for galactose)
+# file-name tags: the two fluconazole datasets are doses, not replicates
+dose_tag <- function(x) dplyr::recode(x, Flu.1 = "Flu_16ug", Flu.2 = "Flu_8ug")
+make_comp <- function(query, short, bases = BASE) expand_grid(flu = names(query), base = names(bases)) %>%
+  mutate(flu_lab = query[flu], base_lab = bases[base], short = short[flu],
+         comparison = paste0(short, " eQTLs in ", base_lab),
+         file_tag = gsub("[^A-Za-z0-9]+", "_", paste0(dose_tag(flu), "_in_", dose_tag(base))))
+COMP <- make_comp(FLU, FLU)
+COMP_LEVELS <- COMP$comparison
+BASE_COLS <- c("YPD.1" = "#81C784", "YPD.2" = "#2E7D32", "synthetic complete" = "#E65100",
+               "YPD (integrated)" = "#1565C0", "synthetic complete (integrated)" = "#FFB74D",
+               "fluconazole_16ug" = "#BA68C8", "fluconazole_8ug" = "#6A1B9A")
+
+missing <- c(unlist(lapply(CONDS, `[[`, "signif")), unlist(lapply(CONDS, `[[`, "dirs")))
+missing <- missing[!file.exists(missing)]
+if (length(missing)) stop("Missing inputs:\n", paste(missing, collapse = "\n"))
+COMP %>% select(comparison, flu_lab, base_lab)
+```
+
+```{r load-signif}
+# significant eQTLs, one row per variant-gene pair and variant type
+signif <- lapply(CONDS, function(cfg) bind_rows(lapply(VARIANTS, function(vt)
+  fread(cfg$signif[[vt]], sep = "\t", quote = "", data.table = FALSE) %>%
+    transmute(Gene = Source_Phenotype, SNP, Variant_Type = vt, Beta = SnpWeight, P = PValue))) %>%
+  distinct(Gene, SNP, Variant_Type, .keep_all = TRUE))
+
+signif_counts <- bind_rows(lapply(names(signif), function(k)
+  signif[[k]] %>% count(Variant_Type) %>% mutate(dataset = k))) %>%
+  pivot_wider(names_from = Variant_Type, values_from = n) %>%
+  mutate(Total = rowSums(across(any_of(VARIANTS))), genes_with_sig_eQTL = sapply(signif[dataset], function(d) n_distinct(d$Gene)))
+knitr::kable(signif_counts, caption = "Significant eQTLs (variant-gene pairs) and genes with a significant eQTL per dataset")
+```
+
+# 2. Look up the fluconazole eQTLs in the other conditions
+
+For each other condition and gene, that condition's `first_assoc` file is read once and the
+variants significant in fluconazole_16ug or fluconazole_8ug for that gene are kept (one table per condition, shared by
+both doses: `sapply(lookups, nrow)` counts the pairs of *either* dose found there). Cached to
+`lookup_<condition>.rds`. Each comparison then uses only its own dose's eQTLs (`query_in_base()`).
+# names(FLU) is both Flu.1 and Flu.2, so flu_pairs is the combined list of gene-variant pairs from both doses
+so output is flu.1 +flu.2
+```{r lookup}
+read_first_assoc <- function(path, snps) {
+  if (!file.exists(path)) return(NULL)
+  d <- tryCatch(fread(path, sep = "\t", select = c("SNP", "SnpWeight", "PValue"), showProgress = FALSE),
+                error = function(e) NULL)
+  if (is.null(d)) NULL else d[SNP %in% snps]
+}
+flu_pairs <- bind_rows(signif[names(FLU)]) %>% distinct(Gene, SNP, Variant_Type)
+
+build_lookup <- function(b, pairs = flu_pairs, out_dir = OUTPUT_DIR) {
+  cache <- file.path(out_dir, paste0("lookup_", b, ".rds"))
+  if (file.exists(cache)) return(readRDS(cache))
+  jobs <- pairs %>% group_by(Variant_Type, Gene) %>% summarise(snps = list(SNP), .groups = "drop")
+  res <- mclapply(seq_len(nrow(jobs)), function(i) {
+    vt <- jobs$Variant_Type[i]; g <- jobs$Gene[i]
+    d <- read_first_assoc(file.path(CONDS[[b]]$dirs[[vt]], g, paste0(g, ".first_assoc.txt")), jobs$snps[[i]])
+    if (is.null(d) || nrow(d) == 0) return(NULL)
+    d[, `:=`(Gene = g, Variant_Type = vt)]
+  }, mc.cores = N_CORES)
+  lk <- rbindlist(res) %>% as.data.frame() %>% distinct(Gene, SNP, Variant_Type, .keep_all = TRUE)
+  saveRDS(lk, cache)
+  lk
+}
+lookups <- lapply(setNames(names(BASE), names(BASE)), build_lookup)
+sapply(lookups, nrow)
+
+# every eQTL with its effect in the condition looked up in (NA = variant not tested for that gene there).
+# Beta_Flu / P_Flu: the eQTL's own condition; Beta_Base / P_Base: the condition looked up in.
+query_in_base <- function(comp, lk) bind_rows(lapply(seq_len(nrow(comp)), function(i) {
+  b <- comp$base[i]
+  signif[[comp$flu[i]]] %>% rename(Beta_Flu = Beta, P_Flu = P) %>%
+    left_join(lk[[b]] %>% rename(Beta_Base = SnpWeight, P_Base = PValue), by = c("Gene", "SNP", "Variant_Type")) %>%
+    mutate(comparison = comp$comparison[i], flu = comp$flu[i], base = b,
+           flu_lab = comp$flu_lab[i], base_lab = comp$base_lab[i])
+})) %>%
+  mutate(comparison = factor(comparison, comp$comparison), Variant_Type = factor(Variant_Type, VARIANTS),
+         base_lab = factor(base_lab, unique(comp$base_lab)),
+         Tested = !is.na(Beta_Base),
+         Same_direction = Tested & sign(Beta_Base) == sign(Beta_Flu),
+         direction = ifelse(Same_direction, "Concordant", "Discordant"),
+         # direction only; significance in the condition looked up in is not used
+         Category = factor(case_when(!Tested ~ "Not tested",
+                                     Same_direction ~ "Same direction",
+                                     TRUE ~ "Opposite direction"),
+                           levels = c("Same direction", "Opposite direction", "Not tested")))
+# column names for the CSV exports
+export_cols <- function(d) d %>%
+  transmute(comparison, condition = flu_lab, looked_up_in = base_lab, Gene, SNP, Variant_Type,
+            Beta_condition = Beta_Flu, P_condition = P_Flu, Beta_looked_up_in = Beta_Base, P_looked_up_in = P_Base,
+            Tested, Same_direction, Category)
+flu_in_base <- query_in_base(COMP, lookups)
+write.csv(export_cols(flu_in_base), file.path(OUTPUT_DIR, "Flu_eQTLs_in_other_conditions_all.csv"), row.names = FALSE)
+conc <- flu_in_base %>% filter(Tested)
+```
+
+**Control: YPD.1 vs YPD.2.** The same lookup between the two YPD replicates (each replicate's
+significant eQTLs looked up in the other), used as the reference for agreement expected from
+replication alone (Section 3.1 control figure, Section 6). Cached to `replicates/`.
+
+```{r rep-lookup}
+REP_COMP <- bind_rows(make_comp(c(YPD.1 = "YPD.1"), c(YPD.1 = "YPD.1"), c(YPD.2 = "YPD.2")),
+                      make_comp(c(YPD.2 = "YPD.2"), c(YPD.2 = "YPD.2"), c(YPD.1 = "YPD.1")))
+REP_DIR  <- file.path(OUTPUT_DIR, "replicates")
+dir.create(REP_DIR, showWarnings = FALSE)
+
+# YPD.2 is looked up with YPD.1's eQTLs and YPD.1 with YPD.2's, so each lookup is named by the dataset it reads
+rep_lookups <- list(YPD.2 = build_lookup("YPD.2", pairs = signif[["YPD.1"]] %>% distinct(Gene, SNP, Variant_Type), out_dir = REP_DIR),
+                    YPD.1 = build_lookup("YPD.1", pairs = signif[["YPD.2"]] %>% distinct(Gene, SNP, Variant_Type), out_dir = REP_DIR))
+sapply(rep_lookups, nrow)
+
+rep_in_base <- query_in_base(REP_COMP, rep_lookups)
+write.csv(export_cols(rep_in_base), file.path(REP_DIR, "YPD_replicate_eQTLs_all.csv"), row.names = FALSE)
+rep_conc <- rep_in_base %>% filter(Tested)
+```
+
+# 3. Effect-size concordance
+
+**What the numbers mean.** Each fluconazole eQTL has two signed effect sizes (beta): in the
+condition it is looked up in (x) and in fluconazole (y).
+
+- *Same direction (%)*: fraction whose beta has the same sign in both. Direction only.
+- *Pearson r*: correlation of the signed betas. High r means eQTLs keep their direction **and**
+  their relative strength (stronger in the other condition = stronger in fluconazole). It does not
+  test whether the betas are equal: r = 1 also if every fluconazole beta is twice the other condition's beta.
+- *Spearman rho*: the same on ranks, so not driven by a few large effects.
+- Equal magnitude would put the points on the dashed 1:1 line, but only eQTLs significant in
+  fluconazole are plotted, so their fluconazole |beta| is always large (>= ~0.4): the points sit
+  above the line by selection, not biology.
+
+Tests: one-sided binomial test of same direction > 50%; permutation tests for same direction
+and Pearson r (the other condition's betas shuffled across eQTLs, `r N_PERMS` permutations, so the smallest
+possible P is `r signif(1 / (N_PERMS + 1), 2)`). Binomial and Pearson P-values are
+BH-adjusted within the variant-type rows and within the "All variants" rows.
+
+```{r stats}
+conc_stats <- function(d) {
+  n <- nrow(d)
+  if (n < 3) return(tibble(n_tested = n))
+  same <- sign(d$Beta_Base) == sign(d$Beta_Flu)
+  r    <- cor(d$Beta_Base, d$Beta_Flu)
+  perm <- replicate(N_PERMS, { b <- sample(d$Beta_Base); c(mean(sign(b) == sign(d$Beta_Flu)), cor(b, d$Beta_Flu)) })
+  tibble(n_tested = n, n_same_direction = sum(same), pct_same_direction = 100 * mean(same),
+         binom_p = binom.test(sum(same), n, 0.5, alternative = "greater")$p.value,
+         perm_p_same_direction = (sum(perm[1, ] >= mean(same)) + 1) / (N_PERMS + 1),
+         pearson_r = r, spearman_rho = cor(d$Beta_Base, d$Beta_Flu, method = "spearman"),
+         pearson_p = cor.test(d$Beta_Base, d$Beta_Flu)$p.value,
+         perm_p_r = (sum(perm[2, ] >= r) + 1) / (N_PERMS + 1),
+         perm_same = list(perm[1, ]), perm_r = list(perm[2, ]))
+}
+# per variant type, all variants, and both stacked (n_flu_eQTLs = query eQTLs in the comparison)
+concordance_tables <- function(in_base, cd) {
+  totals_vt  <- in_base %>% count(comparison, Variant_Type, name = "n_flu_eQTLs")
+  totals_all <- in_base %>% count(comparison, name = "n_flu_eQTLs")
+  vt <- cd %>% group_by(comparison, base_lab, Variant_Type) %>% group_modify(~ conc_stats(.x)) %>% ungroup() %>%
+    left_join(totals_vt, by = c("comparison", "Variant_Type")) %>%
+    mutate(binom_p_BH = p.adjust(binom_p, "BH"), pearson_p_BH = p.adjust(pearson_p, "BH"))
+  all <- cd %>% group_by(comparison, base_lab) %>% group_modify(~ conc_stats(.x)) %>% ungroup() %>%
+    left_join(totals_all, by = "comparison") %>% mutate(Variant_Type = "All variants") %>%
+    mutate(binom_p_BH = p.adjust(binom_p, "BH"), pearson_p_BH = p.adjust(pearson_p, "BH"))
+  table <- bind_rows(vt %>% mutate(Variant_Type = as.character(Variant_Type)), all) %>%
+    mutate(Variant_Type = factor(Variant_Type, c(VARIANTS, "All variants")),
+           pct_tested = 100 * n_tested / n_flu_eQTLs) %>%
+    arrange(comparison, Variant_Type) %>%
+    select(comparison, Variant_Type, n_flu_eQTLs, n_tested, pct_tested, everything(), -base_lab)
+  list(vt = vt, all = all, table = table)
+}
+ct <- concordance_tables(flu_in_base, conc)
+rep_ct <- concordance_tables(rep_in_base, rep_conc)   # YPD replicate control (Sections 3.1 and 6)
+stats_vt <- ct$vt; stats_all <- ct$all; stats_table <- ct$table
+write.csv(stats_table %>% select(-perm_same, -perm_r),
+          file.path(OUTPUT_DIR, "Effect_size_concordance_by_variant_type.csv"), row.names = FALSE)
+knitr::kable(stats_table %>% select(comparison, Variant_Type, n_flu_eQTLs, n_tested, pct_same_direction,
+                                    binom_p_BH, pearson_r, spearman_rho, perm_p_r),
+             digits = c(0, 0, 0, 0, 1, 3, 3, 3, 4))
+```
+
+## 3.1 One figure per comparison
+
+The first figure is the control, YPD.1 eQTLs looked up in YPD.2 (two replicates of the same
+condition): the agreement expected without any change of condition. All figures share the same
+axis range.
+
+All variant types in one panel. Points: eQTLs tested in the other condition, by direction.
+Lines: least-squares fit per variant type (legend: n, Pearson r and % same direction per type).
+
+```{r scatter, fig.width = 11, fig.height = 7, results = "asis"}
+DIR_COLS <- c(Concordant = "#27AE60", Discordant = "#E74C3C")
+VT_COLS  <- c(SNPs = "#3498DB", InDels = "#9B59B6", SVs = "#B7950B", CNVs = "#E67E22")
+# one axis range for the control and all fluconazole figures, so they can be compared directly
+lim <- max(abs(c(conc$Beta_Base, conc$Beta_Flu, rep_conc$Beta_Base, rep_conc$Beta_Flu))) * 1.05
+
+scatter_plot <- function(i, comp = COMP, cd = conc, s_all = stats_all, s_vt = stats_vt, lim_xy = lim) {
+  cm <- comp$comparison[i]
+  d  <- cd %>% filter(comparison == cm)
+  st <- s_all %>% filter(comparison == cm)
+  vt <- s_vt %>% filter(comparison == cm)
+  vt_lab <- setNames(sprintf("%s (n = %d, r = %.2f, %.0f%% same dir.)", vt$Variant_Type, vt$n_tested,
+                             vt$pearson_r, vt$pct_same_direction), as.character(vt$Variant_Type))
+  ggplot(d, aes(Beta_Base, Beta_Flu)) +
+    geom_hline(yintercept = 0, colour = "grey75", linewidth = 0.3) +
+    geom_vline(xintercept = 0, colour = "grey75", linewidth = 0.3) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", colour = "grey45") +
+    geom_point(aes(colour = direction), size = 1.4, alpha = 0.35) +
+    scale_colour_manual(values = DIR_COLS, name = "Direction",
+                        labels = c(Concordant = "Same direction", Discordant = "Opposite direction")) +
+    guides(colour = guide_legend(order = 1, override.aes = list(size = 3, alpha = 1))) +
+    ggnewscale::new_scale_colour() +
+    geom_smooth(aes(colour = Variant_Type), method = "lm", se = FALSE, linewidth = 1.2) +
+    scale_colour_manual(values = VT_COLS, labels = vt_lab, name = "Variant type (fit)") +
+    guides(colour = guide_legend(order = 2)) +
+    annotate("label", x = -Inf, y = Inf, hjust = -0.03, vjust = 1.05, size = 4, fontface = "bold",
+             label.size = 0, fill = alpha("white", 0.85),
+             label = sprintf("All variants, n = %d\nSame direction = %.1f%%\nPearson r = %.2f\nSpearman rho = %.2f",
+                             st$n_tested, st$pct_same_direction, st$pearson_r, st$spearman_rho)) +
+    coord_equal(xlim = c(-lim_xy, lim_xy), ylim = c(-lim_xy, lim_xy)) +
+    labs(title = cm,
+         subtitle = sprintf("Significant %s eQTLs, effect size looked up in %s", comp$flu_lab[i], comp$base_lab[i]),
+         x = bquote(bold("Effect size "*beta*", "*.(comp$base_lab[i]))),
+         y = bquote(bold("Effect size "*beta*", "*.(comp$flu_lab[i])))) +
+    theme_bw(base_size = 13) +
+    theme(plot.title = element_text(face = "bold", hjust = 0.5),
+          plot.subtitle = element_text(hjust = 0.5, colour = "grey40"),
+          axis.title = element_text(size = 14), axis.text = element_text(size = 12, colour = "black"),
+          panel.grid.minor = element_blank())
+}
+# control first: YPD.1 eQTLs looked up in YPD.2 (same condition, replicate)
+i_ctrl <- which(REP_COMP$flu == "YPD.1")
+cat("\n\n### ", REP_COMP$comparison[i_ctrl], " (control: YPD replicates)\n\n", sep = "")
+p <- scatter_plot(i_ctrl, REP_COMP, rep_conc, rep_ct$all, rep_ct$vt, lim); print(p)
+ggsave(file.path(OUTPUT_DIR, paste0("Fig_effect_size_", REP_COMP$file_tag[i_ctrl], "_control.tiff")),
+       p, width = 11, height = 7, dpi = 600, compression = "lzw", bg = "white")
+
+for (i in seq_len(nrow(COMP))) {
+  cat("\n\n### ", COMP$comparison[i], "\n\n", sep = "")
+  p <- scatter_plot(i); print(p)
+  ggsave(file.path(OUTPUT_DIR, paste0("Fig_effect_size_", COMP$file_tag[i], ".tiff")),
+         p, width = 11, height = 7, dpi = 600, compression = "lzw", bg = "white")
+}
+```
+
+## 3.2 Summary across variant types
+
+```{r summary-plot, fig.width = 15, fig.height = 8}
+summary_plot <- function(st_table, comp, title) {
+  sum_long <- st_table %>%
+    left_join(comp %>% select(comparison, flu_lab, base_lab), by = "comparison") %>%
+    select(flu_lab, base_lab, Variant_Type, `Found (%)` = pct_tested,
+           `Same direction (%)` = pct_same_direction, `Pearson r` = pearson_r) %>%
+    pivot_longer(-c(flu_lab, base_lab, Variant_Type), names_to = "metric", values_to = "value") %>%
+    mutate(metric = factor(metric, c("Found (%)", "Same direction (%)", "Pearson r")),
+           base_lab = factor(base_lab, unique(comp$base_lab)))
+  p_sum <- ggplot(sum_long, aes(Variant_Type, value, fill = base_lab)) +
+    geom_col(position = position_dodge(0.85), width = 0.8, colour = "grey30", linewidth = 0.2) +
+    geom_text(aes(label = ifelse(metric == "Pearson r", sprintf("%.2f", value), sprintf("%.0f", value))),
+              position = position_dodge(0.85), vjust = -0.3, size = 2.3, fontface = "bold") +
+    facet_grid(flu_lab ~ metric, scales = "free_y",
+               labeller = labeller(flu_lab = function(x) paste(x, "eQTLs"))) +
+    scale_fill_manual(values = BASE_COLS, name = "Looked up in") +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
+    labs(x = NULL, y = NULL, title = title) +
+    theme_classic(base_size = 13) +
+    theme(legend.position = "top", strip.text = element_text(face = "bold"), strip.background = element_blank(),
+          axis.text.x = element_text(face = "bold", angle = 30, hjust = 1),
+          plot.title = element_text(face = "bold", hjust = 0.5))
+  p_sum
+}
+p_sum <- summary_plot(stats_table, COMP, "Fluconazole eQTLs in the conditions, by variant type")
+print(p_sum)
+ggsave(file.path(OUTPUT_DIR, "Fig_concordance_summary_by_variant_type.tiff"), p_sum,
+       width = 15, height = 8, dpi = 600, compression = "lzw", bg = "white")
+```
+
+## 3.3 Permutation null distributions (all variants)
+
+**The question.** About 80% of fluconazole eQTLs have the same direction of effect in YPD. Is that
+more than we would see by chance? If most effects happened to be positive in both datasets, even
+unrelated eQTLs would often "agree" in sign. The permutation test measures what chance alone gives.
+
+**What the code does** (in `conc_stats()`, Section 3), for each comparison, e.g. fluconazole_16ug
+eQTLs in YPD.1:
+
+1. Take the real pairs: for every eQTL, its effect size (beta) in fluconazole and the effect size
+   of the *same gene and same variant* in YPD.1. Compute the % with the same direction and the
+   Pearson r. These are the **observed** values.
+2. Shuffle the YPD.1 betas randomly across eQTLs, keeping the fluconazole betas in place. Each
+   fluconazole eQTL is now paired with the YPD.1 effect of a *random other* eQTL: the values are
+   real, but the link "same gene, same variant" is broken.
+3. Recompute % same direction and Pearson r for the shuffled pairs.
+4. Repeat 5,000 times. The 5,000 values are the **null distribution**: the agreement expected if an
+   eQTL's effect in one condition had nothing to do with its effect in the other.
+5. p-value = (number of shuffles with a value at least as large as the observed one + 1) / 5,001.
+   If no shuffle reaches the observed value, p = 1/5,001 = 0.0002, the smallest possible.
+
+Shuffling (instead of simply comparing with 50%) keeps each dataset's real mix of positive and
+negative effects, so the chance level is estimated correctly.
+
+**How to read the figure** (one per comparison, two panels; the sentence above each figure gives
+the observed numbers):
+
+- *Grey histogram*: the 5,000 shuffled values, i.e. what chance gives. Each bar's height (y axis)
+  is how many of the 5,000 random pairings gave a value in that range of the x axis; all bars
+  together add up to 5,000. For same direction it sits
+  around 50%, for Pearson r around 0. It is a distribution because every shuffle is a different
+  random pairing.
+- *Coloured vertical line with arrow*: the value from the real data (written in the arrow label);
+  only its position on the x axis matters, its height has no meaning. The real data are a single
+  pairing (each eQTL with its own effect in the other condition), so they give a single value:
+  the % of all compared eQTLs whose effect has the same sign in both conditions (left), or the
+  Pearson r between the two conditions' effect sizes over all compared eQTLs (right). It is
+  computed from *both* conditions' effect sizes, not from either alone. The individual effect
+  sizes are shown in the scatter plots of Section 3.1.
+- *Dashed line*: the "no agreement" reference (50% for direction, 0 for r).
+- *Label*: the permutation p-value for "more than chance" (share of the 5,000 random pairings with a
+  value at least as large as the observed one).
+
+The **middle panel** is the opposite direction: the % of eQTLs whose effect has opposite signs in
+the two conditions (100% minus the % same direction, in the real data and in every random pairing).
+A line to the *right* of the grey histogram would mean more sign flips than chance, i.e. effects
+systematically reversed between conditions. Here the line lies far to the *left* (far fewer flips
+than chance), so its p-value for "more than chance" is close to 1.
+
+**What to expect.** If effects are shared between the conditions, the coloured line lies far to
+the right of the grey histogram (observed agreement much higher than any shuffle), as in every
+comparison here. If effects were unrelated, the line would fall inside the histogram. A line to the
+*left* of the histogram would mean fewer same-direction eQTLs than chance, i.e. systematically
+reversed effects (not seen; see Section 3.5).
+
+Note: the test treats every eQTL as independent, but eQTLs of the same gene are often linked
+variants (LD), so the p-values are somewhat over-confident; the observed values are so far from the
+null that this does not change the conclusion.
+
+```{r null-plots, fig.width = 19, fig.height = 5.8, results = "asis"}
+# one panel: grey histogram = statistic from 5,000 random pairings (null);
+# coloured line + arrow = the same statistic from the real pairs (one value for all eQTLs of the comparison)
+null_panel <- function(perm, obs, ref, col, ttl, xlab, p, pct) {
+  k <- if (pct) 100 else 1
+  pd <- tibble(v = perm * k); obs <- obs * k; ref <- ref * k
+  expct <- mean(pd$v)
+  # tallest bar: ggplot spreads the 50 bins over the whole x axis (including the observed and reference lines)
+  rng  <- range(c(pd$v, obs, ref))
+  ymax <- max(table(cut(pd$v, seq(rng[1], rng[2], length.out = 51), include.lowest = TRUE)))
+  obs_lab <- if (pct) sprintf("%.1f%%", obs) else sprintf("r = %.2f", obs)
+  x_txt <- expct + 0.55 * (obs - expct)
+  ggplot(pd, aes(v)) +
+    geom_histogram(aes(fill = "Random pairings (5,000 permutations)"), bins = 50, colour = "white", linewidth = 0.2) +
+    geom_vline(xintercept = obs, colour = col, linewidth = 1.1) +
+    geom_vline(xintercept = ref, linetype = "dashed", colour = "black", linewidth = 1.1) +
+    annotate("text", x = expct, y = ymax * 1.08, label = "chance", size = 3.5, colour = "grey35", fontface = "italic") +
+    annotate("segment", x = x_txt, xend = obs, y = ymax * 0.45, yend = ymax * 0.3, colour = col, linewidth = 0.8,
+             arrow = arrow(length = unit(0.25, "cm"), type = "closed")) +
+    annotate("label", x = x_txt, y = ymax * 0.45, label = paste0("Observed (real data)\n", obs_lab), size = 3.5, fontface = "bold",
+             colour = col, label.size = 0, fill = alpha("white", 0.85)) +
+    annotate("label", x = (expct + obs) / 2, y = Inf, hjust = 0.5, vjust = 1.1, size = 3.2, label.size = 0, fill = alpha("white", 0.85),
+             label = paste("permutation p (more than chance) =", if (p < 0.001) sprintf("%.1e", p) else sprintf("%.3f", p))) +
+    scale_fill_manual(values = c("Random pairings (5,000 permutations)" = "grey70"), name = NULL) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+    labs(title = ttl, x = xlab, y = "Number of random pairings (out of 5,000)") +
+    theme_classic(base_size = 12) +
+    theme(plot.title = element_text(face = "bold"), legend.position = "bottom", legend.box = "vertical",
+          legend.margin = margin(0, 0, 0, 0))
+}
+null_plot <- function(st) {
+  # printed summary of the observed data above each figure
+  cat(sprintf(paste0("\n\nOf %s eQTLs compared (same gene, same variant), %s (%.1f%%) have the same direction of effect in both ",
+                     "conditions and %s (%.1f%%) the opposite direction. Random pairing of eQTLs gives on average %.1f%% same ",
+                     "direction and %.1f%% opposite direction. Pearson r of the effect sizes: %.2f observed, %.2f on average ",
+                     "for random pairing.\n\n"),
+              format(st$n_tested, big.mark = ","), format(st$n_same_direction, big.mark = ","), st$pct_same_direction,
+              format(st$n_tested - st$n_same_direction, big.mark = ","), 100 - st$pct_same_direction,
+              100 * mean(st$perm_same[[1]]), 100 - 100 * mean(st$perm_same[[1]]),
+              st$pearson_r, {m <- mean(st$perm_r[[1]]); if (abs(m) < 0.005) 0 else m}))
+  # opposite direction = 1 - same direction, in the real data and in every permutation;
+  # p: share of permutations with at least as many opposite-direction eQTLs as observed
+  p_opp <- (sum(st$perm_same[[1]] <= st$pct_same_direction / 100) + 1) / (length(st$perm_same[[1]]) + 1)
+  (null_panel(st$perm_same[[1]], st$pct_same_direction / 100, 0.5, "#1B7837", "Same direction of effect",
+              "% of eQTLs with the same sign of effect in both conditions", st$perm_p_same_direction, pct = TRUE) |
+   null_panel(1 - st$perm_same[[1]], 1 - st$pct_same_direction / 100, 0.5, "#B2182B", "Opposite direction of effect",
+              "% of eQTLs with the opposite sign of effect in the two conditions", p_opp, pct = TRUE) |
+   null_panel(st$perm_r[[1]], st$pearson_r, 0, "#2C7FB8", "Correlation of effect sizes",
+              "Pearson r", st$perm_p_r, pct = FALSE)) +
+    plot_annotation(title = as.character(st$comparison),
+                    subtitle = "Grey: 5,000 random pairings of eQTLs (chance). Coloured line: the value from the real data.",
+                    theme = theme(plot.title = element_text(face = "bold", hjust = 0.5),
+                                  plot.subtitle = element_text(hjust = 0.5, colour = "grey30")))
+}
+for (i in seq_len(nrow(COMP))) {
+  cat("\n\n### ", COMP$comparison[i], "\n\n", sep = "")
+  p <- null_plot(stats_all %>% filter(comparison == COMP$comparison[i])); print(p)
+  ggsave(file.path(OUTPUT_DIR, paste0("Fig_null_distribution_", COMP$file_tag[i], ".tiff")),
+         p, width = 19, height = 5.8, dpi = 600, compression = "lzw", bg = "white")
+}
+```
+
+## 3.4 eQTLs significant in both conditions
+
+The comparisons above use every fluconazole eQTL found (tested) in the other condition, whatever
+its p-value there. Here only the gene-variant pairs that are **significant in both conditions**
+are kept, i.e. eQTLs detected independently in each. For these, the same statistics are reported,
+next to the values for all found eQTLs. First row: the control (YPD.1 eQTLs in YPD.2, two
+replicates of the same condition). `ratio_same_dir` = median |beta in the other condition| /
+|beta in the eQTL's own condition| over same-direction eQTLs (1 = same magnitude);
+`spearman_abs_beta` = Spearman correlation of the magnitudes |beta| only.
+
+```{r sig-both, fig.width = 14, fig.height = 10}
+ctrl_comp <- REP_COMP$comparison[REP_COMP$flu == "YPD.1"]
+found_all <- bind_rows(rep_conc %>% filter(comparison == ctrl_comp), conc) %>%
+  mutate(comparison = factor(as.character(comparison), c(ctrl_comp, COMP$comparison)))
+
+# keep pairs that are also significant in the condition looked up in
+sig_both <- bind_rows(lapply(split(found_all, found_all$base), function(x)
+  semi_join(x, signif[[x$base[1]]], by = c("Gene", "SNP", "Variant_Type"))))
+
+eff_stats <- function(d) d %>% group_by(comparison) %>%
+  summarise(n = n(), pct_same_direction = 100 * mean(Same_direction),
+            pearson_r = if (n() > 2) cor(Beta_Flu, Beta_Base) else NA_real_,
+            spearman_rho = if (n() > 2) cor(Beta_Flu, Beta_Base, method = "spearman") else NA_real_,
+            spearman_abs_beta = if (n() > 2) cor(abs(Beta_Flu), abs(Beta_Base), method = "spearman") else NA_real_,
+            ratio_same_dir = median(abs(Beta_Base[Same_direction]) / abs(Beta_Flu[Same_direction])),
+            .groups = "drop")
+sig_tab <- full_join(eff_stats(sig_both), eff_stats(found_all), by = "comparison", suffix = c("_sig_both", "_all_found")) %>%
+  arrange(comparison)
+write.csv(sig_tab, file.path(OUTPUT_DIR, "Effect_size_sig_in_both_vs_all_found.csv"), row.names = FALSE)
+knitr::kable(sig_tab %>% select(comparison, n_sig_both, pct_same_direction_sig_both, pearson_r_sig_both,
+                                spearman_rho_sig_both, spearman_abs_beta_sig_both, ratio_same_dir_sig_both,
+                                n_all_found, pct_same_direction_all_found, pearson_r_all_found,
+                                spearman_abs_beta_all_found, ratio_same_dir_all_found),
+             digits = 2, caption = "eQTLs significant in both conditions vs all found eQTLs (first row: control)")
+
+lab_sig <- sig_tab %>% transmute(comparison, label = sprintf("n = %d\nsame dir. = %.0f%%\nr = %.2f",
+                                                           n_sig_both, pct_same_direction_sig_both, pearson_r_sig_both))
+lim_sig <- max(abs(c(sig_both$Beta_Base, sig_both$Beta_Flu))) * 1.05
+p <- ggplot(sig_both, aes(Beta_Base, Beta_Flu)) +
+  geom_hline(yintercept = 0, colour = "grey75", linewidth = 0.3) +
+  geom_vline(xintercept = 0, colour = "grey75", linewidth = 0.3) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", colour = "grey45") +
+  geom_point(aes(colour = direction), size = 1.6, alpha = 0.6) +
+  geom_label(data = lab_sig, aes(x = -Inf, y = Inf, label = label), hjust = -0.05, vjust = 1.1,
+             size = 3, label.size = 0, fill = alpha("white", 0.8), inherit.aes = FALSE) +
+  scale_colour_manual(values = DIR_COLS, labels = c(Concordant = "Same direction", Discordant = "Opposite direction"),
+                      name = "Direction", drop = FALSE) +
+  facet_wrap(~ comparison, ncol = 4, labeller = label_wrap_gen(30)) +
+  coord_equal(xlim = c(-lim_sig, lim_sig), ylim = c(-lim_sig, lim_sig)) +
+  labs(title = "eQTLs significant in both conditions (same gene, same variant)",
+       x = expression(bold("Effect size " * beta * ", condition looked up in")),
+       y = expression(bold("Effect size " * beta * ", eQTL's own condition"))) +
+  theme_bw(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5), legend.position = "top",
+        strip.text = element_text(face = "bold", size = 9), panel.grid.minor = element_blank())
+print(p)
+ggsave(file.path(OUTPUT_DIR, "Fig_effect_size_sig_in_both.tiff"), p, width = 14, height = 10, dpi = 600,
+       compression = "lzw", bg = "white")
+```
+
+## 3.5 Same or opposite direction: more than chance?
+
+Two questions, each against what chance alone would give (first row: the control).
+
+**Whole set (permutation null of Section 3.3).** Shuffling the other condition's betas across
+eQTLs gives the % same direction expected if an eQTL's effect in one condition were unrelated to
+its effect in the other (`expected_pct_same`; % opposite = 100 - % same). `p_same_above_chance`:
+are there more same-direction eQTLs than chance? `p_opposite_above_chance`: are there more
+opposite-direction eQTLs than chance (expected if effects were systematically reversed)?
+
+**Per eQTL (p-value in the other condition).** If a fluconazole eQTL has *no* effect in the other
+condition, its p-value there is random (uniform: ~5% below 0.05, flat histogram) and its
+direction is a coin flip. If its effect is *reversed* there, opposite-direction eQTLs would show
+an excess of small p-values. `pct_p05` is the % of eQTLs with p < 0.05 in the other condition
+(5% expected by chance), with a one-sided binomial test against 5%. In the histograms the dashed
+line is the chance (uniform) expectation.
+
+```{r direction-chance, fig.width = 14, fig.height = 10}
+perm_all <- bind_rows(rep_ct$all %>% filter(comparison == ctrl_comp), stats_all) %>%
+  mutate(comparison = factor(as.character(comparison), levels(found_all$comparison)))
+chance_tab <- perm_all %>% rowwise() %>%
+  transmute(comparison, n_found = n_tested,
+            observed_pct_same = pct_same_direction, expected_pct_same = 100 * mean(perm_same),
+            p_same_above_chance = perm_p_same_direction,
+            observed_pct_opposite = 100 - pct_same_direction, expected_pct_opposite = 100 - 100 * mean(perm_same),
+            p_opposite_above_chance = (sum(perm_same <= pct_same_direction / 100) + 1) / (N_PERMS + 1)) %>%
+  ungroup() %>% arrange(comparison)
+write.csv(chance_tab, file.path(OUTPUT_DIR, "Direction_vs_chance_permutation.csv"), row.names = FALSE)
+knitr::kable(chance_tab, digits = c(0, 0, 1, 1, 4, 1, 1, 4),
+             caption = "Observed vs chance (permutation) % same and % opposite direction")
+
+pval_tab <- found_all %>%
+  mutate(direction = ifelse(Same_direction, "Same direction", "Opposite direction")) %>%
+  group_by(comparison, direction) %>%
+  summarise(n = n(), pct_p05 = 100 * mean(P_Base < 0.05), median_p = median(P_Base),
+            binom_p_vs_5pct = binom.test(sum(P_Base < 0.05), n(), 0.05, alternative = "greater")$p.value,
+            .groups = "drop") %>%
+  arrange(comparison, desc(direction))
+write.csv(pval_tab, file.path(OUTPUT_DIR, "Direction_pvalue_in_other_condition.csv"), row.names = FALSE)
+knitr::kable(pval_tab, digits = c(0, 0, 0, 1, 2, 4),
+             caption = "p-value in the other condition, by direction (chance: 5% below 0.05, median 0.5)")
+cat("\n")
+
+p <- found_all %>%
+  mutate(direction = factor(ifelse(Same_direction, "Same direction", "Opposite direction"),
+                            c("Same direction", "Opposite direction"))) %>%
+  ggplot(aes(P_Base, fill = direction)) +
+  geom_histogram(aes(y = after_stat(density)), breaks = seq(0, 1, 0.05), position = "identity",
+                 alpha = 0.55, colour = "white", linewidth = 0.2) +
+  geom_hline(yintercept = 1, linetype = "dashed") +
+  scale_fill_manual(values = c("Same direction" = "#1B7837", "Opposite direction" = "#B2182B"), name = NULL) +
+  facet_wrap(~ comparison, ncol = 4, labeller = label_wrap_gen(30)) +
+  labs(title = "p-value in the condition looked up in, by direction of effect",
+       subtitle = "Dashed line: expected if the eQTL had no effect there (uniform p-values)",
+       x = "p-value in the condition looked up in", y = "Density") +
+  theme_bw(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5), plot.subtitle = element_text(hjust = 0.5, colour = "grey40"),
+        legend.position = "top", strip.text = element_text(face = "bold", size = 9), panel.grid.minor = element_blank())
+print(p)
+ggsave(file.path(OUTPUT_DIR, "Fig_direction_pvalue_in_other_condition.tiff"), p, width = 14, height = 10, dpi = 600,
+       compression = "lzw", bg = "white")
+```
+
+The same result as one bar per comparison and direction: the % of eQTLs with p < 0.05 in the
+condition looked up in. The dashed line is the 5% expected by chance (eQTL with no effect there).
+Bars far above the line: real shared effects. Bars at or below the line: no detectable effect, so
+the direction is a coin flip.
+
+```{r direction-chance-bars, fig.width = 11, fig.height = 7}
+p <- pval_tab %>%
+  # reversed levels so that, after coord_flip, same direction is drawn above opposite direction
+  mutate(direction = factor(direction, c("Opposite direction", "Same direction")),
+         comparison = factor(comparison, rev(levels(found_all$comparison)))) %>%
+  ggplot(aes(comparison, pct_p05, fill = direction)) +
+  geom_col(position = position_dodge(0.8), width = 0.75, colour = "grey30", linewidth = 0.2) +
+  geom_text(aes(label = sprintf("%.1f%%", pct_p05)), position = position_dodge(0.8), hjust = -0.15, size = 3.2) +
+  geom_hline(aes(yintercept = 5, linetype = "Expected by chance (5%)")) +
+  scale_fill_manual(values = c("Same direction" = "#1B7837", "Opposite direction" = "#B2182B"),
+                    breaks = c("Same direction", "Opposite direction"), name = NULL) +
+  scale_linetype_manual(values = c("Expected by chance (5%)" = "dashed"), name = NULL) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
+  coord_flip() +
+  labs(title = "eQTLs with p < 0.05 in the condition looked up in",
+       subtitle = "Same-direction eQTLs: far above chance (shared effects). Opposite-direction eQTLs: at or below chance (noise).",
+       x = NULL, y = "% of eQTLs with p < 0.05 in the condition looked up in") +
+  theme_classic(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5), plot.subtitle = element_text(hjust = 0.5, colour = "grey30", size = 10),
+        legend.position = "top", axis.text.y = element_text(colour = "black"))
+print(p)
+ggsave(file.path(OUTPUT_DIR, "Fig_direction_pct_p05_vs_chance.tiff"), p, width = 11, height = 7, dpi = 600,
+       compression = "lzw", bg = "white")
+```
+
+# 4. Are fluconazole eQTLs seen in the other conditions?
+
+Every significant fluconazole eQTL falls in one category per comparison, based only on the
+direction of its effect: the same variant-gene pair is tested in the other condition with the **same**
+direction of effect, tested with the **opposite** direction, or **not tested** there (variant not
+in that condition's FaST-LMM output for that gene, so no effect size to compare). Whether the eQTL
+is also significant in the other condition is not used.
+
+```{r sharing, fig.width = 13, fig.height = 7}
+share_table <- function(in_base) in_base %>% count(flu_lab, base_lab, Variant_Type, Category, .drop = FALSE) %>%
+  bind_rows(in_base %>% count(flu_lab, base_lab, Category, .drop = FALSE) %>% mutate(Variant_Type = "All variants")) %>%
+  filter(!is.na(flu_lab)) %>%
+  group_by(flu_lab, base_lab, Variant_Type) %>% mutate(Pct = 100 * n / sum(n)) %>% ungroup() %>%
+  mutate(Variant_Type = factor(Variant_Type, c(VARIANTS, "All variants")))
+share <- share_table(flu_in_base)
+write.csv(share, file.path(OUTPUT_DIR, "Flu_eQTL_categories_in_other_conditions.csv"), row.names = FALSE)
+
+CAT_COLS <- c("Same direction" = "#1B7837", "Opposite direction" = "#B2182B",
+              "Not tested" = "grey70")
+# `what` = the query condition, as it should read in axis labels and titles
+share_plot <- function(sh, what) sh %>% filter(Variant_Type == "All variants") %>%
+  ggplot(aes(base_lab, Pct, fill = Category)) +
+  geom_col(width = 0.75, colour = "grey20", linewidth = 0.2) +
+  geom_text(aes(label = ifelse(Pct >= 4, sprintf("%.0f%%", Pct), "")), position = position_stack(vjust = 0.5),
+            size = 3.2, fontface = "bold") +
+  facet_wrap(~ flu_lab, labeller = labeller(flu_lab = function(x) paste(x, "eQTLs"))) +
+  scale_fill_manual(values = CAT_COLS, name = NULL) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.02))) +
+  guides(fill = guide_legend(ncol = 2)) +
+  labs(x = "Looked up in", y = paste0("% of ", what, " eQTLs"),
+       title = paste0(str_to_sentence(what), " eQTLs in other conditions")) +
+  theme_classic(base_size = 13) +
+  theme(legend.position = "top", plot.title = element_text(face = "bold", hjust = 0.5),
+        axis.text.x = element_text(angle = 30, hjust = 1, face = "bold"),
+        strip.text = element_text(face = "bold", size = 13), strip.background = element_blank())
+p_share <- share_plot(share, "fluconazole")
+print(p_share)
+ggsave(file.path(OUTPUT_DIR, "Fig_flu_eQTLs_in_other_conditions.tiff"), p_share,
+       width = 13, height = 7, dpi = 600, compression = "lzw", bg = "white")
+```
+
+```{r sharing-by-type, fig.width = 16, fig.height = 8}
+share_vt_plot <- function(sh, what) sh %>% filter(Variant_Type != "All variants") %>%
+  ggplot(aes(base_lab, Pct, fill = Category)) +
+  geom_col(width = 0.75, colour = "grey20", linewidth = 0.2) +
+  geom_text(aes(label = ifelse(Pct >= 6, sprintf("%.0f", Pct), "")), position = position_stack(vjust = 0.5),
+            size = 2.6, fontface = "bold") +
+  facet_grid(flu_lab ~ Variant_Type, labeller = labeller(flu_lab = function(x) paste(x, "eQTLs"))) +
+  scale_fill_manual(values = CAT_COLS, name = NULL) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.02))) +
+  guides(fill = guide_legend(ncol = 3)) +
+  labs(x = "Looked up in", y = paste0("% of ", what, " eQTLs"),
+       title = paste0(str_to_sentence(what), " eQTLs in the conditions, by variant type")) +
+  theme_classic(base_size = 12) +
+  theme(legend.position = "top", plot.title = element_text(face = "bold", hjust = 0.5),
+        axis.text.x = element_text(angle = 45, hjust = 1), strip.text = element_text(face = "bold"),
+        strip.background = element_rect(fill = "grey92", colour = NA))
+p_share_vt <- share_vt_plot(share, "fluconazole")
+print(p_share_vt)
+ggsave(file.path(OUTPUT_DIR, "Fig_flu_eQTLs_in_other_conditions_by_variant_type.tiff"), p_share_vt,
+       width = 16, height = 8, dpi = 600, compression = "lzw", bg = "white")
+```
+
+# 5. Galactose eQTLs in other conditions
+
+Sections 2-4 repeated for galactose (scgal.1): each significant galactose eQTL is looked up in
+YPD.1, YPD.2, synthetic complete, YPD (integrated), synthetic complete (integrated), fluconazole_16ug
+and fluconazole_8ug. The other dataset is on x, galactose on y.
+Outputs (same file names as for
+fluconazole, with `scgal_1` in place of `Flu_16ug`) go to `galactose/`.
+
+```{r gal-lookup}
+GAL      <- c(scgal.1 = "galactose")
+GAL_BASE <- c(BASE, Flu.1 = "fluconazole_16ug", Flu.2 = "fluconazole_8ug")   # same five conditions + both doses
+GAL_COMP <- make_comp(GAL, GAL, GAL_BASE)
+GAL_DIR  <- file.path(OUTPUT_DIR, "galactose")
+dir.create(GAL_DIR, showWarnings = FALSE)
+
+gal_pairs   <- signif[["scgal.1"]] %>% distinct(Gene, SNP, Variant_Type)
+gal_lookups <- lapply(setNames(names(GAL_BASE), names(GAL_BASE)), build_lookup, pairs = gal_pairs, out_dir = GAL_DIR)
+sapply(gal_lookups, nrow)
+
+gal_in_base <- query_in_base(GAL_COMP, gal_lookups)
+write.csv(export_cols(gal_in_base), file.path(GAL_DIR, "Gal_eQTLs_in_other_conditions_all.csv"), row.names = FALSE)
+gal_conc <- gal_in_base %>% filter(Tested)
+```
+
+## 5.1 Effect-size concordance
+
+```{r gal-stats}
+gal_ct <- concordance_tables(gal_in_base, gal_conc)
+write.csv(gal_ct$table %>% select(-perm_same, -perm_r) %>% rename(n_gal_eQTLs = n_flu_eQTLs),
+          file.path(GAL_DIR, "Effect_size_concordance_by_variant_type.csv"), row.names = FALSE)
+knitr::kable(gal_ct$table %>% select(comparison, Variant_Type, n_gal_eQTLs = n_flu_eQTLs, n_tested,
+                                     pct_same_direction, binom_p_BH, pearson_r, spearman_rho, perm_p_r),
+             digits = c(0, 0, 0, 0, 1, 3, 3, 3, 4))
+```
+
+```{r gal-scatter, fig.width = 11, fig.height = 7, results = "asis"}
+gal_lim <- max(abs(c(gal_conc$Beta_Base, gal_conc$Beta_Flu))) * 1.05
+for (i in seq_len(nrow(GAL_COMP))) {
+  cat("\n\n### ", GAL_COMP$comparison[i], "\n\n", sep = "")
+  p <- scatter_plot(i, GAL_COMP, gal_conc, gal_ct$all, gal_ct$vt, gal_lim); print(p)
+  ggsave(file.path(GAL_DIR, paste0("Fig_effect_size_", GAL_COMP$file_tag[i], ".tiff")),
+         p, width = 11, height = 7, dpi = 600, compression = "lzw", bg = "white")
+}
+```
+
+```{r gal-summary-plot, fig.width = 15, fig.height = 5}
+p <- summary_plot(gal_ct$table, GAL_COMP, "Galactose eQTLs in the conditions, by variant type")
+print(p)
+ggsave(file.path(GAL_DIR, "Fig_concordance_summary_by_variant_type.tiff"), p,
+       width = 15, height = 5, dpi = 600, compression = "lzw", bg = "white")
+```
+
+```{r gal-null-plots, fig.width = 19, fig.height = 5.8, results = "asis"}
+for (i in seq_len(nrow(GAL_COMP))) {
+  cat("\n\n### ", GAL_COMP$comparison[i], "\n\n", sep = "")
+  p <- null_plot(gal_ct$all %>% filter(comparison == GAL_COMP$comparison[i])); print(p)
+  ggsave(file.path(GAL_DIR, paste0("Fig_null_distribution_", GAL_COMP$file_tag[i], ".tiff")),
+         p, width = 19, height = 5.8, dpi = 600, compression = "lzw", bg = "white")
+}
+```
+
+## 5.2 Are galactose eQTLs seen in the other conditions?
+
+```{r gal-sharing, fig.width = 8, fig.height = 7}
+gal_share <- share_table(gal_in_base)
+write.csv(gal_share, file.path(GAL_DIR, "Gal_eQTL_categories_in_other_conditions.csv"), row.names = FALSE)
+p <- share_plot(gal_share, "galactose"); print(p)
+ggsave(file.path(GAL_DIR, "Fig_gal_eQTLs_in_other_conditions.tiff"), p,
+       width = 8, height = 7, dpi = 600, compression = "lzw", bg = "white")
+```
+
+```{r gal-sharing-by-type, fig.width = 16, fig.height = 5.5}
+p <- share_vt_plot(gal_share, "galactose"); print(p)
+ggsave(file.path(GAL_DIR, "Fig_gal_eQTLs_in_other_conditions_by_variant_type.tiff"), p,
+       width = 16, height = 5.5, dpi = 600, compression = "lzw", bg = "white")
+```
+
+# 6. Replicate reference: YPD.1 vs YPD.2
+
+The same same-gene, same-variant comparison between the two YPD replicates, in both directions:
+each significant YPD.1 eQTL is looked up among all tested variants of YPD.2, and each significant
+YPD.2 eQTL in YPD.1. The condition is identical, so this is the agreement expected from
+replication alone (noise, and effects inflated in the dataset the eQTL was found in). Differences
+between conditions (Sections 3 and 5) are only meaningful relative to this reference. The lookup is
+done in Section 2; outputs go to `replicates/`.
+
+
+```{r rep-stats}
+write.csv(rep_ct$table %>% select(-perm_same, -perm_r) %>% rename(n_eQTLs = n_flu_eQTLs),
+          file.path(REP_DIR, "Effect_size_concordance_by_variant_type.csv"), row.names = FALSE)
+knitr::kable(rep_ct$table %>% select(comparison, Variant_Type, n_eQTLs = n_flu_eQTLs, n_tested,
+                                     pct_same_direction, binom_p_BH, pearson_r, spearman_rho, perm_p_r),
+             digits = c(0, 0, 0, 0, 1, 3, 3, 3, 4))
+```
+
+```{r rep-scatter, fig.width = 11, fig.height = 7, results = "asis"}
+rep_lim <- max(abs(c(rep_conc$Beta_Base, rep_conc$Beta_Flu))) * 1.05
+for (i in seq_len(nrow(REP_COMP))) {
+  cat("\n\n### ", REP_COMP$comparison[i], "\n\n", sep = "")
+  p <- scatter_plot(i, REP_COMP, rep_conc, rep_ct$all, rep_ct$vt, rep_lim); print(p)
+  ggsave(file.path(REP_DIR, paste0("Fig_effect_size_", REP_COMP$file_tag[i], ".tiff")),
+         p, width = 11, height = 7, dpi = 600, compression = "lzw", bg = "white")
+}
+```
+
+```{r rep-summary-plot, fig.width = 12, fig.height = 7}
+p <- summary_plot(rep_ct$table, REP_COMP, "YPD replicate eQTLs in the other replicate, by variant type")
+print(p)
+ggsave(file.path(REP_DIR, "Fig_concordance_summary_by_variant_type.tiff"), p,
+       width = 12, height = 7, dpi = 600, compression = "lzw", bg = "white")
+```
+
+```{r rep-null-plots, fig.width = 19, fig.height = 5.8, results = "asis"}
+for (i in seq_len(nrow(REP_COMP))) {
+  cat("\n\n### ", REP_COMP$comparison[i], "\n\n", sep = "")
+  p <- null_plot(rep_ct$all %>% filter(comparison == REP_COMP$comparison[i])); print(p)
+  ggsave(file.path(REP_DIR, paste0("Fig_null_distribution_", REP_COMP$file_tag[i], ".tiff")),
+         p, width = 19, height = 5.8, dpi = 600, compression = "lzw", bg = "white")
+}
+```
+
+# 7. All comparisons side by side (all variant types pooled)
+
+Each condition's significant eQTLs, same gene and same variant looked up in the other condition.
+`ratio_same_dir` is the median |beta in the other condition| / |beta in the eQTL's own condition|
+over the same-direction eQTLs (1 = same magnitude); compare each value with the YPD replicate rows.
+
+```{r all-comparisons}
+ratio_tbl <- bind_rows(conc, gal_conc, rep_conc) %>% filter(Same_direction) %>%
+  group_by(comparison) %>% summarise(ratio_same_dir = median(abs(Beta_Base) / abs(Beta_Flu)), .groups = "drop") %>%
+  mutate(comparison = as.character(comparison))
+all_comp <- bind_rows(rep_ct$all %>% mutate(set = "YPD replicates (reference)"),
+                      stats_all %>% mutate(set = "Fluconazole"),
+                      gal_ct$all %>% mutate(set = "Galactose")) %>%
+  mutate(comparison = as.character(comparison)) %>%
+  left_join(ratio_tbl, by = "comparison") %>%
+  transmute(set, comparison, n_eQTLs = n_flu_eQTLs, n_tested,
+            n_same_direction, n_opposite_direction = n_tested - n_same_direction,
+            pct_same_direction, pearson_r, spearman_rho, ratio_same_dir, binom_p_BH)
+write.csv(all_comp, file.path(OUTPUT_DIR, "Effect_size_concordance_all_comparisons.csv"), row.names = FALSE)
+knitr::kable(all_comp, digits = c(0, 0, 0, 0, 0, 0, 1, 2, 2, 2, 3),
+             caption = "Same-gene, same-variant effect-size comparison, all variant types pooled")
+```
+
+# 8. Summary: eQTLs found in the other condition
+
+Per comparison (e.g. "fluconazole_16ug eQTLs in YPD.1"), starting from the significant eQTLs of one
+condition (fluconazole_16ug) and looking up the same gene and same variant among *all tested*
+associations of the other condition (YPD.1; any p-value, significance there is not used). Comparisons follow
+the design above: each dataset against a *different* condition; the only same-condition pair is
+YPD.1 vs YPD.2 (replicate reference); integrated datasets are never compared with their own
+replicates.
+
+- *Found in the other condition*: the same gene-variant pair is tested there, so its effect size
+  can be compared. *Not found*: not tested there.
+- *Same / opposite direction*: sign of the effect in the other condition vs the eQTL's own
+  condition, for found eQTLs.
+- *Genes*: genes with at least one significant eQTL, and genes with at least one such eQTL found in
+  the other condition (split into genes whose found eQTLs all keep their direction, all
+  change direction, or both), as counts and as % of genes expressed in both datasets
+  (genes in both `gene_matrix.txt` files).
+
+```{r overlap-summary, results = "asis"}
+# genes expressed (tested) in each dataset = rows of its phenotype matrix (expression-filtered genes used in the GWAS)
+PHENO <- c(Flu.1 = "Flu.1/fastlmm", Flu.2 = "Flu.2/fastlmm", YPD.1 = "YPD.1/fastlmm", YPD.2 = "YPD.2/fastlmm",
+           sc2glu.2 = "sc2glu.2/fastlmm_sc2.glu.2_only", YPD_integrated = "merged_YPD/fastlmm",
+           sc2glu_integrated = "sc2glu.2/fastlmm", scgal.1 = "scgal.1/fastlmm")
+tested_genes <- lapply(PHENO, function(d)
+  fread(file.path(ROOT, d, "data/pheno_data/gene_matrix.txt"), select = 1)[[1]])
+
+overlap_summary <- function(comp, in_base) bind_rows(lapply(seq_len(nrow(comp)), function(i) {
+  cm <- comp$comparison[i]; q <- comp$flu[i]; b <- comp$base[i]
+  expressed <- intersect(tested_genes[[q]], tested_genes[[b]])
+  d     <- in_base %>% filter(comparison == cm)
+  found <- d %>% filter(Tested)
+  g_dir <- found %>% group_by(Gene) %>% summarise(same = all(Same_direction), opp = all(!Same_direction), .groups = "drop")
+  pct_e <- function(g) 100 * length(intersect(g, expressed)) / length(expressed)
+  tibble(comparison = cm, condition1 = comp$flu_lab[i], condition2 = comp$base_lab[i],
+         eQTLs_condition1 = nrow(d),
+         eQTLs_found = nrow(found), pct_found = 100 * nrow(found) / nrow(d),
+         eQTLs_not_found = nrow(d) - nrow(found),
+         eQTLs_same_direction = sum(found$Same_direction), pct_same_direction = 100 * mean(found$Same_direction),
+         eQTLs_opposite_direction = sum(!found$Same_direction), pct_opposite_direction = 100 * mean(!found$Same_direction),
+         genes_expressed_both = length(expressed),
+         genes_condition1 = n_distinct(d$Gene), pct_genes_condition1 = pct_e(unique(d$Gene)),
+         genes_found = nrow(g_dir), pct_genes_found = pct_e(g_dir$Gene),
+         genes_all_same_direction = sum(g_dir$same), genes_all_opposite_direction = sum(g_dir$opp),
+         genes_mixed_direction = sum(!g_dir$same & !g_dir$opp))
+}))
+overlap <- bind_rows(overlap_summary(REP_COMP, rep_in_base) %>% mutate(set = "YPD replicates (reference)"),
+                     overlap_summary(COMP, flu_in_base) %>% mutate(set = "Fluconazole"),
+                     overlap_summary(GAL_COMP, gal_in_base) %>% mutate(set = "Galactose")) %>% relocate(set)
+
+write.csv(overlap %>% rename(condition = condition1, looked_up_in = condition2, eQTLs = eQTLs_condition1,
+                             genes_with_eQTL = genes_condition1, pct_genes_with_eQTL = pct_genes_condition1),
+          file.path(OUTPUT_DIR, "eQTLs_found_in_other_condition_summary.csv"), row.names = FALSE)
+
+# one readable paragraph per comparison
+for (k in seq_len(nrow(overlap))) with(overlap[k, ], cat(sprintf(paste0(
+  "**%s.** Of %d significant %s eQTLs, %d (%.1f%%) are found (same gene, same variant) among the tested associations of %s ",
+  "and %d are not tested there. Of the found eQTLs, %d (%.1f%%) have the same direction of effect and %d (%.1f%%) the opposite direction. ",
+  "Of %d genes expressed in both datasets, %d (%.1f%%) have a significant %s eQTL and %d (%.1f%%) have at least one such eQTL found in %s: ",
+  "%d with all found eQTLs in the same direction, %d with all in the opposite direction and %d with both.\n\n"),
+  comparison, eQTLs_condition1, condition1, eQTLs_found, pct_found, condition2, eQTLs_not_found,
+  eQTLs_same_direction, pct_same_direction, eQTLs_opposite_direction, pct_opposite_direction,
+  genes_expressed_both, genes_condition1, pct_genes_condition1, condition1, genes_found, pct_genes_found, condition2,
+  genes_all_same_direction, genes_all_opposite_direction, genes_mixed_direction)))
+
+# transposed tables: one row per measure, one column per comparison, one table per set
+n_pct <- function(n, p) sprintf("%s (%.1f%%)", format(n, big.mark = ","), p)
+fmt_n <- function(n) format(n, big.mark = ",")
+summary_wide <- overlap %>%
+  transmute(set, column = comparison,
+            `Significant eQTLs`                                      = fmt_n(eQTLs_condition1),
+            `Found in the other condition (% of eQTLs)`             = n_pct(eQTLs_found, pct_found),
+            `Not found in the other condition`                       = fmt_n(eQTLs_not_found),
+            `Same direction (% of found)`                           = n_pct(eQTLs_same_direction, pct_same_direction),
+            `Opposite direction (% of found)`                       = n_pct(eQTLs_opposite_direction, pct_opposite_direction),
+            `Genes expressed in both datasets`                      = fmt_n(genes_expressed_both),
+            `Genes with a significant eQTL (% expressed)`           = n_pct(genes_condition1, pct_genes_condition1),
+            `Genes with an eQTL found in the other condition (% expressed)` = n_pct(genes_found, pct_genes_found),
+            `Genes: all found eQTLs same direction`                 = fmt_n(genes_all_same_direction),
+            `Genes: all found eQTLs opposite direction`             = fmt_n(genes_all_opposite_direction),
+            `Genes: mixed direction`                                = fmt_n(genes_mixed_direction))
+measures <- setdiff(names(summary_wide), c("set", "column"))
+for (st in unique(summary_wide$set)) {
+  w <- summary_wide %>% filter(set == st) %>% select(-set)
+  tw <- tibble(Measure = measures)
+  for (k in seq_len(nrow(w))) tw[[w$column[k]]] <- unlist(w[k, measures])
+  write.csv(tw, file.path(OUTPUT_DIR, paste0("Summary_table_", gsub("[^A-Za-z0-9]+", "_", st), ".csv")), row.names = FALSE)
+  cat("\n\n")
+  print(knitr::kable(tw, caption = paste0(st, ": eQTLs found in the other condition (same gene, same variant), by direction")))
+}
+```
+
+```{r session}
+sessionInfo()
+```

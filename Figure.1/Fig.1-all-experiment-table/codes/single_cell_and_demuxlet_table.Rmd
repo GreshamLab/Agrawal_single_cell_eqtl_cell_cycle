@@ -46,7 +46,11 @@ samples <- tribble(
   
   "Synthetic-complete", 2, 
   "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2/demuxlet/merged_demuxlet_output_scglu2.tsv",
-  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2/alignment/output_of_alignment_sc.2_with_cus_ref/run_count/outs/filtered_feature_bc_matrix/"
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2/alignment/output_of_alignment_sc.2_with_cus_ref/run_count/outs/filtered_feature_bc_matrix/",
+
+  "Galactose", 1,
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/scgal.1/demuxlet/merged_demuxlet_output_scgal.tsv",
+  "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/scgal.1/alignment/output_of_alignment_scgal_with_clean_gtf/run_count/outs/filtered_feature_bc_matrix/"
 )
 ```
 
@@ -93,6 +97,9 @@ summarise_qc <- function(Condition, Replicate, demuxlet_path, matrix_dir) {
   n_dbl <- sum(dmx$DROPLET.TYPE == "DBL")
   n_amb <- sum(dmx$DROPLET.TYPE == "AMB")
 
+  # Strains demuxlet assigned singlets to, before and after the >= 5 cells per strain filter
+  sng_per_strain <- table(dmx$SNG.BEST.GUESS[dmx$DROPLET.TYPE == "SNG"])
+
   # Catch any unexpected DROPLET.TYPE values
   if (n_sng + n_dbl + n_amb != n_dmx) {
     warning(Condition, ".", Replicate, ": droplet types don't sum to total — ",
@@ -116,6 +123,8 @@ summarise_qc <- function(Condition, Replicate, demuxlet_path, matrix_dir) {
     Pct_singlets          = round(100 * n_sng / n_dmx, 1),
     Pct_doublets          = round(100 * n_dbl / n_dmx, 1),
     Pct_ambiguous         = round(100 * n_amb / n_dmx, 1),
+    N_strains_demuxlet    = length(sng_per_strain),
+    N_strains_min5_cells  = sum(sng_per_strain >= 5),
     stringsAsFactors = FALSE
   )
 }
@@ -127,7 +136,7 @@ summary_table <- bind_rows(lapply(seq_len(nrow(samples)), function(i) {
 }))
 
 summary_table$Condition <- factor(summary_table$Condition, 
-                                   levels = c("YPD", "Fluconazole", "Synthetic-complete"))
+                                   levels = c("YPD", "Fluconazole", "Synthetic-complete", "Galactose"))
 summary_table <- arrange(summary_table, Condition, Replicate)
 
 #knitr::kable(summary_table, caption = "Summary of single-cell RNA-seq and demultiplexing statistics")

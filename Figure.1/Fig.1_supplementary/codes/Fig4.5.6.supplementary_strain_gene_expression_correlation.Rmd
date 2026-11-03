@@ -7,7 +7,7 @@ output: html_document
 - **S5** Reproducibility improves with cells assigned per strain (A: mean cells, B: min cells)
 - **S6** Per-gene expression correlation across strains
 
-YPD and fluconazole only — sc 2% glucose has no replicate experiment.
+YPD (YPD.1 vs YPD.2) and fluconazole (Fluconazole.16 vs Fluconazole.8) only — synthetic complete with glucose and synthetic complete with galactose have one run each.
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, message = TRUE, warning = FALSE, dpi = 300)
@@ -29,14 +29,18 @@ BASE <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all"
 conditions <- list(
   YPD = list(
     label = "YPD",
-    pb1   = file.path(BASE, "YPD.1/fastlmm/data/pheno_data/pseudobulk_reliable_transcripts_YPD.txt"),
+    run1  = "YPD.1",
+    run2  = "YPD.2",
+    pb1  = file.path(BASE, "YPD.1/fastlmm/data/pheno_data/pseudobulk_reliable_transcripts_YPD.txt"),
     pb2   = file.path(BASE, "YPD.2/fastlmm/data/pheno_data/pseudobulk_reliable_transcripts_YPD.txt"),
     rds1  = file.path(BASE, "YPD.1/gene_expression_analysis/output_from_pseudobulk_fastlmm/Na_va_data_subsetted.rds"),
     rds2  = file.path(BASE, "YPD.2/gene_expression_analysis/output_from_pseudobulk_fastlmm/Na_va_data_subsetted.rds")
   ),
   Fluconazole = list(
     label = "Fluconazole",
-    pb1   = file.path(BASE, "Flu.1/fastlmm/data/pheno_data/pseudobulk_reliable_transcripts_Flu1.txt"),
+    run1  = "Fluconazole.16",  # Flu.1 = 16 ug/ml
+    run2  = "Fluconazole.8",   # Flu.2 = 8 ug/ml
+    pb1  = file.path(BASE, "Flu.1/fastlmm/data/pheno_data/pseudobulk_reliable_transcripts_Flu1.txt"),
     pb2   = file.path(BASE, "Flu.2/fastlmm/data/pheno_data/pseudobulk_reliable_transcripts_Flu2.txt"),
     rds1  = file.path(BASE, "Flu.1/gene_expression_analysis/output_from_pseudobulk_fastlmm/Na_va_data_subsetted.rds"),
     rds2  = file.path(BASE, "Flu.2/gene_expression_analysis/output_from_pseudobulk_fastlmm/Na_va_data_subsetted.rds")
@@ -170,7 +174,9 @@ analyse_condition <- function(cfg) {
     strain_df  = strain_df,
     gene_df    = gene_df,
     stats      = tibble(condition          = cfg$label,
-                        n_strains          = length(strains),
+                        run1               = cfg$run1,
+                        run2               = cfg$run2,
+                        n_strains         = length(strains),
                         n_genes            = length(genes),
                         median_replicate_r = median(replicate_r),
                         median_gene_r      = median(gene_r, na.rm = TRUE),
@@ -212,8 +218,8 @@ make_strain_scatter_fig <- function(df, cond_label) {
     facet_wrap(~ facet_label, ncol = 9) +
     labs(
       title = paste0("Per-strain replicate concordance: ", cond_label),
-      x     = paste0(cond_label, " replicate 1 counts (log10, +1)"),
-      y     = paste0(cond_label, " replicate 2 counts (log10, +1)")
+      x     = paste0(conditions[[cond_label]]$run1, " counts (log10, +1)"),
+      y     = paste0(conditions[[cond_label]]$run2, " counts (log10, +1)")
     ) +
     theme_classic(base_size = 10) +
     theme(
@@ -241,8 +247,10 @@ ggsave(file.path(OUT_DIR, "FigS4_Flu_per_strain_scatter.pdf"), figS4_Flu,
 
 # Supplementary Figure 5
 
-```{r figS5, fig.width=7, fig.height=6}
+```{r figS5, fig.width=7, fig.height=3.2}
+# YPD only — Fluconazole.16 vs Fluconazole.8 are different doses, not replicates
 s5_long <- strain_df_all %>%
+  filter(condition == "YPD") %>%
   dplyr::select(condition, strain, r, mean_cells, min_cells) %>%
   pivot_longer(c(mean_cells, min_cells),
                names_to = "metric", values_to = "cells") %>%
@@ -272,7 +280,7 @@ figS5 <- ggplot(s5_long, aes(x = cells, y = r, color = condition)) +
 figS5
 
 ggsave(file.path(OUT_DIR, "FigS5_reproducibility_vs_cells.pdf"), figS5,
-       width = 7, height = 6, units = "in")
+       width = 7, height = 3.2, units = "in")
 ```
 ```{r}
 # Option 2: visually bin strains by cell count and plot median r per bin

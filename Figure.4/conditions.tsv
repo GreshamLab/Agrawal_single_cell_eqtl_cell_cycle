@@ -1,0 +1,9 @@
+Flu.1	Flu.1	Flu.1/fastlmm/results	Flu.1/fastlmm/data/pheno_data/gene_location.txt	Flu.1/gene_expression_analysis/output_from_pseudobulk_fastlmm/Na_va_data_subsetted.rds
+Flu.2	Flu.2	Flu.2/fastlmm/results	Flu.2/fastlmm/data/pheno_data/gene_location.txt	Flu.2/gene_expression_analysis/output_from_pseudobulk_fastlmm/Na_va_data_subsetted.rds
+Flu_integrated	merged_fluconazole	merged_fluconazole/new_fastlmm_march_26_2026/results	merged_fluconazole/new_fastlmm_march_26_2026/data/pheno_data/gene_location.txt	merged_fluconazole/combine_flu_gene_expression_data/Na_va_data_subsetted_flu_replicates_merged.rds
+sc2glu_integrated	sc2glu.2	sc2glu.2/fastlmm/results	sc2glu.2/fastlmm/data/pheno_data/gene_location.txt	sc2glu.2/sc2glu.1_and_sc2glu.2_seurat_merged/Na_va_data_subsetted_sc2glu_replicates_merged.rds
+scgal.1	scgal.1	scgal.1/fastlmm/results	scgal.1/fastlmm/data/pheno_data/gene_location.txt	scgal.1/gene_expression_analysis/output_from_pseudobulk_fastlmm/Na_va_data_subsetted.rds
+YPD.2	YPD.2	YPD.2/fastlmm/results	YPD.2/fastlmm/data/pheno_data/gene_location.txt	YPD.2/gene_expression_analysis/output_from_pseudobulk_fastlmm/Na_va_data_subsetted.rds
+YPD_integrated	merged_YPD	merged_YPD/fastlmm/results	merged_YPD/fastlmm/data/pheno_data/gene_location.txt	merged_YPD/gene_expression/Na_va_data_subsetted_YPD_replicates_merged.rds
+sc2glu.2_only	sc2glu.2_only	sc2glu.2/fastlmm_sc2.glu.2_only/results	sc2glu.2/fastlmm_sc2.glu.2_only/data/pheno_data/gene_location.txt	sc2glu.2/gene_expression_analysis/output_from_pseudobulk_fastlmm/Na_va_data_subsetted.rds
+sc2glu.1_only	sc2glu.1_only	sc2glu.1/fastlmm_sc2.glu.1_only/results	sc2glu.1/fastlmm_sc2.glu.1_only/data/pheno_data/gene_location.txt	sc2glu.1/gene_expression_analysis/output_from_pseudobulk_fastlmm/Na_va_data_subsetted.rds

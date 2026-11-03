@@ -1,0 +1,1014 @@
+---
+title: "Fig4-step1-eQTL_Plotting_Analysis_Flu.1"
+output: html_document
+---
+
+**Update 2026-10-21: clumping now uses PLINK 1.9 `--clump`, run separately for every gene**
+(`plink_clump_per_gene()` in `shared_code/ld_clump_and_local.R`; `--clump-p1 1 --clump-p2 1
+--clump-r2 0.6 --clump-kb 50`; PLINK from `module load bioinformatics/20260810`). It replaces the
+R implementation of 2026-10-16 (on the YPD.1 data the two gave identical clumps for 1394 of 1422
+genes with >1 variant); the clumped files are now `clumped_*_plink_per_gene_r2_0.6_50kb.tsv`.
+
+**Update 2026-10-16: per-gene LD clumping and local/distant eQTLs.**
+
+- *Clumping.* Significant variants are now grouped into one signal **separately for every gene**
+  (r2 > 0.6, within 50 kb), in R (`shared_code/ld_clump_and_local.R`). The earlier PLINK
+  clumping (`--clump-kb 2`) was run on all genes at once (the PLINK input had no gene column),
+  so a variant could be removed because a nearby variant was a stronger eQTL for another gene,
+  and its 2-kb window was shorter than the LD in these strains. The 50-kb window comes from the
+  LD decay of the 96 strains (`LD_decay_96_strains.Rmd`: half-decay 0.7 kb, but pairs with
+  r2 > 0.6 stay above background up to ~50 kb).
+- *Local / distant eQTLs.* Local = any variant of the gene's clump within 25 kb of the gene
+  (either side); SVs: the SV span; translocations: either breakpoint; gene-based CNVs: the CNV's gene
+  start (same 25-kb rule since 2026-10-23; was: local only when CNV and gene are the same ORF). All other eQTLs are distant. The figures below use
+  local/distant. The older cis/trans call (lead variant within 2 kb; column `cis_trans`) is kept
+  in the tables and in the cis/trans map of panel A (Step2).
+- The annotated tables keep their file names (`*_annotated_cis_trans.txt`) and gain the columns
+  `local_distant`, `local_distance_bp`, `clump_n_members`, `clump_members`.
+
+# Load packages
+```{r, include=FALSE}
+library(tidyverse)
+source("/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Agrawal_single_cell_eqtl_cell_cycle/shared_code/wilcox_pvalue_fix.R")  # R 4.6.1 returns p = 0 for two-sided Wilcoxon p < 1e-16
+source("/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Agrawal_single_cell_eqtl_cell_cycle/shared_code/arial_font.R")  # Arial for all plots, as in Figs 2 and 5
+library(dplyr)
+library(readr)
+library(data.table)
+library(GenomicRanges)
+library(ggplot2)
+library(ggrepel)
+library(ggpubr)
+library(ggsignif)
+library(scales)
+library(stringr)
+
+# Be explicit if needed
+select <- dplyr::select
+filter <- dplyr::filter
+count <- dplyr::count
+```
+
+```{r config}
+# ===================================================================
+# Configuration and paths
+# ===================================================================
+
+# Input directories
+RES   <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Flu.1/fastlmm/results"
+
+# Previous analysis output (where clumped files will be/are stored)
+PREV_ANALYSIS <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Agrawal_single_cell_eqtl_cell_cycle/Figure.4/Fig.4-Flu.1/results/Flu.1"
+
+# Output directory for this eQTL plotting analysis
+CONDITION <- "Flu.1"
+OUT_BASE  <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Agrawal_single_cell_eqtl_cell_cycle/Figure.4/Fig.4-Flu.1/results"
+OUT_MAIN  <- file.path(OUT_BASE, CONDITION, "eqtl_plot")
+
+# Create subdirectories for this analysis
+OUT_PLINK  <- file.path(PREV_ANALYSIS, "plink_inputs")
+OUT_CLUMP  <- file.path(PREV_ANALYSIS, "clumped")
+OUT_ANNOT  <- file.path(OUT_MAIN, "annotations")
+OUT_FIG    <- file.path(OUT_MAIN, "figures")
+OUT_SUMM   <- file.path(OUT_MAIN, "data_summary")
+
+# Create all directories
+for (dir in c(PREV_ANALYSIS, file.path(PREV_ANALYSIS, "annotations"), OUT_PLINK, OUT_CLUMP, OUT_MAIN, OUT_ANNOT, OUT_FIG, OUT_SUMM)) {
+  dir.create(dir, showWarnings = FALSE, recursive = TRUE)
+}
+
+# Reference files for annotation
+ANNOT_CSV <- "/scratch/aa9679/SingleCell_cerevisiae/Gene_exp_analysis/yeast_custom_annotations.csv"
+GENE_LOC  <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Flu.1/fastlmm/data/pheno_data/gene_location.txt"
+
+# cis/trans window parameter
+CIS_WINDOW_BP <- 2000
+
+# per-gene LD clumping (r2 > 0.6 within 50 kb) and local/distant calls (25 kb, all variant types; CNVs at their gene start)
+source("/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Agrawal_single_cell_eqtl_cell_cycle/shared_code/ld_clump_and_local.R")
+CLUMP_TAG <- paste0("plink_per_gene_r2_", CLUMP_R2, "_", CLUMP_KB, "kb")
+
+# ===================================================================
+# Variant configuration (SNPs, CNVs, InDels, SVs)
+# ===================================================================
+variant_cfg <- list(
+  SNPs = list(
+    # 96 strains kept first, then MAF >= 15% in those strains (from the 969-strain
+    # MAF5 matrix); GWAS run with --double-id (batch_scripts_with_double_id_snps_indels)
+    assoc        = file.path(RES, "all_signif_SNPs_Flu.1_96_MAF15_from_969_strains_with_double_id_final_filtered_for_ncount_less_than_5_with_threshold.txt"),
+    geno         = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/pan_transcriptome_paper/SNPs/SNPs_96_strain_filtering_no_change_name/SNPs_96_strains_MAF15_filtering/SNPs.96strains.maf15.plink",
+    plink_input  = file.path(OUT_PLINK, "plink_snps_96_MAF15.txt"),
+    clumped      = file.path(OUT_CLUMP, paste0("clumped_snps_", CLUMP_TAG, ".tsv")),
+    annot_table  = file.path(PREV_ANALYSIS, "annotations", "snp_data_annotated_cis_trans.txt")
+  ),
+  CNVs = list(
+    assoc        = file.path(RES, "all_signif_CNV_Flu.1_with_double_id_is_not_needed_final_filtered_for_ncount_less_than_5_run_from_new_plink_files_no_chr17_with_threshold.txt"),
+    geno         = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/structural_variant_vcf/SVcalls2/SVcalls/CNVs_96_strains/CNV_96strains_maf15/no_chr17/CNVs.96strains.maf15.no_chr17.plink",
+    plink_input  = file.path(OUT_PLINK, "plink_cnvs.txt"),
+    clumped      = file.path(OUT_CLUMP, paste0("clumped_cnvs_no_chr17_", CLUMP_TAG, ".tsv")),
+    annot_table  = file.path(PREV_ANALYSIS, "annotations", "cnv_data_annotated_cis_trans.txt")
+  ),
+  InDels = list(
+    assoc        = file.path(RES, "all_signif_Indels_Flu.1_96_MAF15_with_double_id_final_filtered_for_ncount_less_than_5_with_threshold.txt"),
+    geno         = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/vcf_files_sent_by_Anne/SNPs_indels/modified_snp_indel_plink_for_96strains/Indels_only_96/indels.96samples",
+    plink_input  = file.path(OUT_PLINK, "plink_indels.txt"),
+    clumped      = file.path(OUT_CLUMP, paste0("clumped_indels_", CLUMP_TAG, ".tsv")),
+    annot_table  = file.path(PREV_ANALYSIS, "annotations", "indel_data_annotated_cis_trans.txt")
+  ),
+  SVs = list(
+    assoc        = file.path(RES, "all_signif_SVs_Flu.1_with_double_id_is_not_needed_final_filtered_for_ncount_less_than_5_run_from_new_plink_files_with_threshold.txt"),
+    geno         = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/structural_variant_vcf/SVcalls2/SVcalls/SVs_1087/SVs_96/SV_96_maf_15/SV.96strains.maf15.plink",
+    plink_input  = file.path(OUT_PLINK, "plink_svs.txt"),
+    clumped      = file.path(OUT_CLUMP, paste0("clumped_svs_", CLUMP_TAG, ".tsv")),
+    annot_table  = file.path(PREV_ANALYSIS, "annotations", "sv_data_annotated_cis_trans.txt")
+  )
+)
+
+# .bim files for total variant counts (Fig 4 & 5)
+bim_paths <- list(
+  # SNP background: 96 strains kept first, then MAF >= 15% in those strains (from the
+  # 969-strain MAF5 file), so it is filtered the same way as InDels/SVs/CNVs.
+  # Same file as the SNP genotype in variant_cfg (the SNP GWAS was run on it).
+  SNPs   = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/pan_transcriptome_paper/SNPs/SNPs_96_strain_filtering_no_change_name/SNPs_96_strains_MAF15_filtering/SNPs.96strains.maf15.plink.bim",
+  InDels = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/vcf_files_sent_by_Anne/SNPs_indels/modified_snp_indel_plink_for_96strains/Indels_only_96/indels.96samples.bim",
+  SVs    = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/structural_variant_vcf/SVcalls2/SVcalls/SVs_1087/SVs_96/SV_96_maf_15/SV.96strains.maf15.plink.bim",
+  CNVs   = "/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/structural_variant_vcf/SVcalls2/SVcalls/CNVs_96_strains/CNV_96strains_maf15/no_chr17/CNVs.96strains.maf15.no_chr17.plink.bim"
+)
+
+# Display label for CNVs in all figures (internal key stays "CNVs")
+CNV_LABEL <- "Gene-based CNVs"
+
+# Variant colors for all figures
+variant_colors <- c("SNPs" = "#4472C4", "InDels" = "#FFC000",
+                    "SVs" = "#C41E3A", "CNVs" = "#70AD47",
+                    "Gene-based CNVs" = "#70AD47")
+
+# Axis text and titles in all figures: bold, AXIS_SIZE pt
+AXIS_SIZE <- 18
+# p-values drawn on the plots: bold, PVAL_SIZE mm (6 mm ~ 17 pt)
+PVAL_SIZE <- 6
+# eQTL counts (n=) drawn under each violin/box: bold, NLAB_SIZE mm
+NLAB_SIZE <- 5.5
+# effect-size plots (Fig1A-D): larger axis text, p-values, n labels and bracket lines
+EFF_AXIS_SIZE <- 24     # axis titles and tick labels, pt
+EFF_PVAL_SIZE <- 8      # p-values, mm
+EFF_NLAB_SIZE <- 7      # n= labels, mm
+EFF_BRACKET_LWD <- 1.2  # bracket line width, mm
+wrap_cnv <- function(x) sub("Gene-based CNVs", "Gene-based\nCNVs", x)
+
+# Print configuration summary
+cat("\n")
+cat("════════════════════════════════════════════════════════════\n")
+cat("CONFIGURATION SUMMARY - eQTL PLOTTING ANALYSIS\n")
+cat("════════════════════════════════════════════════════════════\n")
+cat("Condition:                 ", CONDITION, "\n")
+cat("Input directory (assoc):   ", RES, "\n")
+cat("Previous analysis output:  ", PREV_ANALYSIS, "\n")
+cat("Current output directory:  ", OUT_MAIN, "\n")
+cat("├─ Clumped results:        ", OUT_CLUMP, "\n")
+cat("├─ Annotations:            ", OUT_ANNOT, "\n")
+cat("├─ Figures:                ", OUT_FIG, "\n")
+cat("└─ Summaries:              ", OUT_SUMM, "\n")
+cat("Variant types:             ", paste(names(variant_cfg), collapse = ", "), "\n")
+cat("════════════════════════════════════════════════════════════\n\n")
+```
+
+# Part 1: Load annotation reference data
+```{r annotation-reference}
+# ===================================================================
+# Section 1: Load shared annotation reference
+# ===================================================================
+
+ann <- read.csv(ANNOT_CSV)
+annotations_gr <- GRanges(ann$seqnames,
+                          IRanges(ann$start, ann$end),
+                          strand  = ann$strand,
+                          type    = ann$type,
+                          gene_id = ann$gene_id,
+                          gene_name = ann$gene_name)
+
+roman16 <- c("I","II","III","IV","V","VI","VII","VIII",
+             "IX","X","XI","XII","XIII","XIV","XV","XVI")
+num_to_roman <- function(x) roman16[x]
+
+chr_lengths <- c(I=230218, II=813184, III=316620, IV=1531933, V=576874, VI=270161,
+                 VII=1090940, VIII=562643, IX=439888, X=745751, XI=666816,
+                 XII=1078177, XIII=924431, XIV=784333, XV=1091291, XVI=948066)
+
+gene_location_fixed <- read.table(GENE_LOC, header = TRUE, stringsAsFactors = FALSE) %>%
+  dplyr::select(gene_id, gene_name, chr, left, right) %>%
+  mutate(right = right + 2,
+         gene_id = str_replace(gene_id, "-", "."))
+
+# feature priority for the representative-feature pick (promoter first ... CDS last)
+feature_priority <- c(promoter = 1, three_prime_UTR = 2, five_prime_UTR = 3,
+                      start_codon = 4, stop_codon = 5, CDS = 6)
+prio <- function(f) { p <- feature_priority[f]; p[is.na(p)] <- 99; p }
+
+cat("✓ Annotation reference data loaded.\n\n")
+```
+
+# Part 2: Annotation helper functions
+```{r annot-helpers}
+# ===================================================================
+# Section 2: Annotation functions
+# ===================================================================
+
+assign_nearest <- function(df, gr) {
+  m <- which(is.na(df$Causal_Gene))
+  if (length(m)) {
+    ng <- nearest(gr[m], annotations_gr); ok <- !is.na(ng)
+    d  <- rep(NA_real_, length(m))
+    d[ok] <- distance(gr[m][ok], annotations_gr[ng[ok]])
+    near <- !is.na(d) & d <= CIS_WINDOW_BP
+    df$Causal_Gene[m[near]]          <- annotations_gr$gene_id[ng[near]]
+    df$Causal_Gene_feature[m[near]]  <- "intergenic_nearby"
+    df$Causal_Gene_feature[m[!near]] <- "intergenic_distant"
+  }
+  df
+}
+
+annotate_point <- function(df, pick = c("priority","first")) {
+  pick <- match.arg(pick)
+  df$Variant_Chr <- num_to_roman(df$Chr)
+  gr <- GRanges(df$Variant_Chr, IRanges(df$ChrPos, df$ChrPos))
+  df$Causal_Gene <- NA_character_; df$Causal_Gene_feature <- NA_character_
+  ov <- findOverlaps(gr, annotations_gr, type = "any")
+  for (i in unique(queryHits(ov))) {
+    subj <- subjectHits(ov)[queryHits(ov) == i]
+    k <- if (pick == "priority") subj[which.min(prio(annotations_gr$type[subj]))] else subj[1]
+    df$Causal_Gene[i]         <- annotations_gr$gene_id[k]
+    df$Causal_Gene_feature[i] <- annotations_gr$type[k]
+  }
+  assign_nearest(df, gr)
+}
+
+annotate_range <- function(df, range_end, use_nearest) {
+  df$Variant_Chr <- num_to_roman(df$Chr)
+  gr <- GRanges(df$Variant_Chr, IRanges(pmin(df$ChrPos, range_end), pmax(df$ChrPos, range_end)))
+  df$Causal_Gene <- NA_character_; df$Causal_Gene_feature <- NA_character_
+  ov <- findOverlaps(gr, annotations_gr, type = "any")
+  for (i in unique(queryHits(ov))) {
+    subj <- subjectHits(ov)[queryHits(ov) == i]
+    df$Causal_Gene[i]         <- paste(unique(annotations_gr$gene_id[subj]), collapse = "; ")
+    df$Causal_Gene_feature[i] <- paste(unique(annotations_gr$type[subj]),   collapse = "; ")
+  }
+  if (use_nearest) {
+    df <- assign_nearest(df, gr)
+  } else {
+    df$Causal_Gene_feature[is.na(df$Causal_Gene)] <- "intergenic_distant"
+  }
+  df
+}
+
+annotate_variant <- function(df, vt) {
+  if (vt == "SNPs") {
+    df <- annotate_point(df, "priority")
+    df$Variant_subtype <- "SNP"
+    return(df)
+  }
+  if (vt == "CNVs") {
+    # Gene-based CNV marker IDs are <gene>_Cov<threshold>: a below/above split
+    # of the gene's normalized depth (1 = normal copy number). Thresholds < 1
+    # mark copy-number loss, > 1 gain. ChrPos is the gene start.
+    # Chr 17 (unplaced gene families) is removed in read_assoc(); positions
+    # past the S288C chromosome end (non-reference subtelomeric families) have
+    # no reference coordinates and are removed here.
+    df <- df[df$ChrPos <= chr_lengths[num_to_roman(df$Chr)], ]
+    df$Variant_Chr     <- num_to_roman(df$Chr)
+    df$CNV_gene        <- sub("_Cov[0-9.]+$", "", df$SNP)
+    df$Cov_threshold   <- as.numeric(sub("^.*_Cov", "", df$SNP))
+    df$Variant_subtype <- ifelse(df$Cov_threshold < 1, "Loss", "Gain")
+    # The affected gene is the CNV gene itself (its copy number changes), so
+    # no overlap search is needed.
+    df$Causal_Gene         <- df$CNV_gene
+    df$Causal_Gene_feature <- "CDS"
+    return(df)
+  }
+  if (vt == "InDels") {
+    p <- strsplit(df$SNP, "_")
+    ref_len <- vapply(p, function(x) nchar(x[3]), 1L)
+    alt_len <- vapply(p, function(x) nchar(x[4]), 1L)
+    size <- alt_len - ref_len
+    df$Variant_subtype <- ifelse(size >= 0, "INS", "DEL")
+    range_end <- ifelse(size < 0, df$ChrPos + ref_len - 1, df$ChrPos)
+    return(annotate_range(df, range_end, use_nearest = FALSE))
+  }
+  if (vt == "SVs") {
+    toks <- strsplit(df$SNP, "_")
+    df$Variant_subtype <- vapply(toks, function(x) if (length(x) >= 2) x[2] else "Unknown", "")
+    sz <- vapply(toks, function(x){ i <- which(x == "len"); if (length(i)) as.numeric(x[i+1]) else NA_real_ }, 0)
+    range_end <- ifelse(df$Variant_subtype %in% c("INS","TRA"), df$ChrPos, df$ChrPos + abs(sz))
+    range_end[is.na(range_end)] <- df$ChrPos[is.na(range_end)]
+    return(annotate_range(df, range_end, use_nearest = TRUE))
+  }
+  stop("unknown variant type: ", vt)
+}
+
+add_cis_trans <- function(df) {
+  df %>%
+    left_join(gene_location_fixed, by = c("Pheno" = "gene_id")) %>%
+    mutate(
+      Pheno_chr   = chr,
+      Pheno_start = left,
+      Pheno_end   = right,
+      dist_to_pheno = case_when(
+        Variant_Chr != Pheno_chr ~ NA_real_,
+        ChrPos < Pheno_start ~ Pheno_start - ChrPos,
+        ChrPos > Pheno_end   ~ ChrPos - Pheno_end,
+        TRUE ~ 0),
+      cis_trans = case_when(
+        Variant_Chr != Pheno_chr ~ "Trans",
+        dist_to_pheno == 0    ~ "Cis",
+        dist_to_pheno <= CIS_WINDOW_BP ~ "Cis",
+        # Pheno IDs use "." where gene IDs use "-" (e.g. YBL029C.A)
+        str_replace_all(Causal_Gene, "-", ".") == Pheno ~ "Cis",
+        TRUE                  ~ "Trans"))
+}
+
+# Read one variant type's association file. Gene-based CNV markers on
+# chromosome 17 (unplaced, non-reference gene families) are removed, so they
+# are not clumped, annotated or plotted.
+read_assoc <- function(vt) {
+  d <- read.table(variant_cfg[[vt]]$assoc, header = TRUE, sep = "\t",
+                  stringsAsFactors = FALSE)
+  if (vt == "CNVs") d <- d[d$Chr != 17, ]
+  d
+}
+
+cat("✓ Annotation functions loaded.\n\n")
+```
+
+# Part 3: Per-gene LD clumping + annotation
+```{r clump-and-annotate}
+# ===================================================================
+# Section 3: per-gene LD clumping (cached per variant type), annotation, local/distant
+# ===================================================================
+original_data <- setNames(lapply(names(variant_cfg), read_assoc), names(variant_cfg))
+
+# 1) clump each gene's significant variants with PLINK --clump (r2 CLUMP_R2 within CLUMP_KB kb)
+clumps <- lapply(setNames(names(variant_cfg), names(variant_cfg)), function(vt) {
+  f <- variant_cfg[[vt]]$clumped
+  if (file.exists(f)) return(as.data.frame(fread(f)))
+  a  <- original_data[[vt]][, c("Pheno", "SNP", "Chr", "ChrPos", "PValue")]
+  cl <- plink_clump_per_gene(a, variant_cfg[[vt]]$geno,
+                             file.path(OUT_CLUMP, paste0("plink_per_gene_", vt)))
+  fwrite(cl, f, sep = "\t")
+  cl
+})
+cat("Per-gene PLINK clumping (r2", CLUMP_R2, "within", CLUMP_KB, "kb):\n")
+for (vt in names(clumps))
+  cat(sprintf("  %-6s %5d significant associations -> %5d clumps (%d genes)\n", vt,
+              nrow(original_data[[vt]]), nrow(clumps[[vt]]), n_distinct(clumps[[vt]]$Pheno)))
+
+# translocation partner breakpoints (for the local call of TRA SVs)
+tra_partners <- read_tra_partners(original_data$SVs$SNP)
+
+# 2) keep the index variant of every clump, annotate, classify cis/trans and local/distant
+annotated <- lapply(setNames(names(variant_cfg), names(variant_cfg)), function(vt) {
+  original_data[[vt]] %>%
+    semi_join(clumps[[vt]], by = c("Pheno", "SNP")) %>%
+    annotate_variant(vt) %>%
+    add_cis_trans() %>%
+    add_local_distant(clumps[[vt]], original_data[[vt]], vt, tra_partners) %>%
+    mutate(Genetic_variants = vt)
+})
+
+# 3) save (same file names as before; new columns local_distant, local_distance_bp, clump_*)
+out_names <- c(SNPs = "snp_data_annotated_cis_trans.txt",
+               CNVs = "cnv_data_annotated_cis_trans.txt",
+               InDels = "indel_data_annotated_cis_trans.txt",
+               SVs = "sv_data_annotated_cis_trans.txt")
+for (vt in names(annotated)) {
+  fwrite(annotated[[vt]], file.path(PREV_ANALYSIS, "annotations", out_names[[vt]]),
+         sep = "\t", quote = FALSE, row.names = FALSE, na = "NA")
+  cat("  Saved", out_names[[vt]], "-", nrow(annotated[[vt]]), "rows\n")
+}
+
+# ─────────────────────────────────────────────────────────────
+# Combined table for all figures (Location = local / distant)
+# ─────────────────────────────────────────────────────────────
+all_clumped <- bind_rows(lapply(annotated, function(d) {
+  d %>% select(any_of(c("Genetic_variants","SNP","Variant_Chr","ChrPos","Pheno","Pheno_chr",
+                        "PValue","SnpWeight","EffectSize","Causal_Gene","Causal_Gene_feature",
+                        "Variant_subtype","dist_to_pheno","cis_trans","local_distant",
+                        "local_distance_bp","clump_n_members")))
+})) %>%
+  mutate(
+    Location         = factor(ifelse(local_distant == "Local", "Local", "Distant"), levels = c("Local","Distant")),
+    abs_SnpWeight    = abs(SnpWeight),
+    Genetic_variants = factor(Genetic_variants, levels = c("SNPs","InDels","SVs","CNVs"),
+                              labels = c("SNPs","InDels","SVs",CNV_LABEL))
+  )
+
+cat("✓ Data clumped, annotated, and combined.\n")
+cat("Total eQTLs (one per clump):", nrow(all_clumped), "\n")
+cat("\nLocal / distant:\n");  print(table(all_clumped$Genetic_variants, all_clumped$Location))
+cat("\nOld cis/trans call (lead variant within 2 kb), for comparison:\n")
+print(table(all_clumped$Genetic_variants, all_clumped$cis_trans))
+cat("\n")
+```
+
+# Part 4: Summary Statistics
+
+```{r counts-summary}
+all_clumped %>%
+  group_by(Genetic_variants) %>%
+  summarise(n_associations = n(),
+            n_unique_loci   = n_distinct(SNP),
+            n_unique_traits = n_distinct(Pheno), .groups = "drop")
+
+# Print total counts across all variants
+all_clumped %>%
+  summarise(total_associations = n(),
+            total_unique_loci   = n_distinct(SNP),
+            total_unique_traits = n_distinct(Pheno))
+
+
+```
+
+# Part 5: Figure 1 — Effect size by variant type and location
+```{r}
+# Check what all_clumped is
+cat("Class of all_clumped:", class(all_clumped), "\n")
+cat("Is it a data.frame?", is.data.frame(all_clumped), "\n")
+cat("Dimensions:", nrow(all_clumped), "x", ncol(all_clumped), "\n")
+cat("Column names:", colnames(all_clumped), "\n\n")
+
+# If it's a list, flatten it properly
+if (is.list(all_clumped) && !is.data.frame(all_clumped)) {
+  cat("⚠️  all_clumped is a list. Converting to data.frame...\n\n")
+  all_clumped <- dplyr::bind_rows(all_clumped)
+}
+
+cat("Class after fix:", class(all_clumped), "\n\n")
+```
+
+
+
+## 1A — all variants, local vs distant eQTLs
+```{r fig1a}
+# Use explicit dplyr namespace and simple approach
+ss_a <- all_clumped %>% 
+  dplyr::count(Location) %>% 
+  dplyr::mutate(label = paste0(Location, "\n(n=", n, ")"))
+
+print(ss_a)
+mw_a <- wilcox.test(abs_SnpWeight ~ Location, data = all_clumped)
+
+fig1a <- ggplot(all_clumped, aes(Location, abs_SnpWeight, fill = Location)) +
+  geom_violin(trim = FALSE, alpha = 0.6) +
+  geom_boxplot(width = 0.1, fill = "white", outlier.shape = NA) +
+  scale_y_continuous(limits = c(0.1, 1.0), breaks = c(0.1,0.25,0.5,0.75,1.0),
+                     expand = expansion(mult = c(0.05, 0.14))) +
+  scale_x_discrete(labels = setNames(ss_a$label, ss_a$Location)) +
+  annotate("text", x = 1.5, y = Inf, vjust = 1.2, size = EFF_PVAL_SIZE, fontface = "bold",
+           label = paste0("p = ", format.pval(mw_a$p.value, digits = 3))) +
+  scale_fill_manual(values = c(Local = "#1F77B4", Distant = "#FF7F0E")) +
+  labs(x = "eQTL", y = "Absolute effect size") +
+  theme_minimal(base_size = 14) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        legend.position = "none",
+        axis.title = element_text(face = "bold", size = EFF_AXIS_SIZE, color = "black"),
+        axis.text  = element_text(face = "bold", size = EFF_AXIS_SIZE, color = "black"),
+        panel.grid.major.x = element_blank(), panel.grid.minor = element_blank())
+print(fig1a)
+ggsave(file.path(OUT_FIG, "Fig1A_effect_size_local_distant.tiff"), fig1a,
+       width = 8, height = 8, dpi = 600, units = "in", device = "tiff", compression = "lzw")
+```
+
+## 1B — per variant type, local vs distant eQTLs
+```{r fig1b}
+pval_df <- all_clumped %>% group_by(Genetic_variants) %>%
+  summarise(p = if (n_distinct(Location) == 2) wilcox.test(abs_SnpWeight ~ Location)$p.value else NA_real_,
+            .groups = "drop") %>%
+  mutate(label = paste0("p = ", format.pval(p, digits = 3)), x = 1.5, y = Inf)
+ssize_df <- all_clumped %>% count(Genetic_variants, Location) %>%
+  mutate(x = ifelse(Location == "Local", 1, 2), label = paste0("n=", n))
+
+fig1b <- ggplot(all_clumped, aes(Location, abs_SnpWeight, fill = Genetic_variants)) +
+  geom_violin(trim = FALSE, alpha = 0.6) +
+  geom_boxplot(width = 0.1, fill = "white", outlier.shape = NA) +
+  facet_wrap(~ Genetic_variants, nrow = 1, labeller = labeller(Genetic_variants = wrap_cnv)) +
+  scale_y_continuous(limits = c(0.1, 1.0), breaks = c(0.1,0.25,0.5,0.75,1.0),
+                     expand = expansion(mult = c(0.05, 0.14))) +
+  geom_text(data = pval_df, aes(x, y, label = label), inherit.aes = FALSE, vjust = 1.2,
+            size = EFF_PVAL_SIZE, fontface = "bold") +
+  geom_text(data = ssize_df, aes(x, -Inf, label = label), inherit.aes = FALSE, vjust = -0.5,
+            size = EFF_NLAB_SIZE, fontface = "bold") +
+  scale_fill_manual(values = variant_colors) +
+  labs(x = "eQTL", y = "Absolute effect size") +
+  theme_minimal(base_size = 14) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        legend.position = "none", axis.title = element_text(face = "bold", size = EFF_AXIS_SIZE, color = "black"),
+        axis.text = element_text(face = "bold", size = EFF_AXIS_SIZE, color = "black"),
+        strip.text = element_text(size = EFF_AXIS_SIZE, face = "bold"),
+        strip.background = element_rect(fill = "gray95", color = "black"),
+        panel.grid.major.x = element_blank(), panel.grid.minor = element_blank())
+print(fig1b)
+ggsave(file.path(OUT_FIG, "Fig1B_effect_size_per_variant.tiff"), fig1b,
+       width = 12, height = 8, dpi = 600, units = "in", device = "tiff", compression = "lzw")
+```
+
+## 1C — effect size across variant types (pairwise Wilcoxon, BH)
+```{r fig1c}
+ord <- all_clumped %>% group_by(Genetic_variants) %>%
+  summarise(m = median(abs_SnpWeight, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(m)) %>% pull(Genetic_variants) %>% as.character()
+dat_c <- all_clumped %>% mutate(Genetic_variants = factor(Genetic_variants, levels = ord))
+
+pw <- pairwise.wilcox.test(dat_c$abs_SnpWeight, dat_c$Genetic_variants, p.adjust.method = "BH")
+pw_tab <- as.data.frame(as.table(pw$p.value)) %>% setNames(c("V1","V2","p_adj")) %>% filter(!is.na(p_adj))
+# brackets only for comparisons against SNPs (p-values are still BH-adjusted over all pairs)
+pairs <- Filter(function(p) "SNPs" %in% p, combn(ord, 2, simplify = FALSE))
+pair_labels <- sapply(pairs, function(p) pw_tab %>%
+  filter((V1==p[1]&V2==p[2])|(V1==p[2]&V2==p[1])) %>% pull(p_adj) %>% format.pval(digits = 3))
+ss_c <- dat_c %>% count(Genetic_variants) %>% mutate(label = paste0("n=", n))
+# bracket heights: first just above the largest effect size, then one step per comparison
+sig_y_c <- max(dat_c$abs_SnpWeight, na.rm = TRUE) + 0.05 + 0.09 * (seq_along(pairs) - 1)
+
+fig1c <- ggplot(dat_c, aes(Genetic_variants, abs_SnpWeight, fill = Genetic_variants)) +
+  geom_violin(trim = FALSE, alpha = 0.6) +
+  geom_boxplot(width = 0.1, fill = "white", outlier.shape = NA) +
+  geom_text(data = ss_c, aes(Genetic_variants, -Inf, label = label), inherit.aes = FALSE,
+            vjust = -0.5, size = EFF_NLAB_SIZE, fontface = "bold") +
+  # every pairwise bracket, stacked above the data (explicit y positions); the y range is
+  # set with coord_cartesian, not scale limits, so no bracket or violin tail is dropped
+  geom_signif(comparisons = pairs, annotations = pair_labels,
+              y_position = sig_y_c, tip_length = 0.01, size = EFF_BRACKET_LWD, textsize = EFF_PVAL_SIZE, fontface = "bold") +
+  scale_y_continuous(breaks = c(0.1,0.25,0.5,0.75,1.0)) +
+  scale_x_discrete(labels = wrap_cnv) +
+  coord_cartesian(ylim = c(0.1, max(sig_y_c) + 0.08)) +
+  scale_fill_manual(values = variant_colors) +
+  labs(x = "Variant type", y = "Absolute effect size") +
+  theme_minimal(base_size = 14) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"), legend.position = "none",
+        axis.title = element_text(face = "bold", size = EFF_AXIS_SIZE, color = "black"), axis.text = element_text(face = "bold", size = EFF_AXIS_SIZE, color = "black"),
+        panel.grid.major.x = element_blank(), panel.grid.minor = element_blank())
+print(fig1c)
+ggsave(file.path(OUT_FIG, "Fig1C_effect_size_by_variant_type.tiff"), fig1c,
+       width = 10, height = 8, dpi = 600, units = "in", device = "tiff", compression = "lzw")
+```
+
+## 1D — effect size across variant types, SNPs / InDels / SVs only (no gene-based CNVs)
+```{r fig1d}
+# Same as 1C, but gene-based CNVs are left out; the pairwise Wilcoxon tests
+# and BH correction are recomputed across the three remaining types only.
+dat_d <- all_clumped %>%
+  filter(Genetic_variants %in% c("SNPs", "InDels", "SVs")) %>%
+  mutate(Genetic_variants = droplevels(Genetic_variants))
+
+ord_d <- dat_d %>% group_by(Genetic_variants) %>%
+  summarise(m = median(abs_SnpWeight, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(m)) %>% pull(Genetic_variants) %>% as.character()
+dat_d <- dat_d %>% mutate(Genetic_variants = factor(Genetic_variants, levels = ord_d))
+
+pw_d <- pairwise.wilcox.test(dat_d$abs_SnpWeight, dat_d$Genetic_variants, p.adjust.method = "BH")
+pw_tab_d <- as.data.frame(as.table(pw_d$p.value)) %>% setNames(c("V1","V2","p_adj")) %>% filter(!is.na(p_adj))
+# brackets only for comparisons against SNPs (p-values are still BH-adjusted over all pairs)
+pairs_d <- Filter(function(p) "SNPs" %in% p, combn(ord_d, 2, simplify = FALSE))
+pair_labels_d <- sapply(pairs_d, function(p) pw_tab_d %>%
+  filter((V1==p[1]&V2==p[2])|(V1==p[2]&V2==p[1])) %>% pull(p_adj) %>% format.pval(digits = 3))
+ss_d <- dat_d %>% count(Genetic_variants) %>% mutate(label = paste0("n=", n))
+sig_y_d <- max(dat_d$abs_SnpWeight, na.rm = TRUE) + 0.05 + 0.09 * (seq_along(pairs_d) - 1)
+
+fig1d <- ggplot(dat_d, aes(Genetic_variants, abs_SnpWeight, fill = Genetic_variants)) +
+  geom_violin(trim = FALSE, alpha = 0.6) +
+  geom_boxplot(width = 0.1, fill = "white", outlier.shape = NA) +
+  geom_text(data = ss_d, aes(Genetic_variants, -Inf, label = label), inherit.aes = FALSE,
+            vjust = -0.5, size = EFF_NLAB_SIZE, fontface = "bold") +
+  # every pairwise bracket, stacked above the data (explicit y positions); the y range is
+  # set with coord_cartesian, not scale limits, so no bracket or violin tail is dropped
+  geom_signif(comparisons = pairs_d, annotations = pair_labels_d,
+              y_position = sig_y_d, tip_length = 0.01, size = EFF_BRACKET_LWD, textsize = EFF_PVAL_SIZE, fontface = "bold") +
+  scale_y_continuous(breaks = c(0.1,0.25,0.5,0.75,1.0)) +
+  coord_cartesian(ylim = c(0.1, max(sig_y_d) + 0.08)) +
+  scale_fill_manual(values = variant_colors) +
+  labs(x = "Variant type", y = "Absolute effect size") +
+  theme_minimal(base_size = 14) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"), legend.position = "none",
+        axis.title = element_text(face = "bold", size = EFF_AXIS_SIZE, color = "black"), axis.text = element_text(face = "bold", size = EFF_AXIS_SIZE, color = "black"),
+        panel.grid.major.x = element_blank(), panel.grid.minor = element_blank())
+print(fig1d)
+ggsave(file.path(OUT_FIG, "Fig1D_effect_size_by_variant_type_SNPs_InDels_SVs.tiff"), fig1d,
+       width = 9, height = 8, dpi = 600, units = "in", device = "tiff", compression = "lzw")
+```
+
+# Part 6: Figure 2 — Genomic distribution of eQTLs
+
+```{r fig2}
+region_levels <- c("Promoter","5' UTR","Start codon","CDS","Stop codon",
+                   "3' UTR","Terminator","Intergenic","Other")
+
+simplify_feature <- function(f) {
+  if (is.na(f) || f %in% c("", "NA")) return("Intergenic")
+  parts <- trimws(unlist(strsplit(f, ";")))
+  parts <- parts[parts != "" & parts != "NA"]
+  if (length(parts) == 0) return("Intergenic")
+  if (all(grepl("intergenic", parts))) return("Intergenic")
+  parts <- parts[!grepl("intergenic", parts)]
+  pr <- c(promoter="Promoter", five_prime_UTR="5' UTR", start_codon="Start codon",
+          CDS="CDS", stop_codon="Stop codon", three_prime_UTR="3' UTR", terminator="Terminator")
+  hit <- pr[names(pr) %in% parts]
+  if (length(hit) == 0) return("Other")
+  hit[[1]]
+}
+
+feature_dist <- all_clumped %>%
+  mutate(region = factor(vapply(Causal_Gene_feature, simplify_feature, ""), levels = region_levels)) %>%
+  count(Genetic_variants, region, .drop = FALSE) %>%
+  group_by(Genetic_variants) %>% mutate(pct = 100 * n / sum(n)) %>% ungroup() %>%
+  filter(n > 0)
+
+region_colors <- c("Promoter"="#8E44AD","5' UTR"="#3498DB","Start codon"="#6D4C41",
+                   "CDS"="#2ECC71","Stop codon"="#F1C40F","3' UTR"="#E67E22",
+                   "Terminator"="#E74C3C","Intergenic"="#95A5A6","Other"="#34495E")
+
+feature_dist <- feature_dist %>%
+  group_by(Genetic_variants) %>%
+  mutate(lab = ifelse(round(pct, 1) == 0, "", paste0(round(pct, 1), "%"))) %>%
+  ungroup()
+
+fig2 <- ggplot(feature_dist, aes(x = region, y = pct, fill = region)) +
+  geom_col(width = 0.75, color = "grey30", linewidth = 0.2) +
+  geom_text(aes(label = lab), vjust = -0.3, size = 2.8, fontface = "bold") +
+  facet_wrap(~ Genetic_variants, nrow = 1) +
+  scale_fill_manual(values = region_colors, name = "Genomic region", drop = FALSE) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
+  labs(x = NULL, y = "Percentage of eQTL variants (%)") +
+  theme_classic(base_size = 13) +
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(),
+        axis.text.y = element_text(face = "bold", size = AXIS_SIZE, color = "black"), axis.title = element_text(face = "bold", size = AXIS_SIZE, color = "black"),
+        strip.text = element_text(size = 14, face = "bold"),
+        strip.background = element_rect(fill = "gray95", color = "black"),
+        legend.position = "right")
+print(fig2)
+ggsave(file.path(OUT_FIG, "Fig2_genomic_region_bar.tiff"), fig2,
+       width = 14, height = 6, dpi = 600, units = "in", device = "tiff", compression = "lzw")
+
+feature_dist %>% mutate(pct = round(pct, 1)) %>% arrange(Genetic_variants, desc(pct)) %>% print(n = 100)
+```
+
+# Part 6: # Part: Figure - Global Genomic Region Enrichment (all variants combined)
+
+``` {r global-region-enrichment}
+# Collapse across all variant types
+global_region_dist <- all_clumped %>%
+  mutate(region = factor(vapply(Causal_Gene_feature, simplify_feature, ""), 
+                        levels = region_levels)) %>%
+  count(region) %>%
+  mutate(pct = 100 * n / sum(n),
+         lab = paste0(round(pct, 1), "%")) %>%
+  filter(n > 0) %>%
+  arrange(desc(pct)) %>%
+  mutate(region = factor(region, levels = region))  # reorder by descending pct
+
+# Print ranking
+cat("Global Genomic Region Enrichment (all eQTLs):\n\n")
+print(global_region_dist %>% select(region, n, pct) %>% mutate(pct = round(pct, 1)))
+cat("\n")
+
+# Bar plot
+fig_global_region <- ggplot(global_region_dist, aes(x = reorder(region, -pct), y = pct, fill = region)) +
+  geom_col(color = "black", linewidth = 0.4, width = 0.7) +
+  geom_text(aes(label = lab), vjust = -0.3, size = 4.5, fontface = "bold") +
+  scale_fill_manual(values = region_colors, name = "Genomic region") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15)), limits = c(0, max(global_region_dist$pct) * 1.15)) +
+  labs(x = "Genomic region", 
+       y = "Percentage of all eQTL variants (%)") +
+  theme_classic(base_size = 14) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+        axis.text.x = element_text(angle = 45, hjust = 1, face = "bold", size = AXIS_SIZE, color = "black"),
+        axis.text.y = element_text(face = "bold", size = AXIS_SIZE, color = "black"),
+        axis.title = element_text(face = "bold", size = AXIS_SIZE, color = "black"),
+        legend.position = "none",
+        panel.grid.major.y = element_line(color = "grey90", size = 0.3),
+        panel.grid.major.x = element_blank())
+
+print(fig_global_region)
+ggsave(file.path(OUT_FIG, "Fig2_global_genomic_region_enrichment.tiff"), fig_global_region,
+       width = 10, height = 7, dpi = 600, units = "in", device = "tiff", compression = "lzw")
+```
+
+
+The key changes from the repel approach:
+
+- Dropped `geom_label_repel` entirely — it doesn't work properly in polar/pie coordinates
+- Labels are placed using `x = 1.6` in polar space, which puts them just outside the pie edge
+- Labels smaller than 2% are suppressed with `lab = ""` to avoid clutter from tiny slices — you can adjust this threshold
+- The legend on the right tells viewers which color is which region, so labels only need to show the percentage
+
+# Part 7: Figure 3 — Variant subtype composition
+
+```{r fig3}
+subtype_counts <- all_clumped %>%
+  count(Genetic_variants, Variant_subtype) %>%
+  group_by(Genetic_variants) %>% mutate(pct = 100 * n / sum(n)) %>% ungroup()
+
+fig3 <- ggplot(subtype_counts, aes(reorder(Variant_subtype, -n), n, fill = Genetic_variants)) +
+  geom_col(color = "black", width = 0.75) +
+  geom_text(aes(label = n), vjust = -0.3, size = 3.5, fontface = "bold") +
+  facet_wrap(~ Genetic_variants, scales = "free_x", nrow = 1) +
+  scale_fill_manual(values = variant_colors) +
+  labs(x = "Subtype", y = "Number of eQTL variants") +
+  theme_classic(base_size = 13) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"), legend.position = "none",
+        axis.text.x = element_text(angle = 45, hjust = 1, face = "bold", size = AXIS_SIZE, color = "black"),
+        axis.text.y = element_text(face = "bold", size = AXIS_SIZE, color = "black"), axis.title = element_text(face = "bold", size = AXIS_SIZE, color = "black"),
+        strip.text = element_text(size = 14, face = "bold"),
+        strip.background = element_rect(fill = "gray95", color = "black"))
+print(fig3)
+ggsave(file.path(OUT_FIG, "Fig3_variant_subtype_bar.tiff"), fig3,
+       width = 12, height = 6, dpi = 600, units = "in", device = "tiff", compression = "lzw")
+
+subtype_counts %>% mutate(pct = round(pct, 1)) %>% arrange(Genetic_variants, desc(n)) %>% print(n = 100)
+```
+
+# Part 8: Total variant counts from .bim (background for Fig 4 & Fig 5)
+
+```{r bim-counts}
+total_variants_df <- bind_rows(lapply(names(bim_paths), function(vt) {
+  bim <- read.table(bim_paths[[vt]], header = FALSE, stringsAsFactors = FALSE)
+  if (vt == "CNVs") {
+    bim <- bim[bim$V1 != 17, ]   # chr 17 removed, as in read_assoc()
+    # CNVs past the S288C chromosome end removed, as in annotate_variant()
+    bim <- bim[bim$V4 <= chr_lengths[num_to_roman(bim$V1)], ]
+  }
+  n <- nrow(bim)
+  data.frame(variant_type = ifelse(vt == "CNVs", CNV_LABEL, vt), total_count = n)
+}))
+
+eqtl_counts <- all_clumped %>% group_by(Genetic_variants) %>%
+  summarise(eqtl_count = n_distinct(SNP), .groups = "drop") %>%
+  dplyr::rename(variant_type = Genetic_variants) %>% mutate(variant_type = as.character(variant_type))
+
+variant_summary <- total_variants_df %>%
+  left_join(eqtl_counts, by = "variant_type") %>%
+  replace_na(list(eqtl_count = 0)) %>%
+  mutate(pct_of_total        = 100 * eqtl_count / total_count,
+         pct_of_eqtl         = 100 * eqtl_count / sum(eqtl_count),
+         pct_of_all_variants = 100 * total_count / sum(total_count)) %>%
+  arrange(desc(eqtl_count))
+print(variant_summary)
+
+# Save summary to data_summary folder
+fwrite(variant_summary, file.path(OUT_SUMM, "variant_summary_stats.txt"),
+       sep = "\t", quote = FALSE, row.names = FALSE)
+```
+
+# Part 9: Figure 4 — Donut (eQTL vs total variant composition)
+
+```{r fig4}
+inner <- variant_summary %>% transmute(variant_type, count = eqtl_count,
+                                        percentage = pct_of_eqtl, circle = "eQTL")
+outer <- variant_summary %>% transmute(variant_type, count = total_count,
+                                        percentage = pct_of_all_variants, circle = "Total")
+donut <- bind_rows(inner, outer) %>%
+  mutate(circle = factor(circle, levels = c("Total","eQTL")),
+         variant_type = factor(variant_type, levels = c("SNPs","InDels","SVs",CNV_LABEL))) %>%
+  group_by(circle) %>% arrange(circle, desc(variant_type)) %>%
+  mutate(fraction = percentage/100, ymax = cumsum(fraction),
+         ymin = c(0, head(ymax, -1)), labelPosition = (ymax+ymin)/2,
+         label = paste0(round(percentage, 1), "%")) %>% ungroup() %>%
+  left_join(data.frame(circle = factor(c("eQTL","Total"), levels = c("eQTL","Total")),
+                       xmin = c(1.5, 2.5), xmax = c(2.5, 4.4)), by = "circle")
+
+fmtk <- function(x) ifelse(x >= 1000, paste0(round(x/1000, 1), "k"), as.character(x))
+
+fig4 <- ggplot(donut, aes(ymax = ymax, ymin = ymin, xmax = xmax, xmin = xmin, fill = variant_type)) +
+  geom_rect(color = "white", linewidth = 2) +
+  geom_label(aes(x = (xmin+xmax)/2, y = labelPosition, label = label),
+             fill = NA, label.size = NA, fontface = "bold", size = 6) +
+  annotate("text", x = 0.5, y = 0.5, size = 8,
+           label = paste0("eQTL\n(n = ", fmtk(sum(variant_summary$eqtl_count)), ")")) +
+  scale_fill_manual(values = variant_colors, name = "Variant type") +
+  coord_polar(theta = "y") + xlim(c(0, 5)) + theme_void() +
+  theme(legend.position = "top", legend.title = element_blank(),
+        legend.text = element_text(size = 16), plot.caption = element_text(size = 16, hjust = 0.5)) +
+  labs(caption = paste0("Total variants (n = ", fmtk(sum(variant_summary$total_count)), ")"))
+print(fig4)
+ggsave(file.path(OUT_FIG, "Fig4_donut_eqtl.tiff"), fig4,
+       width = 10, height = 10, dpi = 600, units = "in", device = "tiff", compression = "lzw")
+```
+```{r}
+# Part 4: Associations by type
+assoc_pct <- all_clumped %>%
+  group_by(Genetic_variants) %>%
+  summarise(n_assoc = n(),
+            pct = round(100 * n() / nrow(all_clumped), 1)) %>%
+  arrange(desc(n_assoc))
+print(assoc_pct)
+
+# Part 8: Unique variants by type (what Figure 4 shows)
+print(variant_summary %>% select(variant_type, eqtl_count, pct_of_eqtl))
+```
+
+
+
+# Part 10: Figure 5 — Odds ratio of eQTL enrichment
+
+```{r fig5}
+or_one <- function(v) {
+  a <- variant_summary$eqtl_count[variant_summary$variant_type == v]
+  b <- variant_summary$total_count[variant_summary$variant_type == v] - a
+  c <- sum(variant_summary$eqtl_count[variant_summary$variant_type != v])
+  d <- sum(variant_summary$total_count[variant_summary$variant_type != v]) - c
+  ft <- fisher.test(matrix(c(a,b,c,d), 2, 2, byrow = TRUE))
+  data.frame(VariantType = v, a_eqtl = a, b_not = b, c_oth = c, d_oth_not = d,
+             OddsRatio = (a*d)/(b*c), PValue = ft$p.value)
+}
+or_results <- bind_rows(lapply(c("SNPs","InDels","SVs",CNV_LABEL), or_one)) %>%
+  mutate(PValue_FDR = p.adjust(PValue, "BH"),
+         Significant = ifelse(PValue_FDR < 0.05, "Yes", "No"),
+         VariantType = factor(VariantType, levels = c("SNPs","InDels","SVs",CNV_LABEL)),
+         # log2 odds ratio: 0 = no enrichment, > 0 enriched, < 0 depleted
+         log2OR      = log2(OddsRatio))
+print(or_results)
+
+# Save to data_summary folder
+fwrite(or_results, file.path(OUT_SUMM, "odds_ratio_enrichment.txt"),
+       sep = "\t", quote = FALSE, row.names = FALSE)
+
+# Pad the y-axis on the side(s) the bars extend to, so the labels fit
+y_pad <- max(abs(or_results$log2OR)) * 0.6
+OR_LABEL_SIZE <- 7.5   # OR and p-value labels on the bars, mm
+
+fig5 <- ggplot(or_results, aes(VariantType, log2OR, fill = VariantType)) +
+  geom_col(color = "black", linewidth = 1.1, width = 0.7) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red", linewidth = 1.5) +
+  # p-values below the double-precision limit are stored as 0: shown as p<1e-300
+  geom_text(aes(label = paste0("OR=", round(OddsRatio, 2), "\n",
+                               ifelse(PValue_FDR == 0, "p<1e-300",
+                                      paste0("p=", format(PValue_FDR, scientific = TRUE, digits = 2)))),
+                vjust = ifelse(log2OR >= 0, -0.3, 1.3)),
+            size = OR_LABEL_SIZE, fontface = "bold", lineheight = 0.9) +
+  scale_y_continuous(limits = c(min(0, min(or_results$log2OR)) - y_pad * (min(or_results$log2OR) < 0),
+                                max(0, max(or_results$log2OR)) + y_pad)) +
+  scale_fill_manual(values = variant_colors) +
+  scale_x_discrete(labels = wrap_cnv) +
+  labs(x = "Variant type", y = expression(bold(log[2]~"(Odds ratio)")),
+       caption = "Red dashed line = log2(OR) = 0 (no enrichment)") +
+  theme_minimal(base_size = 14) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"), legend.position = "none",
+        axis.title = element_text(face = "bold", size = AXIS_SIZE, color = "black"), axis.text = element_text(face = "bold", size = AXIS_SIZE, color = "black"),
+        panel.grid.major.x = element_blank(), panel.grid.minor = element_blank())
+print(fig5)
+ggsave(file.path(OUT_FIG, "Fig5_odds_ratio.tiff"), fig5,
+       width = 10, height = 8, dpi = 600, units = "in", device = "tiff", compression = "lzw")
+```
+
+# Part 11: Figure 6 — Pleiotropy (traits affected per variant, by type)
+
+```{r fig6}
+pleio <- all_clumped %>% group_by(Genetic_variants, SNP) %>%
+  summarise(n_traits = n_distinct(Pheno), .groups = "drop")
+
+pleio_summary <- pleio %>% group_by(Genetic_variants) %>%
+  summarise(n_variants = n(), mean_traits = round(mean(n_traits), 2),
+            median_traits = median(n_traits), max_traits = max(n_traits), .groups = "drop") %>%
+  arrange(desc(mean_traits))
+print(pleio_summary)
+
+# Save to data_summary folder
+fwrite(pleio_summary, file.path(OUT_SUMM, "pleiotropy_summary.txt"),
+       sep = "\t", quote = FALSE, row.names = FALSE)
+
+kw <- kruskal.test(n_traits ~ Genetic_variants, data = pleio)
+cat("Kruskal-Wallis p =", format(kw$p.value, scientific = TRUE, digits = 3), "\n")
+print(pairwise.wilcox.test(pleio$n_traits, pleio$Genetic_variants, p.adjust.method = "BH")$p.value)
+
+fig6 <- ggplot(pleio, aes(reorder(Genetic_variants, n_traits, median), n_traits, fill = Genetic_variants)) +
+  geom_boxplot(outlier.alpha = 0.3, width = 0.6) +
+  geom_jitter(width = 0.15, alpha = 0.2, size = 0.8) +
+  scale_fill_manual(values = variant_colors) + scale_y_log10() +
+  labs(x = "Variant type", y = "Number of associated traits (log scale)",
+       caption = "Kruskal-Wallis + pairwise Wilcoxon, FDR corrected") +
+  theme_classic(base_size = 13) +
+  theme(legend.position = "none", plot.title = element_text(hjust = 0.5, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5, size = 10),
+        axis.text = element_text(face = "bold", size = AXIS_SIZE, color = "black"), axis.title = element_text(face = "bold", size = AXIS_SIZE, color = "black"))
+print(fig6)
+ggsave(file.path(OUT_FIG, "Fig6_pleiotropy.tiff"), fig6,
+       width = 8, height = 6, dpi = 600, units = "in", device = "tiff", compression = "lzw")
+```
+
+# Part 12: Figure 7 — Pleiotropy by variant SUBTYPE (SVs and InDels only)
+
+```{r fig7}
+pleio_sub <- all_clumped %>%
+  filter(Genetic_variants %in% c("SVs", "InDels"),
+         !is.na(Variant_subtype), Variant_subtype != "", Variant_subtype != "Unknown") %>%
+  group_by(Genetic_variants, Variant_subtype, SNP) %>%
+  summarise(n_traits = n_distinct(Pheno), .groups = "drop") %>%
+  mutate(Genetic_variants = factor(Genetic_variants, levels = c("InDels", "SVs")))
+
+pleio_sub_summary <- pleio_sub %>%
+  group_by(Genetic_variants, Variant_subtype) %>%
+  summarise(n_variants   = n(),
+            mean_traits  = round(mean(n_traits), 2),
+            median_traits= median(n_traits),
+            max_traits   = max(n_traits), .groups = "drop") %>%
+  arrange(Genetic_variants, desc(mean_traits))
+print(pleio_sub_summary)
+
+# Save to data_summary folder
+fwrite(pleio_sub_summary, file.path(OUT_SUMM, "pleiotropy_by_subtype_summary.txt"),
+       sep = "\t", quote = FALSE, row.names = FALSE)
+
+kw_sub <- pleio_sub %>%
+  group_by(Genetic_variants) %>%
+  summarise(
+    n_subtypes = n_distinct(Variant_subtype),
+    kw_p = if (n_distinct(Variant_subtype) >= 2)
+             kruskal.test(n_traits ~ factor(Variant_subtype))$p.value else NA_real_,
+    .groups = "drop") %>%
+  mutate(label = ifelse(is.na(kw_p), "KW: n/a",
+                        paste0("KW p = ", format.pval(kw_p, digits = 3))))
+print(kw_sub)
+
+sub_order <- pleio_sub %>%
+  group_by(Genetic_variants, Variant_subtype) %>%
+  summarise(med = median(n_traits), .groups = "drop") %>%
+  arrange(Genetic_variants, desc(med))
+pleio_sub <- pleio_sub %>%
+  mutate(Variant_subtype = factor(Variant_subtype, levels = unique(sub_order$Variant_subtype)))
+
+ss_sub <- pleio_sub %>% count(Genetic_variants, Variant_subtype) %>%
+  mutate(label = paste0("n=", n))
+
+fig7 <- ggplot(pleio_sub, aes(Variant_subtype, n_traits, fill = Genetic_variants)) +
+  geom_boxplot(outlier.alpha = 0.3, width = 0.6) +
+  geom_jitter(width = 0.15, alpha = 0.2, size = 0.8) +
+  geom_text(data = ss_sub, aes(Variant_subtype, -Inf, label = label),
+            inherit.aes = FALSE, vjust = -0.6, size = NLAB_SIZE, fontface = "bold") +
+  geom_text(data = kw_sub, aes(x = Inf, y = Inf, label = label),
+            inherit.aes = FALSE, hjust = 1.05, vjust = 1.5, size = PVAL_SIZE, fontface = "bold") +
+  facet_wrap(~ Genetic_variants, scales = "free_x", nrow = 1) +
+  scale_fill_manual(values = variant_colors) + scale_y_log10() +
+  labs(x = "Variant subtype", y = "Number of associated traits (log scale)",
+       caption = "Subtypes ordered by median; Kruskal-Wallis across subtypes within each type") +
+  theme_classic(base_size = 13) +
+  theme(legend.position = "none", plot.title = element_text(hjust = 0.5, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5, size = 10),
+        axis.text.x = element_text(angle = 45, hjust = 1, face = "bold", size = AXIS_SIZE, color = "black"),
+        axis.text.y = element_text(face = "bold", size = AXIS_SIZE, color = "black"),
+        axis.title = element_text(face = "bold", size = AXIS_SIZE, color = "black"),
+        strip.text = element_text(size = 14, face = "bold"),
+        strip.background = element_rect(fill = "gray95", color = "black"))
+print(fig7)
+ggsave(file.path(OUT_FIG, "Fig7_pleiotropy_by_subtype.tiff"), fig7,
+       width = 10, height = 6, dpi = 600, units = "in", device = "tiff", compression = "lzw")
+
+for (vt in levels(pleio_sub$Genetic_variants)) {
+  d <- pleio_sub %>% filter(Genetic_variants == vt)
+  if (n_distinct(d$Variant_subtype) >= 2) {
+    cat("\n== pairwise Wilcoxon (BH),", vt, "==\n")
+    print(pairwise.wilcox.test(d$n_traits, droplevels(d$Variant_subtype),
+                               p.adjust.method = "BH")$p.value)
+  }
+}
+```
+
+# Final Summary
+```{r final-summary}
+# ===================================================================
+# Final Summary Report
+# ===================================================================
+
+cat("\n")
+cat("════════════════════════════════════════════════════════════\n")
+cat("ANALYSIS COMPLETE\n")
+cat("════════════════════════════════════════════════════════════\n\n")
+
+cat("Output directories:\n")
+cat("├─ Clumped results:        ", OUT_CLUMP, "\n")
+cat("├─ Annotations:            ", OUT_ANNOT, "\n")
+cat("├─ Figures:                ", OUT_FIG, "\n")
+cat("└─ Summaries:              ", OUT_SUMM, "\n\n")
+
+cat("Figures generated:\n")
+figs <- c("Fig1A_effect_size_local_distant.tiff",
+          "Fig1B_effect_size_per_variant.tiff",
+          "Fig1C_effect_size_by_variant_type.tiff",
+          "Fig1D_effect_size_by_variant_type_SNPs_InDels_SVs.tiff",
+          "Fig2_genomic_region_bar.tiff",
+          "Fig3_variant_subtype_bar.tiff",
+          "Fig4_donut_eqtl.tiff",
+          "Fig5_odds_ratio.tiff",
+          "Fig6_pleiotropy.tiff",
+          "Fig7_pleiotropy_by_subtype.tiff")
+for (fig in figs) {
+  cat("  ✓", fig, "\n")
+}
+
+cat("\nSummary tables generated:\n")
+cat("  ✓ variant_summary_stats.txt\n")
+cat("  ✓ odds_ratio_enrichment.txt\n")
+cat("  ✓ pleiotropy_summary.txt\n")
+cat("  ✓ pleiotropy_by_subtype_summary.txt\n")
+
+cat("\n════════════════════════════════════════════════════════════\n")
+```
+
+**Workflow:** association files -> per-gene LD clumping (cached in `clumped/`) ->
+annotation (genomic feature, cis/trans within 2 kb, local/distant within 25 kb) -> tables in
+`annotations/` -> figures. Step2 (panel A) and Step3 (single-cell verification) read these tables.

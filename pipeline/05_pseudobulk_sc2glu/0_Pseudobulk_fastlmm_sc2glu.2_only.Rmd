@@ -1,0 +1,410 @@
+---
+title: "Pseudobulk for FastLMM — sc2glu.2 only (no replicate integration)"
+author: "Akriti Agrawal"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: true
+    number_section: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+---
+
+Same steps as `sc2glu.2/sc2glu.1_and_sc2glu.2_seurat_merged/merged_outputs_from_sc2glu.1_and_sc2glu.2.Rmd`
+(demuxlet identities, AMB/DBL removal, strains with > 5 cells, sum pseudobulk, 60% presence
+filter, DESeq2 size-factor normalization, ORF conversion from the custom annotation, gene
+location from CDS, standard chromosomes only, per-gene split, rank-based INT), but on the
+sc2glu.2 replicate alone: no merge with sc2glu.1 and no CCA integration.
+
+```{r, include=FALSE}
+library(tidyverse)
+library(dplyr)
+library(readr)
+library(Seurat)
+library(tidyr)
+library(kableExtra)
+
+# Be explicit if needed
+select <- dplyr::select
+filter <- dplyr::filter
+```
+
+```{r paths}
+BASE     <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/sc2glu.2"
+FASTLMM  <- file.path(BASE, "fastlmm_sc2.glu.2_only")
+PHENO    <- file.path(FASTLMM, "data", "pheno_data")
+SEURAT_OUT_DIR <- file.path(BASE, "gene_expression_analysis", "output_from_pseudobulk_fastlmm")
+for (d in c(PHENO, SEURAT_OUT_DIR, file.path(FASTLMM, "codes", "genotype_file")))
+  dir.create(d, showWarnings = FALSE, recursive = TRUE)
+```
+
+#Load the demuxlet output
+```{r}
+sc2glu.2 <- read.delim(file.path(BASE, "demuxlet/merged_demuxlet_output_scglu2.tsv"))
+str(sc2glu.2)
+
+sc2glu.2$BEST.LLK <- as.numeric(sc2glu.2$BEST.LLK)
+sc2glu.2$NUM.READS <- as.numeric(sc2glu.2$NUM.READS)
+sc2glu.2$NUM.SNPS <- as.numeric(sc2glu.2$NUM.SNPS)
+sc2glu.2$NEXT.LLK <- as.numeric(sc2glu.2$NEXT.LLK)
+sc2glu.2$DIFF.LLK.BEST.NEXT <- as.numeric(sc2glu.2$DIFF.LLK.BEST.NEXT)
+sc2glu.2$BEST.POSTERIOR <- as.numeric(sc2glu.2$BEST.POSTERIOR)
+sc2glu.2$SNG.POSTERIOR <- as.numeric(sc2glu.2$SNG.POSTERIOR)
+sc2glu.2$SNG.BEST.LLK <- as.numeric(sc2glu.2$SNG.BEST.LLK)
+sc2glu.2$SNG.NEXT.LLK <- as.numeric(sc2glu.2$SNG.NEXT.LLK)
+sc2glu.2$SNG.ONLY.POSTERIOR <- as.numeric(sc2glu.2$SNG.ONLY.POSTERIOR)
+sc2glu.2$DBL.BEST.LLK <- as.numeric(sc2glu.2$DBL.BEST.LLK)
+sc2glu.2$DIFF.LLK.SNG.DBL <- as.numeric(sc2glu.2$DIFF.LLK.SNG.DBL)
+sc2glu.2 <- na.omit(sc2glu.2)
+```
+
+Open the seurat object
+```{r}
+expression_data_sc2glu.2 <- Read10X(data.dir = file.path(BASE, "alignment/output_of_alignment_sc.2_with_cus_ref/run_count/outs/filtered_feature_bc_matrix/"))
+Na_va_data_sc2glu.2 <- CreateSeuratObject(counts = expression_data_sc2glu.2, project = "natural variants", min.cells = 3, min.features = 200)
+head(Na_va_data_sc2glu.2@meta.data)
+print(dim(Na_va_data_sc2glu.2))
+```
+
+# Add the cell identities
+Add the cell identities assigned by demuxlet to the metadata of the seurat object.
+```{r}
+metadata_to_add_sc2glu.2 <- sc2glu.2[match(colnames(Na_va_data_sc2glu.2), sc2glu.2$BARCODE), ]
+Na_va_data_sc2glu.2 <- AddMetaData(Na_va_data_sc2glu.2, metadata = metadata_to_add_sc2glu.2)
+```
+
+KANMX/NATMX removal is not done here, as in the integrated pipeline (DGY3 was not in this pool).
+
+```{r}
+# Remove entries where DROPLET.TYPE is "AMB" or "DBL"; low-quality singlets are kept for sc2glu.2
+# (median UMI ~1500), as in the integrated pipeline
+Na_va_data_sc2glu.2_after <- subset(Na_va_data_sc2glu.2, !(subset = DROPLET.TYPE %in% c("AMB", "DBL")))
+print(dim(Na_va_data_sc2glu.2_after))
+head(Na_va_data_sc2glu.2_after@meta.data)
+```
+
+From figure1 and low correlation between replicates, remove the strains with less than 5 count
+```{r}
+# After QC filtering (before the strain filter)
+cat("Strains after QC filtering:",
+    dplyr::n_distinct(Na_va_data_sc2glu.2_after@meta.data$SNG.BEST.GUESS), "\n")
+
+Na_va_data_sc2glu.2_after@meta.data %>%
+  dplyr::count(strain = SNG.BEST.GUESS, name = "n_cells") %>%
+  dplyr::arrange(n_cells) %>%
+  knitr::kable(caption = "Cells per strain after QC filtering")
+
+strains_to_keep <- Na_va_data_sc2glu.2_after@meta.data %>%
+  dplyr::count(strain = SNG.BEST.GUESS, name = "n_cells") %>%
+  dplyr::filter(n_cells > 5) %>%
+  dplyr::pull(strain)
+
+# Strains passing the cell-count threshold, and which ones were dropped
+strains_before <- unique(Na_va_data_sc2glu.2_after@meta.data$SNG.BEST.GUESS)
+cat("Strains with >5 cells (kept):", length(strains_to_keep), "\n")
+cat("Strains removed:", length(setdiff(strains_before, strains_to_keep)), "\n")
+cat("  ", paste(setdiff(strains_before, strains_to_keep), collapse = ", "), "\n")
+
+Na_va_data_sc2glu.2_after <- subset(Na_va_data_sc2glu.2_after,
+                                    subset = SNG.BEST.GUESS %in% strains_to_keep)
+
+# After subsetting the Seurat object
+cat("Strains after removing strains with <=5 cells:",
+    dplyr::n_distinct(Na_va_data_sc2glu.2_after@meta.data$SNG.BEST.GUESS), "\n")
+
+Na_va_data_sc2glu.2_after@meta.data %>%
+  dplyr::count(strain = SNG.BEST.GUESS, name = "n_cells") %>%
+  dplyr::arrange(n_cells) %>%
+  knitr::kable(caption = "Cells per strain after removing strains with <=5 cells")
+
+```
+
+```{r}
+Na_va_data_sc2glu.2_after <- SetIdent(Na_va_data_sc2glu.2_after, value = Na_va_data_sc2glu.2_after$SNG.BEST.GUESS)
+
+Na_va_data_sc2glu.2_after <- NormalizeData(Na_va_data_sc2glu.2_after)
+Na_va_data_sc2glu.2_after <- FindVariableFeatures(Na_va_data_sc2glu.2_after,
+                                                  selection.method = "vst",
+                                                  nfeatures = 2000)
+Na_va_data_sc2glu.2_after <- ScaleData(Na_va_data_sc2glu.2_after)
+```
+
+Raw counts of the single replicate (no common-gene intersection needed: there is one layer)
+```{r}
+counts_matrix <- Na_va_data_sc2glu.2_after[["RNA"]]$counts
+dim(counts_matrix)
+```
+
+###Actual pseudobulking
+## 1. Get the count_matrix and metadata.
+```{r}
+metadata_df <- Na_va_data_sc2glu.2_after@meta.data
+```
+#save the seurat_obj
+```{r}
+# single-cell object (raw counts + SNG.BEST.GUESS), used for the raw-data eQTL verification
+saveRDS(Na_va_data_sc2glu.2_after,
+        file = file.path(SEURAT_OUT_DIR, "Na_va_data_subsetted.rds"))
+cat("Saved sc2glu.2 Seurat object:", ncol(Na_va_data_sc2glu.2_after), "cells,",
+    nrow(Na_va_data_sc2glu.2_after), "genes\n")
+```
+
+## 2. Extract genotype information from metadata
+```{r}
+set.seed(42)
+
+genotypes <- unique(metadata_df$SNG.BEST.GUESS)
+cat("Found", length(genotypes), "unique genotypes:", paste(genotypes, collapse=", "), "\n")
+
+cell_counts_per_genotype <- list()
+
+# one strain per line
+write.table(genotypes,
+            file = file.path(FASTLMM, "codes", "genotype_file", paste0("strain_list_", length(genotypes), ".txt")),
+            row.names = FALSE,
+            col.names = FALSE,
+            quote = FALSE)
+```
+## 3. Create lists to store pseudobulk results
+```{r}
+pseudobulk_sum_counts <- list()  # For sum aggregation
+```
+## 4. Perform pseudobulk aggregation for each genotype
+```{r}
+for (genotype in genotypes) {
+  cells_in_genotype <- rownames(metadata_df[metadata_df$SNG.BEST.GUESS == genotype, ])
+
+  if (length(cells_in_genotype) == 0) {
+    cat("No cells found for genotype:", genotype, "\n")
+    next
+  }
+
+  cat("Processing genotype:", genotype, "with", length(cells_in_genotype), "cells\n")
+
+  genotype_counts <- counts_matrix[, cells_in_genotype, drop = FALSE]
+
+  # Sum aggregation (standard pseudobulk approach)
+  pseudobulk_sum_counts[[genotype]] <- rowSums(genotype_counts)
+
+  cell_counts_per_genotype[[genotype]] <- length(cells_in_genotype)
+}
+```
+## 5. Convert the lists to data frames
+```{r}
+pseudobulk_sum_df <- as.data.frame(do.call(cbind, pseudobulk_sum_counts))
+colnames(pseudobulk_sum_df) <- names(pseudobulk_sum_counts)
+
+pseudobulk_sum_df
+
+write.csv(pseudobulk_sum_df, file = file.path(PHENO, "pseudobulked_sc2glu.2_only_before_any_filtering.csv"))
+```
+#Selection of expressed transcripts (expressed in >= 60% of strains)
+```{r}
+n_samples <- ncol(pseudobulk_sum_df)  # Total number of strains
+threshold <- n_samples * 0.6          # 60% threshold
+
+present_counts <- rowSums(pseudobulk_sum_df > 0)
+reliable_transcripts <- pseudobulk_sum_df[present_counts >= threshold, ]
+pseudobulk_sum_df <- reliable_transcripts
+
+library(DESeq2)
+# Sum aggregation - direct normalization with DESeq2
+condition_sum <- factor(colnames(pseudobulk_sum_df))
+coldata_sum <- data.frame(row.names = colnames(pseudobulk_sum_df), condition = condition_sum)
+
+dds_sum <- DESeqDataSetFromMatrix(
+  countData = round(as.matrix(pseudobulk_sum_df)), # DESeq2 expects integers
+  colData = coldata_sum,
+  design = ~ 1
+)
+dds_sum <- estimateSizeFactors(dds_sum)
+sum_normalized_df <- counts(dds_sum, normalized = TRUE)
+
+write.csv(sum_normalized_df, file = file.path(PHENO, "pseudobulked_data_sc2glu.2_only.csv"))
+
+ncol(sum_normalized_df)
+```
+
+#Part II - change all gene names to ORF names so they match the annotation file, and create the gene_location file used to classify cis and trans
+
+```{r}
+gene_matrix <- as.matrix(sum_normalized_df)
+```
+
+```{r}
+all_custom_gene_annotations <- read.csv("/scratch/aa9679/SingleCell_cerevisiae/Gene_exp_analysis/yeast_custom_annotations.csv")
+
+gene_location <- all_custom_gene_annotations %>%
+  filter(type == "CDS", !is.na(gene_id)) %>%
+  group_by(gene_id) %>%
+  summarise(
+    gene_name = dplyr::first(gene_name),
+    chr = dplyr::first(seqnames),
+    left = min(start),
+    right = max(end)
+  )
+
+print(head(gene_location))
+print(paste("Number of genes:", nrow(gene_location)))
+```
+
+#After gene location file, convert common name to ORF
+```{r}
+common_to_orf <- all_custom_gene_annotations %>%
+  filter(!is.na(gene_name), !is.na(gene_id)) %>%
+  distinct(gene_name, gene_id) %>%
+  deframe()  # names = gene_name, values = gene_id
+
+expr_gene_ids <- rownames(gene_matrix)
+
+is_orf <- grepl("^Y[A-Z]{2}\\d{3}[WC](-[A-Z])?$", expr_gene_ids)
+cat("Already ORF format:", sum(is_orf), "\n")
+cat("Common names to convert:", sum(!is_orf), "\n")
+
+expr_orf_ids <- ifelse(
+  is_orf,
+  expr_gene_ids,
+  ifelse(expr_gene_ids %in% names(common_to_orf), common_to_orf[expr_gene_ids], expr_gene_ids)
+)
+
+cat("Converted:", sum(!is_orf & expr_gene_ids %in% names(common_to_orf)), "\n")
+cat("Could not convert:", sum(!is_orf & !expr_gene_ids %in% names(common_to_orf)), "\n")
+
+not_converted <- expr_gene_ids[!is_orf & !expr_gene_ids %in% names(common_to_orf)]
+cat("Genes that could not be converted:\n")
+print(not_converted)
+
+rownames(gene_matrix) <- expr_orf_ids
+```
+
+#The genes that are not converted are most commonly ncRNA, rRNA or snRNA genes; remove them
+```{r}
+cat("\nGenes to remove:", length(not_converted), "\n")
+gene_matrix <- gene_matrix[!rownames(gene_matrix) %in% not_converted, ]
+
+cat("\nGene matrix dimensions after removal:\n")
+print(dim(gene_matrix))
+```
+
+```{r}
+# Step 1: Filter gene_location to keep only standard chromosomes
+standard_chromosomes <- gene_location[!is.na(gene_location$chr) &
+                                     !gene_location$chr %in% c("Mito", "Marker"), ]
+
+cat("Gene_location before chromosome filtering:", nrow(gene_location), "\n")
+cat("Gene_location after chromosome filtering:", nrow(standard_chromosomes), "\n")
+
+# Step 2: Filter gene_matrix to only include genes that are in the filtered gene_location
+genes_to_keep <- standard_chromosomes$gene_id
+gene_matrix_filtered <- gene_matrix[rownames(gene_matrix) %in% genes_to_keep, ]
+
+cat("Gene_matrix before filtering:", nrow(gene_matrix), "\n")
+cat("Gene_matrix after filtering:", nrow(gene_matrix_filtered), "\n")
+
+gene_location <- standard_chromosomes
+gene_matrix <- gene_matrix_filtered
+
+gene_matrix <- gene_matrix[!is.na(rownames(gene_matrix)) & !grepl("^NA\\.", rownames(gene_matrix)), ]
+
+cat("\nFinal check:\n")
+cat("Genes in expression matrix:", nrow(gene_matrix), "\n")
+cat("Genes in location file:", nrow(gene_location), "\n")
+all_match <- all(rownames(gene_matrix) %in% gene_location$gene_id)
+cat("All expressed genes have a location:", all_match, "\n")
+```
+
+```{r}
+gene_matrix_to_write <- as.data.frame(gene_matrix)
+gene_matrix_to_write$Gene_ID <- rownames(gene_matrix)
+gene_matrix_to_write <- gene_matrix_to_write[, c("Gene_ID", setdiff(colnames(gene_matrix_to_write), "Gene_ID"))]
+write.table(gene_matrix_to_write,
+            file = file.path(PHENO, "gene_matrix.txt"),
+            sep = "\t", row.names = FALSE, col.names = TRUE, quote = FALSE)
+
+write.table(gene_location,
+            file = file.path(PHENO, "gene_location.txt"),
+            sep = "\t", row.names = FALSE, col.names = TRUE, quote = FALSE)
+
+length(unique(gene_location$chr))
+```
+
+Load gene matrix
+```{r load-gene-matrix}
+gene_matrix_df <- read.table(file.path(PHENO, "gene_matrix.txt"),
+                            header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+gene_ids <- gene_matrix_df$Gene_ID
+gene_matrix <- as.matrix(gene_matrix_df[, -1])
+rownames(gene_matrix) <- gene_ids
+cat("Gene matrix dimensions:", nrow(gene_matrix), "genes by", ncol(gene_matrix), "samples\n")
+```
+
+#Now transpose rows to columns
+```{r}
+gene_matrix_transposed <- t(gene_matrix)
+cat("Transposed matrix:", nrow(gene_matrix_transposed), "strains by", ncol(gene_matrix_transposed), "genes\n")
+print(gene_matrix_transposed[1:3, 1:5])
+```
+```{r}
+write.table(gene_matrix_transposed,
+           file = file.path(PHENO, "pheno_data_fastlmm_sc2glu.2_only.txt"),
+           sep = "\t", quote = FALSE)
+```
+
+Split into one file per gene (strain, value)
+```{r}
+library(data.table)
+
+pheno_file <- file.path(PHENO, "pheno_data_fastlmm_sc2glu.2_only.txt")
+output_dir <- file.path(FASTLMM, "data", "splitted_pheno_file_per_gene")
+
+df <- read.csv(pheno_file, sep="\t", row.names=1, header=TRUE)
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+
+strain_names <- rownames(df)
+gene_names <- colnames(df)
+print(paste("Processing", length(gene_names), "genes for", length(strain_names), "strains"))
+
+for (i in 1:length(gene_names)) {
+  gene_name <- gene_names[i]
+  gene_data <- data.frame(strain = strain_names, value = df[, i], stringsAsFactors = FALSE)
+  colnames(gene_data) <- c("strain", gene_name)
+  write.table(gene_data, file = file.path(output_dir, paste0(gene_name, ".txt")),
+              sep = "\t", row.names = FALSE, col.names = TRUE, quote = FALSE)
+  if (i %% 500 == 0) print(paste("Processed", i, "genes..."))
+}
+print(paste("Completed! Created", length(gene_names), "gene files in", output_dir))
+print(read.table(file.path(output_dir, paste0(gene_names[1], ".txt")), header = TRUE, sep = "\t", nrows = 5))
+```
+
+# Rank-based inverse normal transformation (Blom offset c = 3/8), all genes
+```{r}
+library(stringr)
+rank.based.INT <- function(x, c=3/8, method="average")
+{
+  r <- rank(x, ties.method = method)
+  r[is.na(x)] <- NA
+  N <- length(x[!is.na(x)])
+  qnorm((r-c)/(N-2*c+1))
+}
+
+input_directory  <- file.path(FASTLMM, "data", "splitted_pheno_file_per_gene")
+output_directory <- file.path(FASTLMM, "data", "normalized_pheno_file")
+dir.create(output_directory, recursive = TRUE, showWarnings = FALSE)
+
+phenotype_files <- list.files(path = input_directory, pattern = "\\.txt$", full.names = TRUE)
+print(paste("Found", length(phenotype_files), "phenotype files to process"))
+
+for (phenotypesPath in phenotype_files) {
+  input_df <- read.csv(file = phenotypesPath, header = T, sep = "\t")
+  original_colnames <- colnames(input_df)
+  fileName <- str_remove(basename(phenotypesPath), ".txt")
+  normalized.phenotypes <- rank.based.INT(x = input_df[,2])
+  normalized.phenotypes.df <- data.frame(input_df[,1], normalized.phenotypes)
+  colnames(normalized.phenotypes.df) <- original_colnames
+  write.table(na.omit(normalized.phenotypes.df),
+              file = file.path(output_directory, paste0(fileName, ".norm.txt")),
+              row.names = F, col.names = T, sep = "\t", quote = F)
+}
+print(paste("Completed! Processed", length(phenotype_files), "files"))
+```

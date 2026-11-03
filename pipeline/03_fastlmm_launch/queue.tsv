@@ -1,0 +1,17 @@
+# condition	variant	batch_scripts_dir (relative to common_analysis_for_all)
+# 96-strain MAF15 SNPs (from the 969-strain matrix) and InDels (indels.96samples), --double-id
+YPD.1	SNPs	YPD.1/fastlmm/codes/batch_scripts_with_double_id_snps_indels
+YPD.2	SNPs	YPD.2/fastlmm/codes/batch_scripts_with_double_id_snps_indels
+YPD.2	Indels	YPD.2/fastlmm/codes/batch_scripts_with_double_id_snps_indels
+Flu.1	SNPs	Flu.1/fastlmm/codes/batch_scripts_with_double_id_snps_indels
+Flu.1	Indels	Flu.1/fastlmm/codes/batch_scripts_with_double_id_snps_indels
+Flu.2	SNPs	Flu.2/fastlmm/codes/batch_scripts_with_double_id_snps_indels
+Flu.2	Indels	Flu.2/fastlmm/codes/batch_scripts_with_double_id_snps_indels
+merged_fluconazole	SNPs	merged_fluconazole/new_fastlmm_march_26_2026/codes/batch_scripts_with_double_id_snps_indels
+merged_fluconazole	Indels	merged_fluconazole/new_fastlmm_march_26_2026/codes/batch_scripts_with_double_id_snps_indels
+sc2glu.2	SNPs	sc2glu.2/fastlmm/codes/batch_scripts_with_double_id_snps_indels
+sc2glu.2	Indels	sc2glu.2/fastlmm/codes/batch_scripts_with_double_id_snps_indels
+scgal.1	SNPs	scgal.1/fastlmm/codes/batch_scripts_with_double_id_snps_indels
+scgal.1	Indels	scgal.1/fastlmm/codes/batch_scripts_with_double_id_snps_indels
+merged_YPD	SNPs	merged_YPD/fastlmm/codes/batch_scripts_with_double_id_snps_indels
+merged_YPD	Indels	merged_YPD/fastlmm/codes/batch_scripts_with_double_id_snps_indels

@@ -16,11 +16,15 @@ import glob
 import os
 
 # Define variant types and their directories
+# FaST-LMM runs used in the paper, shown for YPD.1 (per condition only the dataset name changes):
+# SNPs 96_MAF15, SVs from the new PLINK files, gene-CNVs without chr17. InDels: YPD.1 uses the run below;
+# the other conditions use the 96_MAF15 run:
+#   'Indels_<condition>_96_MAF15_with_double_id_final_filtered_for_ncount_less_than_5': '../results/results_Indels_96_MAF15_with_double_id_final_filtered_for_ncount_less_than_5',
 variant_types = {
-    'SNP_YPD.1_with_double_id': '../results/results_SNPs_968_with_double_id',
-    'CNV_YPD.1_with_double_id': '../results/results_CNVs_with_double_id',
-#    'SVs_84': '../results/results_SVs_84',
-    'Indels_YPD.1_with_double_id': '../results/results_Indels_with_double_id',
+    'SNPs_YPD.1_96_MAF15_from_969_strains_with_double_id_final_filtered_for_ncount_less_than_5': '../results/results_SNPs_96_MAF15_from_969_strains_with_double_id_final_filtered_for_ncount_less_than_5',
+    'Indels_YPD.1_with_double_id_final_filtered_for_ncount_less_than_5': '../results/results_Indels_with_double_id_final_filtered_for_ncount_less_than_5',
+    'SVs_YPD.1_with_double_id_is_not_needed_final_filtered_for_ncount_less_than_5_run_from_new_plink_files': '../results/results_SVs_with_double_id_is_not_needed_final_filtered_for_ncount_less_than_5_run_from_new_plink_files',
+    'CNV_YPD.1_with_double_id_is_not_needed_final_filtered_for_ncount_less_than_5_run_from_new_plink_files_no_chr17': '../results/results_CNVs_with_double_id_is_not_needed_final_filtered_for_ncount_less_than_5_run_from_new_plink_files_no_chr17',
 }
 
 # Process each variant type

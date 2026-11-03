@@ -10,6 +10,8 @@ Analyzing whether strain-level gene expression variation is reproducible across 
 
 ```{r setup-libraries}
 library(tidyverse)
+source("/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Agrawal_single_cell_eqtl_cell_cycle/shared_code/wilcox_pvalue_fix.R")  # R 4.6.1 returns p = 0 for two-sided Wilcoxon p < 1e-16
+source("/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Agrawal_single_cell_eqtl_cell_cycle/shared_code/arial_font.R")  # Arial for all plots, as in Figs 2 and 5
 library(DESeq2)
 library(patchwork)
 library(AnnotationDbi)

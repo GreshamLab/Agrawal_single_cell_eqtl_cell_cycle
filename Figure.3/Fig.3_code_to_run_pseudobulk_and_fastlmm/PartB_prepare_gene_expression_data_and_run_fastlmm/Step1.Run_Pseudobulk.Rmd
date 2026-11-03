@@ -111,7 +111,7 @@ head(Na_va_data_subsetted@meta.data)
 
 
 ```
-From figure1 and low correlation between replicates, remove the strains with less than 10 count
+From figure1 and low correlation between replicates, remove the strains with less than 5 count
 ```{r}
 #look at the current cell count for all strains
 Na_va_data_subsetted@meta.data %>%
@@ -120,10 +120,10 @@ Na_va_data_subsetted@meta.data %>%
   knitr::kable(caption = "Cells per strain after QC filtering")
 
 
-# First, identify strains with >= 10 cells
+# First, identify strains with > 5 cells
 strains_to_keep <- Na_va_data_subsetted@meta.data %>%
   dplyr::count(strain = SNG.BEST.GUESS, name = "n_cells") %>%
-  dplyr::filter(n_cells >= 10) %>%
+  dplyr::filter(n_cells > 5) %>%
   dplyr::pull(strain)
 
 # Subset the Seurat object
@@ -212,6 +212,14 @@ str(pseudobulk_sum_df)
 
 
 #Selection of expressed transcripts (atleast 5 counts across 8 strains)
+```{r}
+write.table(pseudobulk_sum_df,
+            file      = "../fastlmm/data/pheno_data/pseudobulk_YPD.1_without_filtering_transcripts.txt",  # change per condition
+            sep       = "\t",
+            quote     = FALSE,
+            col.names = NA)
+```
+
 ```{r}
 #keep only the commonly expressed transcripts
 # Step 1: Calculate the 60% threshold - genes are expressed in 40% of the strain
