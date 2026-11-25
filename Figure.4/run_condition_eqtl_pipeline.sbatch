@@ -9,8 +9,6 @@
 #SBATCH --tasks-per-node=1
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=64gb
-#SBATCH --mail-type=END,FAIL
-#SBATCH --mail-user=aa9679@nyu.edu
 
 # One condition per job (Step1 -> PLINK clumping -> Step1/2/3 knits).
 # Submit from Figure.4/:

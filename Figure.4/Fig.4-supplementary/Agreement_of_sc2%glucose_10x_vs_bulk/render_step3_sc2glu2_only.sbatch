@@ -10,8 +10,6 @@
 #SBATCH --tasks-per-node=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32gb
-#SBATCH --mail-type=END
-#SBATCH --mail-user=aa9679@nyu.edu
 
 # Render the sc2glu.2-only bulk vs single-cell effect-size comparison.
 # Submit from this directory:  sbatch render_step3_sc2glu2_only.sbatch

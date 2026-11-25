@@ -5,7 +5,6 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=96gb
 #SBATCH --account=torch_pr_130_general
-#SBATCH --mail-type=FAIL,END
 # Re-renders Figure 3 (YPD.1) in order: classification (Step1) -> Panel A (Step2) -> Panel B (Step3).
 # Stops at the first failure, since each step reads the tables of the one before.
 set -e

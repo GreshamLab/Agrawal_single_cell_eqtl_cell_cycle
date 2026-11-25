@@ -13,6 +13,12 @@ str(single_cell_strains)
 #Ignore row where Standardized.name == DGY3
 single_cell_strains <- single_cell_strains[single_cell_strains$Standardized.name != "DGY3", ]
 
+#Zygosity count
+zygosity_counts <- table(single_cell_strains$Zygosity)
+zygosity_pct <- round(100 * zygosity_counts / sum(zygosity_counts), 1)
+
+zygosity_counts
+
 #calculate the percentage of zygosity, i.e., what is the percentage of heterozygous strains in the dataset
 sum(single_cell_strains$Zygosity == "heterozygous") / nrow(single_cell_strains) * 100
 #homozygous strains??
@@ -779,3 +785,178 @@ carrier_summary <- do.call(rbind, lapply(names(carrier_list), function(v) {
 knitr::kable(carrier_summary, row.names = FALSE)
 ```
 
+
+#Genetic diversity within vs between clades. Clade labels come from the "Clades" column of StrainsforSC-RNAseq.csv (1011 Yeast Genomes clades). "Wine/European (subclade 1)" is merged into clade 1. Mosaic groups (M1-M3) are not monophyletic clades, so pairs involving a mosaic strain are kept as a separate category rather than counted as within- or between-clade.
+```{r}
+clade_map <- data.frame(
+  Strain = trimws(single_cell_strains$Standardized.name),
+  Clade  = trimws(sub("\\s*\\(subclade.*\\)", "", single_cell_strains$Clades)),
+  stringsAsFactors = FALSE
+)
+clade_map$Mosaic <- grepl("^M[0-9]", clade_map$Clade)
+cat("Numbered clades represented:", length(unique(clade_map$Clade[!clade_map$Mosaic])),
+    "| mosaic groups:", length(unique(clade_map$Clade[clade_map$Mosaic])), "\n")
+print(table(clade_map$Clade))
+
+# Label every strain pair as within-clade, between-clade or mosaic-involved.
+label_pairs <- function(pw) {
+  c1 <- clade_map$Clade[match(pw$Strain1, clade_map$Strain)]
+  c2 <- clade_map$Clade[match(pw$Strain2, clade_map$Strain)]
+  m1 <- clade_map$Mosaic[match(pw$Strain1, clade_map$Strain)]
+  m2 <- clade_map$Mosaic[match(pw$Strain2, clade_map$Strain)]
+  stopifnot(!anyNA(c1), !anyNA(c2))
+  pw$Clade1 <- c1; pw$Clade2 <- c2
+  pw$Pair_type <- ifelse(m1 | m2, "Mosaic-involved",
+                         ifelse(c1 == c2, "Within-clade", "Between-clade"))
+  pw
+}
+
+pw_list <- list(
+  SNPs              = setNames(pairwise_snp_diff[, 1:3],   c("Strain1", "Strain2", "Diff")),
+  InDels            = setNames(pairwise_indel_diff[, 1:3], c("Strain1", "Strain2", "Diff")),
+  SVs               = setNames(pairwise_sv_diff[, 1:3],    c("Strain1", "Strain2", "Diff")),
+  `Gene-based CNVs` = setNames(pairwise_cnv_diff[, 1:3],   c("Strain1", "Strain2", "Diff"))
+)
+pw_list <- lapply(pw_list, label_pairs)
+
+# Summary: within vs between clades, with fold reduction and a Wilcoxon test
+# (pairs are not independent, so the p-value is descriptive only).
+clade_div_summary <- do.call(rbind, lapply(names(pw_list), function(v) {
+  pw <- pw_list[[v]]
+  w <- pw$Diff[pw$Pair_type == "Within-clade"]
+  b <- pw$Diff[pw$Pair_type == "Between-clade"]
+  m <- pw$Diff[pw$Pair_type == "Mosaic-involved"]
+  data.frame(
+    `Variant Type` = v,
+    `Within-clade pairs` = length(w),
+    `Within-clade median` = median(w),
+    `Within-clade range` = paste0(min(w), "-", max(w)),
+    `Between-clade pairs` = length(b),
+    `Between-clade median` = median(b),
+    `Mosaic-involved median` = median(m),
+    `Within/between ratio` = round(median(w) / median(b), 3),
+    `Wilcoxon p` = signif(wilcox.test(w, b)$p.value, 3),
+    check.names = FALSE
+  )
+}))
+# Genome-wide SNP rate per kb for within/between clade medians.
+cat("Median within-clade SNP differences per kb:",
+    round(1000 * clade_div_summary$`Within-clade median`[1] / nuclear_genome_length, 2),
+    "| between-clade:",
+    round(1000 * clade_div_summary$`Between-clade median`[1] / nuclear_genome_length, 2), "\n")
+knitr::kable(clade_div_summary, row.names = FALSE)
+write.csv(clade_div_summary, "../results/Table_within_vs_between_clade_diversity.csv", row.names = FALSE)
+
+# Per-clade within-clade diversity (clades with >= 2 strains).
+per_clade <- do.call(rbind, lapply(names(pw_list), function(v) {
+  pw <- pw_list[[v]]
+  pw <- pw[pw$Clade1 == pw$Clade2, ]
+  do.call(rbind, lapply(split(pw, pw$Clade1), function(d) data.frame(
+    `Variant Type` = v, Clade = d$Clade1[1],
+    `N strains` = sum(clade_map$Clade == d$Clade1[1] &
+                        clade_map$Strain %in% c(d$Strain1, d$Strain2)),
+    `N pairs` = nrow(d),
+    `Median differences` = median(d$Diff),
+    `Min` = min(d$Diff), `Max` = max(d$Diff),
+    check.names = FALSE)))
+}))
+per_clade_snp <- per_clade[per_clade$`Variant Type` == "SNPs", ]
+per_clade_snp$`SNP diff per kb` <- round(1000 * per_clade_snp$`Median differences` / nuclear_genome_length, 2)
+knitr::kable(per_clade_snp[order(per_clade_snp$`Median differences`), ], row.names = FALSE)
+write.csv(per_clade, "../results/Table_per_clade_diversity.csv", row.names = FALSE)
+
+# Plot: SNP pairwise differences by pair type.
+snp_pw <- pw_list$SNPs
+snp_pw$Pair_type <- factor(snp_pw$Pair_type, levels = c("Within-clade", "Between-clade", "Mosaic-involved"))
+ggplot(snp_pw, aes(x = Pair_type, y = Diff, fill = Pair_type)) +
+  geom_violin(color = NA, alpha = 0.6) +
+  geom_boxplot(width = 0.12, outlier.size = 0.5, fill = "white") +
+  scale_fill_manual(values = c(`Within-clade` = "#2a78d6", `Between-clade` = "#eb6834",
+                               `Mosaic-involved` = "#8e8e8e"), guide = "none") +
+  labs(x = NULL, y = "Pairwise SNP differences (MAF > 15%)",
+       title = "SNP divergence within vs between clades") +
+  theme_minimal(base_size = 12) + theme(panel.grid.minor = element_blank())
+```
+
+#Within-clade nucleotide diversity (pi) from ALL variants (no MAF filter). The MAF>15% set used for association testing removes clade-private variation (a variant carried only by a 3-4 strain clade has panel-wide MAF < 5%), so within-clade diversity is estimated here from the unfiltered 96-strain all-sites GATK VCF. Pairwise difference / comparison matrices are produced by within_clade_pi.py (within_clade_pi.sbatch): SNPs + non-variant sites only, SNP sites flagged LowQual by GenotypeGVCFs removed (no GATK hard filters; the VCF is raw joint-genotyping output), genotypes callable at DP>=10 (and GQ>=20 at SNP sites). Pi = average number of differences per callable bp among all 2n alleles of a clade (heterozygous sites within a strain contribute), with missing data handled per site.
+```{r}
+pi_dir <- "../results/within_clade_pi_matrices"
+pi_samples <- readLines(file.path(pi_dir, "samples.txt"))
+Cm <- as.matrix(read.table(file.path(pi_dir, "C.tsv")))
+Dm <- as.matrix(read.table(file.path(pi_dir, "D.tsv")))
+Ds <- as.matrix(read.table(file.path(pi_dir, "D_sing.tsv")))
+Wt <- read.table(file.path(pi_dir, "within_strain.tsv"), header = TRUE)
+dimnames(Cm) <- dimnames(Dm) <- dimnames(Ds) <- list(pi_samples, pi_samples)
+site_counts <- read.table(file.path(pi_dir, "site_counts_per_chromosome.tsv"), header = TRUE)
+cat("Sites kept (SNP + non-variant):", sum(site_counts$callable_sites_kept),
+    "| SNP sites:", sum(site_counts$snp_sites),
+    "| singleton SNP sites:", sum(site_counts$singleton_sites), "\n")
+stopifnot(all(clade_map$Strain %in% pi_samples))
+
+# pi (per bp) for a set of strains; drop_singletons removes panel-wide singletons.
+pi_of <- function(strains, drop_singletons = FALSE) {
+  i <- match(strains, pi_samples)
+  D <- Dm[i, i, drop = FALSE]; C <- Cm[i, i, drop = FALSE]
+  w <- Wt$W[i]
+  if (drop_singletons) { D <- D - Ds[i, i, drop = FALSE]; w <- w - Wt$W_sing[i] }
+  ut <- upper.tri(D)
+  (sum(D[ut]) + sum(w)) / (sum(C[ut]) + sum(Wt$Wc[i]))
+}
+# Mean divergence (dxy, per bp) between two disjoint sets of strains.
+dxy_of <- function(a, b) {
+  ia <- match(a, pi_samples); ib <- match(b, pi_samples)
+  sum(Dm[ia, ib]) / sum(Cm[ia, ib])
+}
+
+numbered <- clade_map[!clade_map$Mosaic & clade_map$Clade != "Laboratory", ]
+clade_sizes <- table(clade_map$Clade)
+multi <- names(clade_sizes)[clade_sizes >= 2]
+
+set.seed(1)
+n_perm <- 10000
+pi_table <- do.call(rbind, lapply(multi, function(cl) {
+  s <- clade_map$Strain[clade_map$Clade == cl]
+  obs <- pi_of(s)
+  # Permutation: pi of random sets of the same size drawn from all 96 strains.
+  null <- replicate(n_perm, pi_of(sample(pi_samples, length(s))))
+  data.frame(
+    Clade = cl,
+    Mosaic = grepl("^M[0-9]", cl),
+    `N strains` = length(s),
+    `pi per kb` = 1000 * obs,
+    `pi per kb (no singletons)` = 1000 * pi_of(s, drop_singletons = TRUE),
+    `Mean strain heterozygosity per kb` = 1000 * mean(Wt$W[match(s, pi_samples)] / Wt$Wc[match(s, pi_samples)]),
+    `Permutation p (pi lower than random sets)` = (sum(null <= obs) + 1) / (n_perm + 1),
+    check.names = FALSE
+  )
+}))
+pi_table <- pi_table[order(pi_table$`pi per kb`), ]
+
+panel_pi <- pi_of(pi_samples)
+between_dxy <- mean(combn(unique(numbered$Clade), 2, function(p)
+  dxy_of(numbered$Strain[numbered$Clade == p[1]], numbered$Strain[numbered$Clade == p[2]])))
+cat("Panel-wide pi (96 strains):", round(1000 * panel_pi, 2), "per kb\n")
+cat("Mean between-clade divergence (dxy, numbered clades):", round(1000 * between_dxy, 2), "per kb\n")
+cat("Median within-clade pi (numbered clades, >=2 strains):",
+    round(median(pi_table$`pi per kb`[!pi_table$Mosaic]), 3), "per kb\n")
+
+knitr::kable(pi_table, row.names = FALSE, digits = c(0, 0, 0, 3, 3, 3, 4))
+write.csv(pi_table, "../results/Table_within_clade_pi_all_variants.csv", row.names = FALSE)
+
+# Plot: within-clade pi per clade, clades 22 and 23 highlighted.
+pi_plot <- pi_table
+pi_plot$Clade <- factor(pi_plot$Clade, levels = pi_plot$Clade)
+pi_plot$Highlight <- ifelse(grepl("^(22|23)\\.", pi_plot$Clade), "Clade 22 / 23",
+                            ifelse(pi_plot$Mosaic, "Mosaic group", "Other clade"))
+ggplot(pi_plot, aes(x = `pi per kb`, y = Clade, color = Highlight)) +
+  geom_vline(xintercept = 1000 * panel_pi, linetype = "dashed", color = "grey50") +
+  geom_point(aes(size = `N strains`)) +
+  scale_x_log10() +
+  scale_color_manual(values = c(`Clade 22 / 23` = "#d6402a", `Other clade` = "#2a78d6",
+                                `Mosaic group` = "#8e8e8e"), name = NULL) +
+  scale_size_continuous(range = c(2, 5), breaks = c(2, 4, 8)) +
+  labs(x = "Within-clade nucleotide diversity, pi (differences per kb, log scale)", y = NULL,
+       title = "Within-clade diversity from all variants (no MAF filter)",
+       subtitle = "Dashed line: pi across all 96 strains") +
+  theme_minimal(base_size = 12) + theme(panel.grid.minor = element_blank())
+```

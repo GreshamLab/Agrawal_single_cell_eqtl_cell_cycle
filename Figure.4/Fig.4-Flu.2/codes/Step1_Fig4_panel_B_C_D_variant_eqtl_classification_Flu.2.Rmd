@@ -880,7 +880,7 @@ fig6 <- ggplot(pleio, aes(reorder(Genetic_variants, n_traits, median), n_traits,
   geom_boxplot(outlier.alpha = 0.3, width = 0.6) +
   geom_jitter(width = 0.15, alpha = 0.2, size = 0.8) +
   scale_fill_manual(values = variant_colors) + scale_y_log10() +
-  labs(x = "Variant type", y = "Number of associated traits (log scale)",
+  labs(x = "Variant type", y = "Number of genes per eQTL variant (log\u2081\u2080)",
        caption = "Kruskal-Wallis + pairwise Wilcoxon, FDR corrected") +
   theme_classic(base_size = 13) +
   theme(legend.position = "none", plot.title = element_text(hjust = 0.5, face = "bold"),
@@ -944,7 +944,7 @@ fig7 <- ggplot(pleio_sub, aes(Variant_subtype, n_traits, fill = Genetic_variants
             inherit.aes = FALSE, hjust = 1.05, vjust = 1.5, size = PVAL_SIZE, fontface = "bold") +
   facet_wrap(~ Genetic_variants, scales = "free_x", nrow = 1) +
   scale_fill_manual(values = variant_colors) + scale_y_log10() +
-  labs(x = "Variant subtype", y = "Number of associated traits (log scale)",
+  labs(x = "Variant subtype", y = "Number of genes per eQTL variant (log\u2081\u2080)",
        caption = "Subtypes ordered by median; Kruskal-Wallis across subtypes within each type") +
   theme_classic(base_size = 13) +
   theme(legend.position = "none", plot.title = element_text(hjust = 0.5, face = "bold"),

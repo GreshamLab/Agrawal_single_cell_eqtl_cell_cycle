@@ -446,8 +446,10 @@ plot_pca <- function(res, title, legend_datasets = BASE_DATASETS) {
                       labels = dataset_labels[legend_datasets]) +
     scale_shape_manual(values = dataset_shape[legend_datasets], limits = legend_datasets,
                        labels = dataset_labels[legend_datasets]) +
-    # legend keys: bigger and opaque so the colours are easy to read
-    guides(fill = guide_legend(override.aes = list(size = 3.5, alpha = 1))) +
+    # legend keys: bigger and opaque so the colours are easy to read;
+    # 2 columns so the legend fits below the x-axis
+    guides(fill  = guide_legend(override.aes = list(size = 3.5, alpha = 1), ncol = 2),
+           shape = guide_legend(ncol = 2)) +
     # PERMANOVA and silhouette results in the top-left corner
     #annotate("text", x = -Inf, y = Inf,
     #         label = sprintf("PERMANOVA R^2 = %.2f, p = %.3g\nsilhouette = %.2f",
@@ -457,7 +459,9 @@ plot_pca <- function(res, title, legend_datasets = BASE_DATASETS) {
          x = sprintf("PC1 (%.1f%%)", res$var_expl[1]),
          y = sprintf("PC2 (%.1f%%)", res$var_expl[2]),
          fill = "Dataset", shape = "Dataset") +
-    pub_theme
+    pub_theme +
+    # legend below the x-axis so it does not squeeze the plot width
+    theme(legend.position = "bottom", legend.title.position = "top")
 }
 ```
 
@@ -580,16 +584,17 @@ knitr::kable(pca_stats, digits = 3, caption = "Condition separation per analysis
 # Combined figure: top row = replicate 1 | replicate 2, bottom row = all datasets | distance boxplot
 # (all PCA panels use the same color and shape scales, so their legends are merged into one)
 fig_pca <- (p_set1 | p_set2) /
-  (p_all | p_dist) + plot_layout(guides = "collect")
+  (p_all | p_dist) + plot_layout(guides = "collect") &
+  theme(legend.position = "bottom")
 fig_pca
 
 # Save the combined figure
 save_plot(fig_pca, "Fig1C_condition_PCA", width = 14, height = 11)
 
 # Save each panel on its own
-save_plot(p_set1, "Fig1C_PCA_replicate1",          width = 7, height = 5.5)
-save_plot(p_set2, "Fig1C_PCA_replicate2",          width = 7, height = 5.5)
-save_plot(p_all,  "Fig1C_PCA_all_datasets",        width = 8, height = 5.5)
+save_plot(p_set1, "Fig1C_PCA_replicate1",          width = 8, height = 7)
+save_plot(p_set2, "Fig1C_PCA_replicate2",          width = 8, height = 7)
+save_plot(p_all,  "Fig1C_PCA_all_datasets",        width = 8, height = 7)
 save_plot(p_dist, "Fig1C_per_strain_PC_distances", width = 7, height = 5.5)
 
 write.csv(pca_stats, file.path(OUT_DIR, "Fig1C_condition_PCA_summary_stats.csv"),
@@ -677,14 +682,15 @@ knitr::kable(pca_stats_gal, digits = 3, caption = "Condition separation per anal
 
 # Combined figure, same layout as Fig1C_condition_PCA
 fig_pca_gal <- (p_set1_gal | p_set2_gal) /
-  (p_all_gal | p_dist_gal) + plot_layout(guides = "collect")
+  (p_all_gal | p_dist_gal) + plot_layout(guides = "collect") &
+  theme(legend.position = "bottom")
 fig_pca_gal
 
 save_plot(fig_pca_gal, "Fig1C_condition_PCA_with_galactose", width = 14, height = 11)
 
-save_plot(p_set1_gal, "Fig1C_PCA_replicate1_with_galactose",          width = 7, height = 5.5)
-save_plot(p_set2_gal, "Fig1C_PCA_replicate2_with_galactose",          width = 7, height = 5.5)
-save_plot(p_all_gal,  "Fig1C_PCA_all_datasets_with_galactose",        width = 8, height = 5.5)
+save_plot(p_set1_gal, "Fig1C_PCA_replicate1_with_galactose",          width = 8, height = 7)
+save_plot(p_set2_gal, "Fig1C_PCA_replicate2_with_galactose",          width = 8, height = 7)
+save_plot(p_all_gal,  "Fig1C_PCA_all_datasets_with_galactose",        width = 8, height = 7)
 save_plot(p_dist_gal, "Fig1C_per_strain_PC_distances_with_galactose", width = 8, height = 5.5)
 
 write.csv(pca_stats_gal, file.path(OUT_DIR, "Fig1C_condition_PCA_with_galactose_summary_stats.csv"),

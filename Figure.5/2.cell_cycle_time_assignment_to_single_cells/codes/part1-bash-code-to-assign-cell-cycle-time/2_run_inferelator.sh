@@ -9,8 +9,6 @@
 #SBATCH --account=torch_pr_130_general
 #SBATCH --output=slurm_program_times.o
 #SBATCH --error=slurm_program_times.e
-#SBATCH --mail-type=FAIL,END
-#SBATCH --mail-user=aa9679@nyu.edu
 
 module purge
 

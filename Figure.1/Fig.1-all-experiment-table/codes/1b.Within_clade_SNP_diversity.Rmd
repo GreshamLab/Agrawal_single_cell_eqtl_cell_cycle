@@ -1,0 +1,304 @@
+---
+title: "1b.Within_clade_SNP_diversity"
+output: html_document
+params:
+  vcf: "/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/vcf_files_sent_by_Anne/96strains.vcf"
+  outdir: "../results/within_clade_pi_matrices"
+  python_outdir: "../results/within_clade_pi_matrices"
+  tmpdir: "/scratch/aa9679/within_clade_pi_tmp"
+  ncores: 8
+  n_perm: 10000
+  results_csv: "../results/Table_within_clade_pi_all_variants.csv"
+---
+
+#Goal
+Quantify SNP nucleotide diversity (pi) within each clade, without a MAF filter. The MAF>15% variant set used for association testing removes clade-private variation (a variant carried only by a 3-4 strain clade has a panel-wide MAF < 5%), so within-clade diversity is estimated here from the unfiltered 96-strain all-sites VCF. This is the R version of within_clade_pi.py; it produces the same matrices and checks that they match.
+
+Filters
+
+* SNPs only: a variable position is kept only if REF and every ALT allele are single bases (no "*"). InDels, SNP/InDel mixed positions and spanning deletions are dropped.
+* SNP positions flagged LowQual by GenotypeGVCFs are dropped (no GATK hard filters).
+* Non-variable positions are kept (they count towards the callable bases).
+* A genotype is callable if DP >= 10, and at SNP positions also GQ >= 20.
+
+```{r setup}
+library(data.table)
+library(stringi)
+library(parallel)
+library(ggplot2)
+MIN_DP <- 10
+MIN_GQ <- 20
+params
+```
+
+#What processing does the VCF record? (GATK steps in the header, and FILTER values)
+```{r vcf-header}
+header <- readLines(params$vcf, n = 5000)
+header <- header[startsWith(header, "#")]
+cat("GATK steps recorded in the header:\n")
+print(unique(sub("^##GATKCommandLine=<ID=([^,]+),.*", "\\1", grep("^##GATKCommandLine", header, value = TRUE))))
+cat("\nFILTER definitions:\n")
+print(grep("^##FILTER", header, value = TRUE))
+vcf_samples <- strsplit(header[startsWith(header, "#CHROM")], "\t")[[1]][-(1:9)]
+cat("\nNumber of samples in the VCF:", length(vcf_samples), "\n")
+contigs <- sub("^##contig=<ID=([^,]+),length=([0-9]+)>$", "\\1", grep("^##contig", header, value = TRUE))
+contig_len <- as.numeric(sub("^##contig=<ID=[^,]+,length=([0-9]+)>$", "\\1", grep("^##contig", header, value = TRUE)))
+data.frame(contig = contigs, length = contig_len)
+cat("Total length:", sum(contig_len), "bp\n")
+```
+
+#Split the VCF into one file per chromosome (one pass over the 15.7 GB file)
+```{r split-vcf}
+dir.create(params$tmpdir, showWarnings = FALSE, recursive = TRUE)
+split_files <- file.path(params$tmpdir, paste0(contigs, ".tsv"))
+if (!any(file.exists(split_files))) {
+  t0 <- Sys.time()
+  system2("awk", c("-F'\\t'", shQuote(sprintf('!/^#/{print > ("%s/" $1 ".tsv")}', params$tmpdir)),
+                   shQuote(params$vcf)))
+  cat("Split took", round(as.numeric(difftime(Sys.time(), t0, units = "mins")), 1), "min\n")
+}
+# Only chromosomes that have records in the VCF.
+has_data <- file.exists(split_files)
+split_files <- split_files[has_data]
+chroms <- contigs[has_data]
+data.frame(file = basename(split_files), size_GB = round(file.size(split_files) / 1e9, 2))
+```
+
+#Parse genotypes and accumulate the pairwise matrices, per chromosome
+For every pair of strains (i, j): D = differing allele pairs, C = allele comparisons (4 per position where both are callable). For every strain i: W = heterozygous callable positions, Wc = callable positions. D_sing / W_sing hold the part coming from panel-wide singleton SNPs (minor allele count 1).
+```{r functions}
+# Allele matrices (positions x strains, NA = not callable) for one chromosome.
+parse_chrom <- function(file) {
+  dt <- fread(file, header = FALSE, sep = "\t", colClasses = "character", quote = "",
+              showProgress = FALSE)
+  ref <- dt$V4; alt <- dt$V5; filt <- dt$V7; fmt <- dt$V9
+  variant <- alt != "."
+  snp_ok  <- nchar(ref) == 1 & grepl("^[^*,](,[^*,])*$", alt)
+  dropped_indel  <- sum(variant & !snp_ok)
+  dropped_lowqual <- sum(variant & snp_ok & filt == "LowQual")
+  keep <- !variant | (snp_ok & filt != "LowQual")
+  dt <- dt[keep]; variant <- variant[keep]; fmt <- fmt[keep]
+
+  # Position of DP and GQ inside each FORMAT string.
+  ufmt <- unique(fmt)
+  fkeys <- strsplit(ufmt, ":", fixed = TRUE)
+  idp <- vapply(fkeys, function(k) match("DP", k), 1L)[match(fmt, ufmt)]
+  igq <- vapply(fkeys, function(k) match("GQ", k), 1L)[match(fmt, ufmt)]
+
+  n <- length(vcf_samples)
+  a1 <- a2 <- matrix(NA_integer_, nrow(dt), n)
+  rows <- seq_len(nrow(dt))
+  for (s in seq_len(n)) {
+    parts <- stri_split_fixed(dt[[9 + s]], ":", simplify = TRUE)
+    gt <- parts[, 1]
+    dp <- suppressWarnings(as.integer(parts[cbind(rows, ifelse(is.na(idp), 1L, idp))]))
+    dp[is.na(idp)] <- NA
+    ok <- nchar(gt) == 3 & substr(gt, 1, 1) != "." & !is.na(dp) & dp >= MIN_DP
+    gq <- suppressWarnings(as.integer(parts[cbind(rows, ifelse(is.na(igq), 1L, igq))]))
+    gq[is.na(igq)] <- NA
+    ok <- ok & (!variant | (!is.na(gq) & gq >= MIN_GQ))
+    a1[ok, s] <- as.integer(substr(gt[ok], 1, 1))
+    a2[ok, s] <- as.integer(substr(gt[ok], 3, 3))
+  }
+  list(a1 = a1, a2 = a2, dropped_indel = dropped_indel, dropped_lowqual = dropped_lowqual)
+}
+
+# Pairwise difference / comparison matrices from allele matrices.
+accumulate <- function(a1, a2, chunk = 200000) {
+  n <- ncol(a1)
+  acc <- list(C = matrix(0, n, n), D = matrix(0, n, n), D_sing = matrix(0, n, n),
+              W = numeric(n), Wc = numeric(n), W_sing = numeric(n),
+              n_sites = nrow(a1), n_snp_sites = 0, n_singleton_sites = 0)
+  for (st in seq(1, max(nrow(a1), 1), by = chunk)) {
+    idx <- st:min(nrow(a1), st + chunk - 1)
+    if (nrow(a1) == 0) break
+    x1 <- a1[idx, , drop = FALSE]; x2 <- a2[idx, , drop = FALSE]
+    called <- !is.na(x1)
+    N <- called * 2
+    maxk <- max(c(x1, x2, 0L), na.rm = TRUE)
+    Ck <- lapply(0:maxk, function(k) (x1 == k & called) + (x2 == k & called))
+    same <- Reduce(`+`, lapply(Ck, crossprod))
+    NN <- crossprod(N)
+    acc$C <- acc$C + NN
+    acc$D <- acc$D + NN - same
+    het <- called & x1 != x2
+    acc$W <- acc$W + colSums(het)
+    acc$Wc <- acc$Wc + colSums(called)
+    counts <- sapply(Ck, rowSums)
+    if (is.null(dim(counts))) counts <- matrix(counts, nrow = length(idx))
+    nonzero <- rowSums(counts > 0)
+    minpos <- apply(counts, 1, function(r) if (any(r > 0)) min(r[r > 0]) else Inf)
+    sing <- nonzero == 2 & minpos == 1
+    acc$n_snp_sites <- acc$n_snp_sites + sum(nonzero >= 2)
+    acc$n_singleton_sites <- acc$n_singleton_sites + sum(sing)
+    if (any(sing)) {
+      Ns <- N[sing, , drop = FALSE]
+      same_s <- Reduce(`+`, lapply(Ck, function(m) crossprod(m[sing, , drop = FALSE])))
+      acc$D_sing <- acc$D_sing + crossprod(Ns) - same_s
+      acc$W_sing <- acc$W_sing + colSums(het[sing, , drop = FALSE])
+    }
+  }
+  acc
+}
+
+process_chrom <- function(file) {
+  p <- parse_chrom(file)
+  acc <- accumulate(p$a1, p$a2)
+  acc$dropped_indel <- p$dropped_indel
+  acc$dropped_lowqual <- p$dropped_lowqual
+  acc
+}
+```
+
+```{r run-all-chromosomes}
+t0 <- Sys.time()
+res <- mclapply(split_files, process_chrom, mc.cores = params$ncores, mc.preschedule = FALSE)
+errs <- vapply(res, inherits, TRUE, "try-error")
+if (any(errs)) stop("Failed chromosomes: ", paste(chroms[errs], collapse = ", "), "\n", res[errs][[1]])
+cat("Parsing + accumulation took", round(as.numeric(difftime(Sys.time(), t0, units = "mins")), 1), "min\n")
+names(res) <- chroms
+
+site_counts <- rbindlist(lapply(chroms, function(ch) data.table(
+  chrom = ch,
+  callable_sites_kept = res[[ch]]$n_sites,
+  snp_sites = res[[ch]]$n_snp_sites,
+  singleton_sites = res[[ch]]$n_singleton_sites,
+  dropped_indel = res[[ch]]$dropped_indel,
+  dropped_lowqual = res[[ch]]$dropped_lowqual)))
+knitr::kable(rbind(site_counts, site_counts[, c(list(chrom = "Total"), lapply(.SD, sum)), .SDcols = -1]))
+
+sum_over <- function(key) Reduce(`+`, lapply(res, `[[`, key))
+Cm <- sum_over("C"); Dm <- sum_over("D"); Ds <- sum_over("D_sing")
+Wt <- data.frame(W = sum_over("W"), Wc = sum_over("Wc"), W_sing = sum_over("W_sing"))
+dimnames(Cm) <- dimnames(Dm) <- dimnames(Ds) <- list(vcf_samples, vcf_samples)
+```
+
+#Callable positions per strain (genotype with DP >= 10)
+```{r callable-per-strain}
+callable <- data.frame(Strain = vcf_samples, callable_bp = Wt$Wc,
+                       fraction_of_genome = round(Wt$Wc / sum(contig_len), 3),
+                       heterozygous_sites = Wt$W)
+summary(callable$fraction_of_genome)
+knitr::kable(head(callable[order(callable$fraction_of_genome), ], 10), row.names = FALSE,
+             caption = "10 strains with the fewest callable positions")
+```
+
+#Check against the Python output (within_clade_pi.py), then save the matrices
+```{r compare-python}
+py_C <- file.path(params$python_outdir, "C.tsv")
+if (file.exists(py_C)) {
+  pC <- as.matrix(read.table(py_C)); pD <- as.matrix(read.table(file.path(params$python_outdir, "D.tsv")))
+  pDs <- as.matrix(read.table(file.path(params$python_outdir, "D_sing.tsv")))
+  pW <- read.table(file.path(params$python_outdir, "within_strain.tsv"), header = TRUE)
+  cat("C identical:", all(pC == unname(Cm)), "| D identical:", all(pD == unname(Dm)),
+      "| D_sing identical:", all(pDs == unname(Ds)),
+      "| W/Wc/W_sing identical:", all(as.matrix(pW) == as.matrix(Wt)), "\n")
+} else cat("No Python output found to compare against.\n")
+
+dir.create(params$outdir, showWarnings = FALSE, recursive = TRUE)
+writeLines(vcf_samples, file.path(params$outdir, "samples.txt"))
+write.table(Cm, file.path(params$outdir, "C.tsv"), sep = "\t", row.names = FALSE, col.names = FALSE)
+write.table(Dm, file.path(params$outdir, "D.tsv"), sep = "\t", row.names = FALSE, col.names = FALSE)
+write.table(Ds, file.path(params$outdir, "D_sing.tsv"), sep = "\t", row.names = FALSE, col.names = FALSE)
+write.table(Wt, file.path(params$outdir, "within_strain.tsv"), sep = "\t", row.names = FALSE, quote = FALSE)
+fwrite(site_counts, file.path(params$outdir, "site_counts_per_chromosome.tsv"), sep = "\t")
+```
+
+#Clade assignments (Clades column of StrainsforSC-RNAseq.csv; "Wine/European (subclade 1)" merged into clade 1)
+```{r clades}
+single_cell_strains <- read.csv("/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Agrawal_single_cell_eqtl_cell_cycle/Figure.1/Fig.1-all-experiment-table/StrainsforSC-RNAseq.csv")
+single_cell_strains <- single_cell_strains[single_cell_strains$Standardized.name != "DGY3", ]
+clade_map <- data.frame(
+  Strain = trimws(single_cell_strains$Standardized.name),
+  Clade  = trimws(sub("\\s*\\(subclade.*\\)", "", single_cell_strains$Clades)),
+  stringsAsFactors = FALSE
+)
+clade_map$Mosaic <- grepl("^M[0-9]", clade_map$Clade)
+stopifnot(all(clade_map$Strain %in% vcf_samples), nrow(clade_map) == 96)
+table(clade_map$Clade)
+```
+
+#Within-clade SNP diversity (pi)
+Pi of a set of n strains = average number of SNP differences per callable bp between two of its 2n genome copies (pairs between strains and the two copies within a strain). The permutation test compares each clade with 10,000 random sets of the same number of strains from the panel.
+```{r pi}
+pi_of <- function(strains, drop_singletons = FALSE) {
+  i <- match(strains, vcf_samples)
+  D <- Dm[i, i, drop = FALSE]; C <- Cm[i, i, drop = FALSE]; w <- Wt$W[i]
+  if (drop_singletons) { D <- D - Ds[i, i, drop = FALSE]; w <- w - Wt$W_sing[i] }
+  ut <- upper.tri(D)
+  (sum(D[ut]) + sum(w)) / (sum(C[ut]) + sum(Wt$Wc[i]))
+}
+dxy_of <- function(a, b) {
+  ia <- match(a, vcf_samples); ib <- match(b, vcf_samples)
+  sum(Dm[ia, ib]) / sum(Cm[ia, ib])
+}
+
+clade_sizes <- table(clade_map$Clade)
+multi <- names(clade_sizes)[clade_sizes >= 2]
+set.seed(1)
+pi_table <- do.call(rbind, lapply(multi, function(cl) {
+  s <- clade_map$Strain[clade_map$Clade == cl]
+  obs <- pi_of(s)
+  null <- replicate(params$n_perm, pi_of(sample(vcf_samples, length(s))))
+  i <- match(s, vcf_samples)
+  data.frame(
+    Clade = cl, Mosaic = grepl("^M[0-9]", cl), `N strains` = length(s),
+    `pi per kb` = 1000 * obs,
+    `pi per kb (no singletons)` = 1000 * pi_of(s, drop_singletons = TRUE),
+    `Mean strain heterozygosity per kb` = 1000 * mean(Wt$W[i] / Wt$Wc[i]),
+    `Permutation p (pi lower than random sets)` = (sum(null <= obs) + 1) / (params$n_perm + 1),
+    check.names = FALSE)
+}))
+pi_table <- pi_table[order(pi_table$`pi per kb`), ]
+
+numbered <- clade_map[!clade_map$Mosaic, ]
+panel_pi <- pi_of(vcf_samples)
+between_dxy <- mean(combn(unique(numbered$Clade), 2, function(p)
+  dxy_of(numbered$Strain[numbered$Clade == p[1]], numbered$Strain[numbered$Clade == p[2]])))
+cat("Panel-wide pi (96 strains):", round(1000 * panel_pi, 2), "per kb\n")
+cat("Mean between-clade divergence (dxy, numbered clades):", round(1000 * between_dxy, 2), "per kb\n")
+cat("Median within-clade pi (numbered clades, >=2 strains):",
+    round(median(pi_table$`pi per kb`[!pi_table$Mosaic]), 3), "per kb\n")
+cat("Range of within-clade pi (numbered clades):",
+    paste(round(range(pi_table$`pi per kb`[!pi_table$Mosaic]), 3), collapse = " - "), "per kb\n")
+
+knitr::kable(pi_table, row.names = FALSE, digits = c(0, 0, 0, 3, 3, 3, 4))
+write.csv(pi_table, params$results_csv, row.names = FALSE)
+```
+
+#Clades 22 (Far East Russian) and 23 (North American oak) relative to the other clades
+```{r clades-22-23}
+num_tab <- pi_table[!pi_table$Mosaic, ]
+num_tab$Rank <- rank(num_tab$`pi per kb`)
+med <- median(num_tab$`pi per kb`)
+sel <- num_tab[grepl("^(22|23)\\.", num_tab$Clade), ]
+sel$`Fold below median clade` <- round(med / sel$`pi per kb`, 1)
+sel$`Fold below panel` <- round(1000 * panel_pi / sel$`pi per kb`, 1)
+knitr::kable(sel[, c("Clade", "N strains", "pi per kb", "Rank", "Fold below median clade",
+                     "Fold below panel", "Permutation p (pi lower than random sets)")],
+             row.names = FALSE, digits = 3,
+             caption = paste("Rank among", nrow(num_tab), "numbered clades with >= 2 strains (1 = lowest)"))
+```
+
+```{r pi-plot, fig.width = 8, fig.height = 7}
+pi_plot <- pi_table
+pi_plot$Clade <- factor(pi_plot$Clade, levels = pi_plot$Clade)
+pi_plot$Highlight <- ifelse(grepl("^(22|23)\\.", pi_plot$Clade), "Clade 22 / 23",
+                            ifelse(pi_plot$Mosaic, "Mosaic group", "Other clade"))
+ggplot(pi_plot, aes(x = `pi per kb`, y = Clade, color = Highlight)) +
+  geom_vline(xintercept = 1000 * panel_pi, linetype = "dashed", color = "grey50") +
+  geom_point(aes(size = `N strains`)) +
+  scale_x_log10() +
+  scale_color_manual(values = c(`Clade 22 / 23` = "#d6402a", `Other clade` = "#2a78d6",
+                                `Mosaic group` = "#8e8e8e"), name = NULL) +
+  scale_size_continuous(range = c(2, 5), breaks = c(2, 4, 8)) +
+  labs(x = "Within-clade SNP diversity, pi (differences per kb, log scale)", y = NULL,
+       title = "Within-clade SNP diversity (no MAF filter)",
+       subtitle = "Dashed line: pi across all 96 strains") +
+  theme_minimal(base_size = 12) + theme(panel.grid.minor = element_blank())
+```
+
+#Clean up the per-chromosome split files
+```{r cleanup}
+unlink(params$tmpdir, recursive = TRUE)
+```

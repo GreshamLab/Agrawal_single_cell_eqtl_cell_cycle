@@ -26,13 +26,23 @@ library(patchwork)
 ```{r config}
 BASE <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all"
 
+# pb1/pb2: pseudobulk over ALL demultiplexed strains (no >5-cell filter; made by
+#   Fig.1-Panel-C.../codes/0_pseudobulk_no_cell_filter.R). The old
+#   pseudobulk_reliable_transcripts_* files had the >5-cell strain filter applied
+#   (e.g. CDI was missing from YPD.2), so strains with few cells could not be assessed.
+# genes1/genes2: the reliable_transcripts files are used only for their gene list,
+#   so the gene set matches Fig 1D.
 conditions <- list(
   YPD = list(
     label = "YPD",
     run1  = "YPD.1",
     run2  = "YPD.2",
-    pb1  = file.path(BASE, "YPD.1/fastlmm/data/pheno_data/pseudobulk_reliable_transcripts_YPD.txt"),
-    pb2   = file.path(BASE, "YPD.2/fastlmm/data/pheno_data/pseudobulk_reliable_transcripts_YPD.txt"),
+    pb1    = file.path(BASE, "YPD.1/fastlmm/data/pheno_data/pseudobulk_YPD.1_all_strains_no_cell_filter.txt"),
+    pb2    = file.path(BASE, "YPD.2/fastlmm/data/pheno_data/pseudobulk_YPD.2_all_strains_no_cell_filter.txt"),
+    genes1 = file.path(BASE, "YPD.1/fastlmm/data/pheno_data/pseudobulk_reliable_transcripts_YPD.txt"),
+    genes2 = file.path(BASE, "YPD.2/fastlmm/data/pheno_data/pseudobulk_reliable_transcripts_YPD.txt"),
+    # pb1  = file.path(BASE, "YPD.1/fastlmm/data/pheno_data/pseudobulk_reliable_transcripts_YPD.txt"),  # old, >5-cell filtered
+    # pb2   = file.path(BASE, "YPD.2/fastlmm/data/pheno_data/pseudobulk_reliable_transcripts_YPD.txt"),
     rds1  = file.path(BASE, "YPD.1/gene_expression_analysis/output_from_pseudobulk_fastlmm/Na_va_data_subsetted.rds"),
     rds2  = file.path(BASE, "YPD.2/gene_expression_analysis/output_from_pseudobulk_fastlmm/Na_va_data_subsetted.rds")
   ),
@@ -40,8 +50,10 @@ conditions <- list(
     label = "Fluconazole",
     run1  = "Fluconazole.16",  # Flu.1 = 16 ug/ml
     run2  = "Fluconazole.8",   # Flu.2 = 8 ug/ml
-    pb1  = file.path(BASE, "Flu.1/fastlmm/data/pheno_data/pseudobulk_reliable_transcripts_Flu1.txt"),
-    pb2   = file.path(BASE, "Flu.2/fastlmm/data/pheno_data/pseudobulk_reliable_transcripts_Flu2.txt"),
+    pb1    = file.path(BASE, "Flu.1/fastlmm/data/pheno_data/pseudobulk_flu.1_all_strains_no_cell_filter.txt"),
+    pb2    = file.path(BASE, "Flu.2/fastlmm/data/pheno_data/pseudobulk_flu.2_all_strains_no_cell_filter.txt"),
+    genes1 = file.path(BASE, "Flu.1/fastlmm/data/pheno_data/pseudobulk_reliable_transcripts_Flu1.txt"),
+    genes2 = file.path(BASE, "Flu.2/fastlmm/data/pheno_data/pseudobulk_reliable_transcripts_Flu2.txt"),
     rds1  = file.path(BASE, "Flu.1/gene_expression_analysis/output_from_pseudobulk_fastlmm/Na_va_data_subsetted.rds"),
     rds2  = file.path(BASE, "Flu.2/gene_expression_analysis/output_from_pseudobulk_fastlmm/Na_va_data_subsetted.rds")
   )
@@ -121,7 +133,9 @@ analyse_condition <- function(cfg) {
   x <- read_pseudobulk(cfg$pb1)
   y <- read_pseudobulk(cfg$pb2)
 
-  genes   <- intersect(rownames(x), rownames(y))
+  reliable <- intersect(rownames(read_pseudobulk(cfg$genes1)),
+                        rownames(read_pseudobulk(cfg$genes2)))
+  genes   <- Reduce(intersect, list(rownames(x), rownames(y), reliable))
   strains <- intersect(colnames(x), colnames(y))
   cat("\n---", cfg$label, "---\n")
   cat("Shared strains:", length(strains), "| shared genes:", length(genes), "\n")
@@ -148,7 +162,16 @@ analyse_condition <- function(cfg) {
     mutate(mean_cells = (n_cells_r1 + n_cells_r2) / 2,
            min_cells  = pmin(n_cells_r1, n_cells_r2))
 
-  strain_df <- tibble(condition = cfg$label, strain = strains, r = replicate_r) %>%
+  # Cross-strain r per strain (for the breakpoint plot): median Spearman r of
+  # strain s against every OTHER strain across replicates (s rep1 vs t rep2 and
+  # t rep1 vs s rep2), same pairs as the Fig 1D cross-strain null.
+  cross_mat <- cor(x, y, method = "spearman")      # rows = rep1 strain, cols = rep2 strain
+  cross_r <- vapply(seq_along(strains), function(i) {
+    median(c(cross_mat[i, -i], cross_mat[-i, i]))
+  }, numeric(1))
+
+  strain_df <- tibble(condition = cfg$label, strain = strains, r = replicate_r,
+                      cross_r = cross_r) %>%
     left_join(qc, by = "strain")
 
   cat("Strains with QC data:", sum(!is.na(strain_df$mean_cells)),
@@ -234,15 +257,15 @@ make_strain_scatter_fig <- function(df, cond_label) {
 }
 
 figS4_YPD <- make_strain_scatter_fig(scatter_df_all, "YPD")
-figS4_Flu <- make_strain_scatter_fig(scatter_df_all, "Fluconazole")
+# figS4_Flu <- make_strain_scatter_fig(scatter_df_all, "Fluconazole")  # Fluconazole not plotted
 
 figS4_YPD
-figS4_Flu
+# figS4_Flu
 
 ggsave(file.path(OUT_DIR, "FigS4_YPD_per_strain_scatter.pdf"), figS4_YPD,
        width = 40, height = 35, limitsize = FALSE)
-ggsave(file.path(OUT_DIR, "FigS4_Flu_per_strain_scatter.pdf"), figS4_Flu,
-       width = 40, height = 35, limitsize = FALSE)
+# ggsave(file.path(OUT_DIR, "FigS4_Flu_per_strain_scatter.pdf"), figS4_Flu,
+#        width = 40, height = 35, limitsize = FALSE)
 ```
 
 # Supplementary Figure 5
@@ -324,6 +347,154 @@ strain_df_all %>%
 
 
 
+# Numbers for the results text (YPD)
+
+```{r text_numbers}
+# The saved Seurat objects (Na_va_data_subsetted.rds) already have the
+# n_cells > 5 strain filter applied, so a strain with <=5 cells in a replicate
+# has NO cells there and its n_cells is NA. NA therefore means "<=5 cells".
+ypd <- strain_df_all %>%
+  filter(condition == "YPD") %>%
+  mutate(le5_cells = is.na(min_cells) | min_cells <= 5)
+lo  <- ypd %>% filter(le5_cells)     # <=5 cells in at least one replicate
+hi  <- ypd %>% filter(!le5_cells)    # >5 cells in both replicates
+
+cat("YPD strains in both replicates:", nrow(ypd), "\n")
+cat(sprintf("Replicate r range: %.3f - %.3f (lowest: %s)\n",
+            min(ypd$r), max(ypd$r), ypd$strain[which.min(ypd$r)]))
+cat(sprintf("Strains with 5 or fewer cells in a replicate: n = %d, median r = %.3f\n",
+            nrow(lo), median(lo$r)))
+cat(sprintf("Strains with more than 5 cells in both:      n = %d, median r = %.3f\n",
+            nrow(hi), median(hi$r)))
+cat(sprintf("\nText: Strains with 5 or fewer assigned cells showed poor reproducibility (n = %d; median r = %.3f, vs. %.3f for strains with >5 cells)\n",
+            nrow(lo), median(lo$r), median(hi$r)))
+
+lo %>%
+  select(strain, n_cells_r1, n_cells_r2, r) %>%
+  arrange(r) %>%
+  knitr::kable(digits = 3,
+               caption = "YPD strains with 5 or fewer cells in at least one replicate (NA = 5 or fewer, removed before the Seurat object was saved)")
+```
+
+# Additional plot — where does reproducibility stop improving with cell number?
+
+Same-strain r (replicate 1 vs 2) and cross-strain r (median against every
+other strain) per strain, against cells assigned per strain. A
+linear-plateau ("hockey-stick") model is fitted to same-strain r on
+log10(cells): r rises linearly up to a breakpoint, then is flat (slope = 0).
+The breakpoint is chosen by least squares over a grid; its 95% CI comes from
+1,000 bootstrap resamples of strains. As a check that the right-hand segment
+really is flat, a free two-slope model with the same breakpoint is also fitted
+and its right-hand slope (with 95% CI) is reported. Fig 1D / S5 are unchanged.
+
+```{r breakpoint, fig.width=7, fig.height=3.4}
+set.seed(42)
+
+# r = a + b * (min(x, c) - c): slope b for x < c, slope 0 for x >= c; a = plateau
+fit_plateau <- function(x, y, grid) {
+  rss <- vapply(grid, function(c) {
+    sum(residuals(lm(y ~ I(pmin(x, c) - c)))^2)
+  }, numeric(1))
+  c_hat <- grid[which.min(rss)]
+  list(c = c_hat, fit = lm(y ~ I(pmin(x, c_hat) - c_hat)), rss = min(rss))
+}
+
+bp_one_metric <- function(d, metric) {
+  d <- d %>% filter(!is.na(.data[[metric]]), .data[[metric]] > 0) %>%
+    mutate(cells = .data[[metric]], lx = log10(cells))
+  xs   <- sort(unique(d$lx))
+  grid <- seq(xs[3], xs[length(xs) - 3], length.out = 200)  # >= 3 points each side
+
+  pf <- fit_plateau(d$lx, d$r, grid)
+
+  boot_c <- replicate(1000, {
+    i <- sample(nrow(d), replace = TRUE)
+    fit_plateau(d$lx[i], d$r[i], grid)$c
+  })
+
+  # free two-slope model at the same breakpoint: right slope = b1 + b2
+  free <- lm(r ~ lx + I(pmax(lx - pf$c, 0)), data = d)
+  b    <- coef(free); V <- vcov(free)
+  right_slope <- b[2] + b[3]
+  right_se    <- sqrt(V[2, 2] + V[3, 3] + 2 * V[2, 3])
+  tcrit <- qt(0.975, df.residual(free))
+
+  # does the plateau model beat a single straight line?
+  lin <- lm(r ~ lx, data = d)
+
+  stats <- tibble(
+    metric            = metric,
+    n_strains         = nrow(d),
+    breakpoint_cells  = 10^pf$c,
+    bp_ci_low         = 10^quantile(boot_c, 0.025),
+    bp_ci_high        = 10^quantile(boot_c, 0.975),
+    plateau_r         = coef(pf$fit)[1],
+    left_slope_per_log10 = coef(pf$fit)[2],
+    right_slope_free  = right_slope,
+    right_slope_ci_low  = right_slope - tcrit * right_se,
+    right_slope_ci_high = right_slope + tcrit * right_se,
+    AIC_linear        = AIC(lin),                                                  # a, b, sigma
+    AIC_plateau       = nrow(d) * (log(2 * pi * pf$rss / nrow(d)) + 1) + 2 * 4     # a, b, c, sigma
+  )
+
+  line_x <- seq(min(d$lx), max(d$lx), length.out = 300)
+  curve  <- tibble(metric = metric, cells = 10^line_x,
+                   r = coef(pf$fit)[1] + coef(pf$fit)[2] * (pmin(line_x, pf$c) - pf$c))
+
+  list(d = d %>% mutate(metric = metric), stats = stats, curve = curve)
+}
+
+ypd_bp <- strain_df_all %>% filter(condition == "YPD")
+bp <- lapply(c("min_cells", "mean_cells"), function(m) bp_one_metric(ypd_bp, m))
+
+metric_lab <- c(min_cells  = "Min cells per strain (worse replicate)",
+                mean_cells = "Mean cells per strain")
+
+bp_pts <- bind_rows(lapply(bp, `[[`, "d")) %>%
+  select(metric, strain, cells, `Same strain` = r, `Cross-strain` = cross_r) %>%
+  pivot_longer(c(`Same strain`, `Cross-strain`), names_to = "group", values_to = "r") %>%
+  mutate(group = factor(group, levels = c("Cross-strain", "Same strain")))
+bp_curve <- bind_rows(lapply(bp, `[[`, "curve"))
+bp_stats <- bind_rows(lapply(bp, `[[`, "stats"))
+
+bp_lab <- bp_stats %>%
+  mutate(lab = sprintf("breakpoint = %.0f cells\n(95%% CI %.0f-%.0f)\nslope after = %.3f [%.3f, %.3f]",
+                       breakpoint_cells, bp_ci_low, bp_ci_high,
+                       right_slope_free, right_slope_ci_low, right_slope_ci_high))
+
+lab_fun <- as_labeller(metric_lab)
+
+figS_breakpoint <- ggplot(bp_pts, aes(x = cells, y = r, color = group)) +
+  geom_rect(data = bp_stats, inherit.aes = FALSE,
+            aes(xmin = bp_ci_low, xmax = bp_ci_high, ymin = -Inf, ymax = Inf),
+            fill = "grey85", alpha = 0.6) +
+  geom_vline(data = bp_stats, aes(xintercept = breakpoint_cells),
+             linetype = "dashed", color = "grey30", linewidth = 0.4) +
+  geom_vline(xintercept = 5, linetype = "dotted", color = "grey50", linewidth = 0.4) +
+  geom_point(size = 1.3, alpha = 0.75) +
+  geom_line(data = bp_curve, aes(x = cells, y = r), inherit.aes = FALSE,
+            color = "#2166AC", linewidth = 0.8) +
+  geom_text(data = bp_lab, aes(x = Inf, y = -Inf, label = lab), inherit.aes = FALSE,
+            hjust = 1.05, vjust = -0.3, size = 2.4) +
+  scale_x_log10() +
+  scale_color_manual(values = c("Same strain" = "#2166AC", "Cross-strain" = "#D6604D"),
+                     name = NULL) +
+  facet_wrap(~ metric, labeller = lab_fun, scales = "free_x") +
+  labs(x = "Cells assigned per strain (log10)",
+       y = "Spearman r (YPD replicate 1 vs 2)") +
+  pub_theme +
+  theme(legend.position = "bottom")
+
+figS_breakpoint
+
+knitr::kable(bp_stats, digits = 3,
+             caption = "Linear-plateau fit of same-strain r on log10(cells) (YPD)")
+
+ggsave(file.path(OUT_DIR, "FigS_reproducibility_breakpoint_YPD.pdf"), figS_breakpoint,
+       width = 7, height = 3.4, units = "in", device = cairo_pdf)
+write.csv(bp_stats, file.path(OUT_DIR, "FigS_reproducibility_breakpoint_YPD_stats.csv"),
+          row.names = FALSE)
+```
 
 # Supplementary Figure 6
 
@@ -332,11 +503,14 @@ cat_colors <- c("high (\u22650.7)"        = "#2166ac",
                 "moderate (0.4\u20130.7)" = "#92c5de",
                 "low (<0.4)"              = "#d1e5f0")
 
+# YPD only — no Fluconazole plots
 s6_labels <- stats_all %>%
+  filter(condition == "YPD") %>%
   mutate(lab = sprintf("median r = %.2f\n%.0f%% above 0.4",
                        median_gene_r, pct_gene_r_0.4))
 
-figS6 <- ggplot(filter(gene_df_all, !is.na(cor_category)),
+# figS6 <- ggplot(filter(gene_df_all, !is.na(cor_category)),  # original: both conditions
+figS6 <- ggplot(filter(gene_df_all, condition == "YPD", !is.na(cor_category)),
                 aes(x = r, fill = cor_category)) +
   geom_histogram(bins = 50, color = "white", linewidth = 0.2) +
   geom_vline(xintercept = c(0.4, 0.7), linetype = "dashed",

@@ -43,8 +43,6 @@ We created a custom reference file specific to *S.cerevisiae*. This step involve
 #SBATCH --output=slurm.%j.out
 #SBATCH --error=slurm.%j.err
 #SBATCH --job-name=ADE_count
-#SBATCH --mail-type=END
-#SBATCH --mail-user=aa9679@nyu.edu
 
   
 module purge
@@ -71,8 +69,6 @@ Raw BCL (binary base call) files from the Illumina sequencer were converted into
 #SBATCH --tasks-per-node=1
 #SBATCH --cpus-per-task=20
 #SBATCH --mem=30gb
-#SBATCH --mail-type=END
-#SBATCH --mail-user=aa9679@nyu.edu
 
 module purge
 module load cellranger/7.1.0
@@ -114,8 +110,6 @@ Using the Cell Ranger *count* pipeline, the sequencing reads from the FASTQ file
 #SBATCH --output=slurm.%j.out
 #SBATCH --error=slurm.%j.err
 #SBATCH --job-name=flu_align
-#SBATCH --mail-type=END
-#SBATCH --mail-user=aa9679@nyu.edu
 
   
 module purge
@@ -317,8 +311,6 @@ This script requires popscle singularity image bam file, vcf file, cell barcode 
 #SBATCH --output=slurm.%j.out
 #SBATCH --error=slurm.%j.err
 #SBATCH --job-name=dsc-pileup
-#SBATCH --mail-type=END
-#SBATCH --mail-user=aa9679@nyu.edu
 
 
   
@@ -351,8 +343,6 @@ The output files will be in a directory corresponding to each cell barcode and w
 #SBATCH --output=slurm.%j.out
 #SBATCH --error=slurm.%j.err
 #SBATCH --job-name=dsc-pileup
-#SBATCH --mail-type=END
-#SBATCH --mail-user=aa9679@nyu.edu
 
 
   
@@ -551,8 +541,6 @@ except FileNotFoundError:
 #SBATCH --cpus-per-task=20
 #SBATCH --mem=5gb
 #SBATCH --array=0-48
-#SBATCH --mail-type=END
-#SBATCH --mail-user=aa9679@nyu.edu
 
 module purge
 python3 parallel_pileup.py $SLURM_ARRAY_TASK_ID
@@ -657,8 +645,6 @@ except FileNotFoundError as e:
 #SBATCH --cpus-per-task=20
 #SBATCH --mem=10gb
 #SBATCH --array=0-48
-#SBATCH --mail-type=END
-#SBATCH --mail-user=aa9679@nyu.edu
 
 module purge
 python3 demuxlet.py $SLURM_ARRAY_TASK_ID

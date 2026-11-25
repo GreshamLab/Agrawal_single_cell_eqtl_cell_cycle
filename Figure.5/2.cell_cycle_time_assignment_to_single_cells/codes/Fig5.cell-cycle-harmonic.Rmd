@@ -271,13 +271,15 @@ centroids <- umap_df %>% filter(!is.na(CC)) %>%
 # pseudotime, with phase labels on top
 p_umap_pseudotime <- ggplot(umap_df, aes(umap_1, umap_2)) +
   geom_point(aes(colour = cc_time), size = 0.3, alpha = 0.6) +
-  scale_colour_viridis_c(option = "magma", direction = -1, name = "cc_time (min)") +
+  scale_colour_viridis_c(option = "magma", direction = -1, name = "Cell-cycle time (min)",
+                         guide = guide_colourbar(title.position = "top", title.hjust = 0.5,
+                                                 barwidth = unit(6, "cm"))) +
   geom_label_repel(data = centroids,
                    mapping = aes(x = umap_1, y = umap_2, label = CC),
                    inherit.aes = FALSE, size = PUB_LABEL, alpha = 0.85,
                    label.size = 0.2, box.padding = 0.5) +
-  labs(title = "Cell-cycle time with phase labels") +
-  pub_theme
+  labs(title = "Cell-cycle time with phase labels", x = "UMAP 1", y = "UMAP 2") +
+  pub_theme + theme(legend.position = "bottom")
 
 p_umap_pseudotime
 
@@ -293,8 +295,8 @@ ggplot(umap_df %>% filter(!is.na(CC)), aes(umap_1, umap_2, colour = CC)) +
                    mapping = aes(x = umap_1, y = umap_2, label = CC),
                    inherit.aes = FALSE, size = PUB_LABEL, alpha = 0.85) +
   guides(colour = guide_legend(override.aes = list(size = 3))) +
-  labs(title = "Cell-cycle phase") +
-  pub_theme
+  labs(title = "Cell-cycle phase", x = "UMAP 1", y = "UMAP 2") +
+  pub_theme + theme(legend.position = "bottom")
 ```
 
 ## 1.5 ORF ↔ common name lookup
@@ -1600,9 +1602,7 @@ strain_scatter <- function(gene_ids, title, subtitle = NULL, highlight = NULL, n
   )
 
   ggplot(df, aes(peak, amp)) +
-    geom_point(aes(size = n_cells, colour = poor_cov), alpha = 0.6) +
-    scale_colour_manual(values = c(`FALSE` = "black", `TRUE` = "firebrick"),
-                        guide = "none") +
+    geom_point(aes(size = n_cells), colour = "black", alpha = 0.6) +
     hl_layers +
     facet_wrap(~name, scales = "free_y", ncol = ncol) +
     # same x axis as cc_panel
@@ -1621,9 +1621,7 @@ strain_scatter_structure <- function(gene_ids, title, subtitle = NULL) {
     filter(!is.na(r2)) %>%
     mutate(name = to_name(gene)) %>%
     ggplot(aes(reorder(strain, r2), r2)) +
-    geom_point(aes(size = n_cells, colour = poor_cov), alpha = 0.6) +
-    scale_colour_manual(values = c(`FALSE` = "black", `TRUE` = "firebrick"),
-                        guide = "none") +
+    geom_point(aes(size = n_cells), colour = "black", alpha = 0.6) +
     facet_wrap(~name, scales = "free_x") +
     labs(x = "Strain (sorted by R2)", y = "Adjusted R2 (fit quality)",
          title = title, subtitle = subtitle) +
@@ -1768,11 +1766,18 @@ order_facets <- function(p, var, levels) {
 }
 
 # columns follow the order `genes` is given in
-curve_over_scatter <- function(genes, title = NULL) {
+# shared_y = TRUE: every gene in a row uses one y-axis, running from the lowest
+# to the highest value across all genes in that row (curves row and scatter row
+# each get their own, since their units differ)
+curve_over_scatter <- function(genes, title = NULL, shared_y = FALSE) {
   orfs <- to_orf(genes)
   top    <- cc_panel(orfs, ncol = length(orfs)) +
     labs(x = "Time in cell cycle (min)")
   bottom <- strain_scatter(orfs, title = NULL, ncol = length(orfs))
+  if (shared_y) {
+    top    <- top    + facet_wrap(~label, scales = "fixed", ncol = length(orfs))
+    bottom <- bottom + facet_wrap(~name,  scales = "fixed", ncol = length(orfs))
+  }
   top    <- order_facets(top,    "label", to_name(orfs))
   bottom <- order_facets(bottom, "name",  to_name(orfs))
   patchwork::wrap_plots(top, bottom, ncol = 1) +
@@ -1794,6 +1799,12 @@ stopifnot(all(to_orf(MAIN_GENES) %in% intersect(sig_amplitude$gene, sig_timing$g
 p_main_curve_scatter <- curve_over_scatter(MAIN_GENES)
 print(p_main_curve_scatter)
 save_paper(p_main_curve_scatter, "Fig5CD_curves_over_scatter.png", width = 17, height = 9)
+
+# same genes, one shared y-axis per row so heights are directly comparable
+p_main_curve_scatter_shared_y <- curve_over_scatter(MAIN_GENES, shared_y = TRUE)
+print(p_main_curve_scatter_shared_y)
+save_paper(p_main_curve_scatter_shared_y, "Fig5CD_curves_over_scatter_shared_y.png",
+           width = 17, height = 9)
 
 # ── Supp: top amplitude and top timing genes not already in 5B-D ───────────
 N_SUPP <- 5

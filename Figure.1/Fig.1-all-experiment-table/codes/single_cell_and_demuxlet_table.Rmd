@@ -125,6 +125,8 @@ summarise_qc <- function(Condition, Replicate, demuxlet_path, matrix_dir) {
     Pct_ambiguous         = round(100 * n_amb / n_dmx, 1),
     N_strains_demuxlet    = length(sng_per_strain),
     N_strains_min5_cells  = sum(sng_per_strain >= 5),
+    # >5 matches the pseudobulk/eQTL filter (n_cells > 5); counted here on demuxlet singlets
+    N_strains_gt5_cells   = sum(sng_per_strain > 5),
     stringsAsFactors = FALSE
   )
 }

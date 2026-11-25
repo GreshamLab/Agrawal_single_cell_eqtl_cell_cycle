@@ -373,8 +373,7 @@ make_fig2A <- function(min_strains, show_cells = FALSE, min_cells = 0) {
     show_column_names = TRUE,
     column_labels     = col_labels,
     # axis titles: strains along x (below the strain names), DEGs along y
-    column_title      = if (show_cells) "Demuxlet identified strains (number of cells)"
-                        else "Demuxlet identified strains",
+    column_title      = if (show_cells) "Strains (number of cells)" else "Strains",
     column_title_side = "bottom",
     column_title_gp   = gpar(fontsize = PUB_SIZE, fontface = "bold", fontfamily = PUB_FONT),
     row_title         = "Differentially expressed genes",
@@ -382,11 +381,12 @@ make_fig2A <- function(min_strains, show_cells = FALSE, min_cells = 0) {
     column_names_rot  = 90,
     column_names_gp   = gpar(fontsize = 12, fontface = "bold", fontfamily = PUB_FONT),  # strain names; ~75 strains, so 12 pt is about the max that fits
     heatmap_legend_param = list(
-      title      = "DEG expression",
+      # values = per-gene z-score of VST expression across strains (capped at +/-3)
+      title      = "Expression\nz-score",
       title_gp   = gpar(fontsize = PUB_SIZE, fontface = "bold", fontfamily = PUB_FONT),
       labels_gp  = gpar(fontsize = PUB_SMALL, fontfamily = PUB_FONT),
       at         = c(-3, -1.5, 0, 1.5, 3),
-      labels     = c("-3 (low)", "-1.5", "0 (mean)", "1.5", "+3 (high)"),
+      labels     = c("-3", "-1.5", "0", "1.5", "3"),
       legend_height = unit(5, "cm")
     ),
     border = FALSE
@@ -720,6 +720,9 @@ write.table(tibble(gene = "YBR020W", gene_name = "GAL1",
 Defines two publication-ready plotting functions used in Step 15. `plot_volcano()` draws a DESeq2 volcano plot colored by direction (up/down/NS) with ggrepel labels for the top significant genes. `plot_go_dotplot()` draws a faceted dot plot of the top GO BP terms per direction, with strip colors matching the up/down scheme, and returns a gtable (grid grob) with manually recolored facet strips.
 
 ```{r}
+# "1. Wine/European" -> "Wine/European", "M1. Mosaic region 1" -> "Mosaic region 1"
+strip_clade_number <- function(x) sub("^[A-Z]?[0-9]+\\.\\s*", "", x)
+
 plot_volcano <- function(res_df, clade_label, padj_thresh = 0.05,
                          lfc_thresh = 0.3, top_n_labels = 15) {
   sig       <- res_df %>% filter(direction != "NS")
@@ -748,9 +751,10 @@ plot_volcano <- function(res_df, clade_label, padj_thresh = 0.05,
       breaks = c("Upregulated", "Downregulated", "NS")) +
     scale_size_continuous(range = c(0.5, 3.5), guide = "none") +
     # bold() inside expression(): plotmath titles ignore the theme's face = "bold"
-    labs(x = expression(bold(log[2]~"fold change (focal vs. rest)")),
+    # no plot title: the clade (without its "1. " number prefix) goes in the x-axis label
+    labs(x = bquote(bold(log[2]~"fold change ("*.(strip_clade_number(clade_label))*" vs. rest)")),
          y = expression(bold(-log[10]~"(adjusted"~bolditalic(p)~")")),
-         title = clade_label, color = NULL) +
+         title = NULL, color = NULL) +
     pub_theme +
     guides(color = guide_legend(override.aes = list(size = 4))) +
     # bigger axis text than pub_theme (PUB_AXIS, same as Panel C and the GO dot plots)
@@ -795,7 +799,8 @@ plot_go_dotplot <- function(ora_up, ora_down, clade_label, top_n = 8) {
     # whole-number breaks only (gene counts are integers)
     scale_size_continuous(name = "Gene count", range = c(2, 7),
                           breaks = function(l) unique(round(scales::pretty_breaks(n = 4)(l)))) +
-    labs(title = clade_label, x = "Gene ratio", y = NULL) +
+    # no plot title: the clade goes in the x-axis label instead
+    labs(title = NULL, x = paste0("Gene ratio (", strip_clade_number(clade_label), " DEGs)"), y = NULL) +
     pub_theme +
     # bigger axis text than pub_theme: GO term names (bold), gene-ratio ticks and title
     theme(axis.text.y      = element_text(size = PUB_AXIS, face = "bold", color = "black"),

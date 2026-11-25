@@ -612,14 +612,35 @@ arbitrary), so each pattern is summarised by its leading direction:
 # patterns drawn: data-driven patterns with weight >= 0.01% (only ED_PCA_1 in the seeded fit;
 # ED_PCA_2, the YPD vs synthetic-media contrast, has weight 0 in all five random sets of
 # mashr_seed_robustness.R, and ED_PCA_5 has 0.004%)
+# colour scale for a correlation heatmap. If all correlations are >= 0 (e.g. ED_PCA_1, all
+# 0.68-1.00), a -1..1 diverging scale makes every tile the same red, so the scale is stretched over
+# the observed range (lower limit rounded down to 0.05) with a light-to-dark red ramp; matrices with
+# negative correlations keep the blue-white-red -1..1 scale.
+COR_REDS <- c("#FEE0D2", "#FCBBA1", "#FC9272", "#FB6A4A", "#EF3B2C", "#CB181D", "#A50F15", "#67000D")
+cor_lower <- function(r) floor(min(r) * 20) / 20
+cor_fill_scale <- function(r) {
+  if (min(r) >= 0) {
+    lo <- cor_lower(r); br <- seq(ceiling(lo * 10) / 10, 1, by = 0.1)
+    scale_fill_gradientn(colours = COR_REDS, limits = c(lo, 1), breaks = br, name = "Correlation")
+  } else {
+    scale_fill_gradient2(low = "#2166AC", mid = "white", high = "#B2182B", limits = c(-1, 1),
+                         breaks = c(-1, -0.5, 0, 0.5, 1), name = "Correlation")
+  }
+}
+# label colour: white on the dark end of the sequential ramp, black otherwise
+cor_text_col <- function(r) {
+  if (min(r) >= 0) { lo <- cor_lower(r); ifelse((r - lo) / (1 - lo) > 0.6, "white", "black") }
+  else rep("black", length(r))
+}
+
 ed <- names(sort(piA[grepl("^ED_", names(piA)) & piA >= 1e-4], decreasing = TRUE))
 ed <- head(ed, 3)
 cm <- cov2cor(UA[[ed[1]]]); dimnames(cm) <- list(lab(condsA), lab(condsA))
 heat <- as.data.frame(as.table(cm)) %>% setNames(c("c1", "c2", "r")) %>%
-  mutate(c1 = factor(c1, lab(condsA)), c2 = factor(c2, rev(lab(condsA))))
+  mutate(c1 = factor(c1, lab(condsA)), c2 = factor(c2, rev(lab(condsA))), txt = cor_text_col(r))
 pa <- ggplot(heat, aes(c1, c2, fill = r)) + geom_tile(colour = "white") +
-  geom_text(aes(label = sprintf("%.2f", r)), size = 3.6) +
-  scale_fill_gradient2(low = "#2166AC", mid = "white", high = "#B2182B", limits = c(-1, 1), name = "Correlation") +
+  geom_text(aes(label = sprintf("%.2f", r), colour = txt), size = 3.6) + scale_colour_identity() +
+  cor_fill_scale(heat$r) +
   labs(title = sprintf("(a) Correlation of effects, %s (weight %.1f%%)", ed[1], 100 * piA[ed[1]]), x = NULL, y = NULL) +
   theme_minimal(base_size = 12) + theme(axis.text.x = element_text(angle = 35, hjust = 1, colour = "black"),
                                         axis.text.y = element_text(colour = "black"), plot.title = element_text(face = "bold"))
@@ -652,10 +673,10 @@ single figure.
 top_ed <- names(which.max(piA[grepl("^ED_", names(piA))]))
 cm_top <- cov2cor(UA[[top_ed]]); dimnames(cm_top) <- list(lab(condsA), lab(condsA))
 heat_top <- as.data.frame(as.table(cm_top)) %>% setNames(c("c1", "c2", "r")) %>%
-  mutate(c1 = factor(c1, lab(condsA)), c2 = factor(c2, rev(lab(condsA))))
+  mutate(c1 = factor(c1, lab(condsA)), c2 = factor(c2, rev(lab(condsA))), txt = cor_text_col(r))
 p <- ggplot(heat_top, aes(c1, c2, fill = r)) + geom_tile(colour = "white") +
-  geom_text(aes(label = sprintf("%.2f", r)), size = 4) +
-  scale_fill_gradient2(low = "#2166AC", mid = "white", high = "#B2182B", limits = c(-1, 1), name = "Correlation") +
+  geom_text(aes(label = sprintf("%.2f", r), colour = txt), size = 4) + scale_colour_identity() +
+  cor_fill_scale(heat_top$r) +
   labs(title = sprintf("Correlation of effects, %s (mash weight %.1f%%)", top_ed, 100 * piA[[top_ed]]), x = NULL, y = NULL) +
   theme_minimal(base_size = 13) + theme(axis.text.x = element_text(angle = 35, hjust = 1, colour = "black"),
                                         axis.text.y = element_text(colour = "black"), plot.title = element_text(face = "bold", hjust = 0.5),
@@ -717,11 +738,11 @@ pattern_title <- function(nm) {
 pub_heatmap <- function(nm) {
   cm <- cov2cor(UA[[nm]]); dimnames(cm) <- list(PUB_LAB[condsA], PUB_LAB[condsA])
   d <- as.data.frame(as.table(cm)) %>% setNames(c("c1", "c2", "r")) %>%
-    mutate(c1 = factor(c1, PUB_LAB[condsA]), c2 = factor(c2, rev(PUB_LAB[condsA])))
+    mutate(c1 = factor(c1, PUB_LAB[condsA]), c2 = factor(c2, rev(PUB_LAB[condsA])), txt = cor_text_col(r))
   ggplot(d, aes(c1, c2, fill = r)) + geom_tile(colour = "white", linewidth = 0.6) +
-    geom_text(aes(label = sprintf("%.2f", r)), size = PUB_LABEL - 0.5, fontface = "bold") +
-    scale_fill_gradient2(low = "#2166AC", mid = "white", high = "#B2182B", limits = c(-1, 1),
-                         breaks = c(-1, -0.5, 0, 0.5, 1), name = "Correlation") +
+    geom_text(aes(label = sprintf("%.2f", r), colour = txt), size = PUB_LABEL - 0.5, fontface = "bold") +
+    scale_colour_identity() +
+    cor_fill_scale(d$r) +
     coord_fixed() +
     labs(title = pattern_title(nm), x = NULL, y = NULL) +
     pub_theme +

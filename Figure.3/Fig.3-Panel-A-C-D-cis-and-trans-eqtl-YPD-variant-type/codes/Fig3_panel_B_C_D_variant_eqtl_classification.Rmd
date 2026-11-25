@@ -137,12 +137,12 @@ bim_paths <- list(
 )
 
 # Display label for CNVs in all figures (internal key stays "CNVs")
-CNV_LABEL <- "Gene-based CNVs"
+CNV_LABEL <- "Gene CNVs"
 
 # Variant colors for all figures
 variant_colors <- c("SNPs" = "#4472C4", "InDels" = "#FFC000",
                     "SVs" = "#C41E3A", "CNVs" = "#70AD47",
-                    "Gene-based CNVs" = "#70AD47")
+                    "Gene CNVs" = "#70AD47")
 
 # Axis text and titles in all figures: bold, AXIS_SIZE pt
 AXIS_SIZE <- 18
@@ -155,7 +155,7 @@ EFF_AXIS_SIZE <- 24     # axis titles and tick labels, pt
 EFF_PVAL_SIZE <- 8      # p-values, mm
 EFF_NLAB_SIZE <- 7      # n= labels, mm
 EFF_BRACKET_LWD <- 1.2  # bracket line width, mm
-wrap_cnv <- function(x) sub("Gene-based CNVs", "Gene-based\nCNVs", x)
+wrap_cnv <- function(x) sub("Gene CNVs", "Gene\nCNVs", x)
 
 # Print configuration summary
 cat("\n")
@@ -468,7 +468,7 @@ fig1a <- ggplot(all_clumped, aes(Location, abs_SnpWeight, fill = Location)) +
   scale_fill_manual(values = c(Local = "#1F77B4", Distant = "#FF7F0E")) +
   labs(x = "eQTL", y = "Absolute effect size") +
   theme_minimal(base_size = 14) +
-  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+  theme(plot.title = element_blank(),
         legend.position = "none",
         axis.title = element_text(face = "bold", size = EFF_AXIS_SIZE, color = "black"),
         axis.text  = element_text(face = "bold", size = EFF_AXIS_SIZE, color = "black"),
@@ -499,7 +499,7 @@ fig1b <- ggplot(all_clumped, aes(Location, abs_SnpWeight, fill = Genetic_variant
   scale_fill_manual(values = variant_colors) +
   labs(x = "eQTL", y = "Absolute effect size") +
   theme_minimal(base_size = 14) +
-  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+  theme(plot.title = element_blank(),
         legend.position = "none", axis.title = element_text(face = "bold", size = EFF_AXIS_SIZE, color = "black"),
         axis.text = element_text(face = "bold", size = EFF_AXIS_SIZE, color = "black"),
         strip.text = element_text(size = EFF_AXIS_SIZE, face = "bold"),
@@ -542,7 +542,7 @@ fig1c <- ggplot(dat_c, aes(Genetic_variants, abs_SnpWeight, fill = Genetic_varia
   scale_fill_manual(values = variant_colors) +
   labs(x = "Variant type", y = "Absolute effect size") +
   theme_minimal(base_size = 14) +
-  theme(plot.title = element_text(hjust = 0.5, face = "bold"), legend.position = "none",
+  theme(plot.title = element_blank(), legend.position = "none",
         axis.title = element_text(face = "bold", size = EFF_AXIS_SIZE, color = "black"), axis.text = element_text(face = "bold", size = EFF_AXIS_SIZE, color = "black"),
         panel.grid.major.x = element_blank(), panel.grid.minor = element_blank())
 print(fig1c)
@@ -586,7 +586,7 @@ fig1d <- ggplot(dat_d, aes(Genetic_variants, abs_SnpWeight, fill = Genetic_varia
   scale_fill_manual(values = variant_colors) +
   labs(x = "Variant type", y = "Absolute effect size") +
   theme_minimal(base_size = 14) +
-  theme(plot.title = element_text(hjust = 0.5, face = "bold"), legend.position = "none",
+  theme(plot.title = element_blank(), legend.position = "none",
         axis.title = element_text(face = "bold", size = EFF_AXIS_SIZE, color = "black"), axis.text = element_text(face = "bold", size = EFF_AXIS_SIZE, color = "black"),
         panel.grid.major.x = element_blank(), panel.grid.minor = element_blank())
 print(fig1d)
@@ -677,7 +677,7 @@ fig_global_region <- ggplot(global_region_dist, aes(x = reorder(region, -pct), y
   labs(x = "Genomic region", 
        y = "Percentage of all eQTL variants (%)") +
   theme_classic(base_size = 14) +
-  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+  theme(plot.title = element_blank(),
         axis.text.x = element_text(angle = 45, hjust = 1, face = "bold", size = AXIS_SIZE, color = "black"),
         axis.text.y = element_text(face = "bold", size = AXIS_SIZE, color = "black"),
         axis.title = element_text(face = "bold", size = AXIS_SIZE, color = "black"),
@@ -712,7 +712,7 @@ fig3 <- ggplot(subtype_counts, aes(reorder(Variant_subtype, -n), n, fill = Genet
   scale_fill_manual(values = variant_colors) +
   labs(x = "Subtype", y = "Number of eQTL variants") +
   theme_classic(base_size = 13) +
-  theme(plot.title = element_text(hjust = 0.5, face = "bold"), legend.position = "none",
+  theme(plot.title = element_blank(), legend.position = "none",
         axis.text.x = element_text(angle = 45, hjust = 1, face = "bold", size = AXIS_SIZE, color = "black"),
         axis.text.y = element_text(face = "bold", size = AXIS_SIZE, color = "black"), axis.title = element_text(face = "bold", size = AXIS_SIZE, color = "black"),
         strip.text = element_text(size = 14, face = "bold"),
@@ -784,8 +784,7 @@ fig4 <- ggplot(donut, aes(ymax = ymax, ymin = ymin, xmax = xmax, xmin = xmin, fi
   scale_fill_manual(values = variant_colors, name = "Variant type") +
   coord_polar(theta = "y") + xlim(c(0, 5)) + theme_void() +
   theme(legend.position = "top", legend.title = element_blank(),
-        legend.text = element_text(size = 16), plot.caption = element_text(size = 16, hjust = 0.5)) +
-  labs(caption = paste0("Total variants (n = ", fmtk(sum(variant_summary$total_count)), ")"))
+        legend.text = element_text(size = 16))
 print(fig4)
 ggsave(file.path(OUT_FIG, "Fig4_donut_eqtl.tiff"), fig4,
        width = 10, height = 10, dpi = 600, units = "in", device = "tiff", compression = "lzw")
@@ -846,10 +845,9 @@ fig5 <- ggplot(or_results, aes(VariantType, log2OR, fill = VariantType)) +
                                 max(0, max(or_results$log2OR)) + y_pad)) +
   scale_fill_manual(values = variant_colors) +
   scale_x_discrete(labels = wrap_cnv) +
-  labs(x = "Variant type", y = expression(bold(log[2]~"(Odds ratio)")),
-       caption = "Red dashed line = log2(OR) = 0 (no enrichment)") +
+  labs(x = "Variant type", y = expression(bold(log[2]~"(Odds ratio)"))) +
   theme_minimal(base_size = 14) +
-  theme(plot.title = element_text(hjust = 0.5, face = "bold"), legend.position = "none",
+  theme(plot.title = element_blank(), legend.position = "none",
         axis.title = element_text(face = "bold", size = AXIS_SIZE, color = "black"), axis.text = element_text(face = "bold", size = AXIS_SIZE, color = "black"),
         panel.grid.major.x = element_blank(), panel.grid.minor = element_blank())
 print(fig5)
@@ -881,11 +879,10 @@ fig6 <- ggplot(pleio, aes(reorder(Genetic_variants, n_traits, median), n_traits,
   geom_boxplot(outlier.alpha = 0.3, width = 0.6) +
   geom_jitter(width = 0.15, alpha = 0.2, size = 0.8) +
   scale_fill_manual(values = variant_colors) + scale_y_log10() +
-  labs(x = "Variant type", y = "Number of associated traits (log scale)",
-       caption = "Kruskal-Wallis + pairwise Wilcoxon, FDR corrected") +
+  labs(x = "Variant type", y = "Number of genes per eQTL variant (log\u2081\u2080)") +
   theme_classic(base_size = 13) +
-  theme(legend.position = "none", plot.title = element_text(hjust = 0.5, face = "bold"),
-        plot.subtitle = element_text(hjust = 0.5, size = 10),
+  theme(legend.position = "none", plot.title = element_blank(),
+        plot.subtitle = element_blank(),
         axis.text = element_text(face = "bold", size = AXIS_SIZE, color = "black"), axis.title = element_text(face = "bold", size = AXIS_SIZE, color = "black"))
 print(fig6)
 ggsave(file.path(OUT_FIG, "Fig6_pleiotropy.tiff"), fig6,
@@ -945,11 +942,10 @@ fig7 <- ggplot(pleio_sub, aes(Variant_subtype, n_traits, fill = Genetic_variants
             inherit.aes = FALSE, hjust = 1.05, vjust = 1.5, size = PVAL_SIZE, fontface = "bold") +
   facet_wrap(~ Genetic_variants, scales = "free_x", nrow = 1) +
   scale_fill_manual(values = variant_colors) + scale_y_log10() +
-  labs(x = "Variant subtype", y = "Number of associated traits (log scale)",
-       caption = "Subtypes ordered by median; Kruskal-Wallis across subtypes within each type") +
+  labs(x = "Variant subtype", y = "Number of genes per eQTL variant (log\u2081\u2080)") +
   theme_classic(base_size = 13) +
-  theme(legend.position = "none", plot.title = element_text(hjust = 0.5, face = "bold"),
-        plot.subtitle = element_text(hjust = 0.5, size = 10),
+  theme(legend.position = "none", plot.title = element_blank(),
+        plot.subtitle = element_blank(),
         axis.text.x = element_text(angle = 45, hjust = 1, face = "bold", size = AXIS_SIZE, color = "black"),
         axis.text.y = element_text(face = "bold", size = AXIS_SIZE, color = "black"),
         axis.title = element_text(face = "bold", size = AXIS_SIZE, color = "black"),

@@ -11,8 +11,6 @@
 #SBATCH --tasks-per-node=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=96gb
-#SBATCH --mail-type=END
-#SBATCH --mail-user=aa9679@nyu.edu
 
 # Knit the Figure 5 Rmds (one Rmd per array task); part II reads the harmonic results, so tasks run one at a time (%1).
 # Submit from the codes/ directory:  sbatch render_fig5_rmds.sbatch

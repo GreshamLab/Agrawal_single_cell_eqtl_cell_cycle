@@ -32,6 +32,7 @@ knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
 library(tidyverse)
 library(data.table)
 library(BEDMatrix)
+source("/projects/rps/cgsb/gresham/Akriti/wildyeast1/common_analysis_for_all/Agrawal_single_cell_eqtl_cell_cycle/shared_code/arial_font.R")  # Arial for all plots, as in Figs 2 and 5
 ```
 
 ```{r config}
@@ -39,6 +40,7 @@ GENO <- "/projects/rps/cgsb/gresham/Akriti/wildyeast1/the_vcfs/pan_transcriptome
 OUTPUT_DIR <- "../results/LD_decay"
 dir.create(OUTPUT_DIR, showWarnings = FALSE, recursive = TRUE)
 MAX_DIST <- 100000   # bp
+CLUMP_KB <- 50       # clumping window used for eQTLs (Methods)
 BIN      <- 100      # bp
 N_BACKGROUND <- 200000
 set.seed(42)
@@ -117,18 +119,19 @@ p1 <- ggplot(sm, aes(bin / 1000, mean_r2)) +
   geom_hline(yintercept = background, linetype = "dashed") +
   geom_hline(yintercept = half_level, linetype = "dotted", colour = "#B2182B") +
   geom_vline(xintercept = half_dist / 1000, linetype = "dotted", colour = "#B2182B") +
-  geom_vline(xintercept = 2, colour = "darkorange") +
+  geom_vline(xintercept = CLUMP_KB, colour = "darkorange") +
   annotate("text", x = half_dist / 1000, y = max_r2, hjust = -0.1, colour = "#B2182B",
            label = sprintf("half-decay: %.1f kb", half_dist / 1000)) +
-  annotate("text", x = 2, y = max_r2 * 0.9, hjust = -0.1, colour = "darkorange", label = "current 2-kb window") +
-  annotate("text", x = MAX_DIST / 1000, y = background, hjust = 1, vjust = -0.5, label = "background (different chromosomes)") +
+  annotate("text", x = CLUMP_KB, y = max_r2 * 0.9, hjust = -0.05, colour = "darkorange", label = sprintf("%d-kb clumping window", CLUMP_KB)) +
+  annotate("text", x = MAX_DIST / 1000, y = background, hjust = 1, vjust = 1.5, label = "background (different chromosomes)") +
+  scale_y_continuous(expand = expansion(mult = c(0.12, 0.05))) +
   labs(title = "LD decay, SNPs, 96 strains", x = "Distance between SNPs (kb)", y = expression("Mean " * r^2 * " (100-bp bins)")) +
   theme_classic(base_size = 12) + theme(plot.title = element_text(face = "bold", hjust = 0.5))
 p2 <- ggplot(binned, aes(bin / 1000, pct_r2_gt_0.6)) +
   geom_point(size = 0.5, alpha = 0.4, colour = "grey50") +
   geom_smooth(se = FALSE, colour = "#2C7FB8", method = "loess", span = 0.1) +
   geom_hline(yintercept = bg_pct06, linetype = "dashed") +
-  geom_vline(xintercept = 2, colour = "darkorange") +
+  geom_vline(xintercept = CLUMP_KB, colour = "darkorange") +
   labs(title = expression(bold("Share of SNP pairs with " * r^2 * " > 0.6")), x = "Distance between SNPs (kb)", y = "% of pairs") +
   theme_classic(base_size = 12) + theme(plot.title = element_text(hjust = 0.5))
 p <- patchwork::wrap_plots(p1, p2)

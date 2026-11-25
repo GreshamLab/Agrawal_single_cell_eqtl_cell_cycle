@@ -238,7 +238,6 @@ touch "$OUTDIR/batch_${{SLURM_ARRAY_TASK_ID}}_completed.marker"
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=10gb
 #SBATCH --account=torch_pr_130_general
-#SBATCH --mail-type=FAIL,END
 #SBATCH --array=1-{num_batches}%{max_concurrent_tasks}
 #SBATCH --signal=B:USR1@600
 

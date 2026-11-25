@@ -5,7 +5,6 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=96gb
 #SBATCH --account=torch_pr_130_general
-#SBATCH --mail-type=FAIL,END
 # eQTL reproducibility first: it writes shared_eQTLs_YPD1_vs_YPD2_ALL_variants.csv, which the
 # expression-variation Rmd reads.
 set -e

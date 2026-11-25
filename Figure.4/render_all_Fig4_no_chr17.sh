@@ -5,7 +5,6 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=96gb
 #SBATCH --account=torch_pr_130_general
-#SBATCH --mail-type=FAIL,END
 # Re-renders Figure 4 after the CNV FaST-LMM re-run without chr17 (2026-10-23):
 # every condition Step1 -> Step2 -> Step3, then the gene-level minP table, then PartII.
 # A failed Rmd is reported and the rest continue; Step2/Step3 of a condition are skipped

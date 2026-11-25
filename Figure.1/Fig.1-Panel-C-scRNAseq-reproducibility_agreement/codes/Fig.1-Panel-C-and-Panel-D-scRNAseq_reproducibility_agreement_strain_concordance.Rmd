@@ -328,16 +328,15 @@ write.csv(rank_stats %>% select(-xlab, -ylab),
 
 # Synthetic complete vs. Caudal (2024): sc2glu.2 alone vs integrated
 
-The Fig 1C panel above uses the integrated sc2glu.1 + sc2glu.2 dataset. Here the
-same comparison with sc2glu.2 only, next to the integrated version for reference
-(both with all strains, no cell-count filter).
+Rank concordance against the Caudal (2024) bulk RNA-seq data for sc2glu.2 alone
+and for the integrated sc2glu.1 + sc2glu.2 dataset (all strains, no cell-count filter).
 
 ```{r sc2glu2_only_vs_bulk, fig.width = 6.5, fig.height = 3.4}
 sc_bulk_res <- list(
   rank_concordance(bulk_tpm, sc2_norm, "sc2glu.2 vs. Caudal (2024)",
-                   "Caudal (2024)", "Synthetic complete (sc2glu.2)"),
+                   "Rank bulk RNA-seq", "Rank scRNAseq\n(sc2glu.2)"),
   rank_concordance(bulk_tpm, sc_norm, "Integrated sc2glu vs. Caudal (2024)",
-                   "Caudal (2024)", "Synthetic complete (integrated)")
+                   "Rank bulk RNA-seq", "Rank scRNAseq")
 )
 sc_bulk_lvl   <- c("sc2glu.2 vs. Caudal (2024)", "Integrated sc2glu vs. Caudal (2024)")
 sc_bulk_df    <- bind_rows(lapply(sc_bulk_res, `[[`, "df"))    %>% mutate(comparison = factor(comparison, levels = sc_bulk_lvl))
@@ -352,9 +351,8 @@ make_sc_bulk_panel <- function(cmp) {
     geom_point(alpha = 0.1, size = 0.3, shape = 16,
                color = panel_colors[["Synthetic complete vs. Caudal (2024)"]]) +
     annotate("text", x = Inf, y = -Inf,
-             label = paste0("Spearman r = ", round(s$spearman_r, 3),
-                            "\nn = ", s$n_strains, " strains"),
-             hjust = 1.1, vjust = -0.4, size = 4, fontface = "bold") +
+             label = paste0("Spearman r = ", round(s$spearman_r, 3)),
+             hjust = 1.1, vjust = -0.8, size = 4, fontface = "bold") +
     scale_x_continuous(limits = sc_bulk_range, breaks = seq(0, sc_bulk_range[2], by = 1000),
                        expand = expansion(mult = 0.02)) +
     scale_y_continuous(limits = sc_bulk_range, breaks = seq(0, sc_bulk_range[2], by = 1000),
@@ -367,14 +365,27 @@ make_sc_bulk_panel <- function(cmp) {
 fig1c_sc2glu2 <- wrap_plots(lapply(sc_bulk_lvl, make_sc_bulk_panel), nrow = 1)
 fig1c_sc2glu2
 
-ggsave(file.path(OUT_DIR, "Fig1C_rank_concordance_sc2glu2_only_vs_integrated.pdf"), fig1c_sc2glu2,
-       width = 6.5, height = 3.4, units = "in")
-ggsave(file.path(OUT_DIR, "Fig1C_rank_concordance_sc2glu2_only_vs_integrated.tiff"), fig1c_sc2glu2,
-       width = 6.5, height = 6, units = "in", dpi = 300,
+ggsave(file.path(OUT_DIR, "Fig1C_rank_concordance_sc2glu2_vs_bulk.pdf"), fig1c_sc2glu2,
+       width = 6.5, height = 3.4, units = "in", device = cairo_pdf)
+ggsave(file.path(OUT_DIR, "Fig1C_rank_concordance_sc2glu2_vs_bulk.tiff"), fig1c_sc2glu2,
+       width = 6.5, height = 3.4, units = "in", dpi = 300,
        device = "tiff", compression = "lzw")
 
+# each panel on its own as well
+single_panels <- c("sc2glu.2 vs. Caudal (2024)"          = "sc2glu2_only",
+                   "Integrated sc2glu vs. Caudal (2024)" = "integrated")
+for (cmp in names(single_panels)) {
+  p_single <- make_sc_bulk_panel(cmp)
+  stem     <- file.path(OUT_DIR, paste0("Fig1C_rank_concordance_", single_panels[[cmp]], "_vs_bulk"))
+  ggsave(paste0(stem, ".pdf"), p_single,
+         width = 3.4, height = 3.4, units = "in", device = cairo_pdf)
+  ggsave(paste0(stem, ".tiff"), p_single,
+         width = 3.4, height = 3.4, units = "in", dpi = 300,
+         device = "tiff", compression = "lzw")
+}
+
 write.csv(sc_bulk_stats %>% select(-xlab, -ylab),
-          file.path(OUT_DIR, "Fig1C_sc2glu2_only_vs_integrated_bulk_stats.csv"), row.names = FALSE)
+          file.path(OUT_DIR, "Fig1C_sc2glu2_vs_bulk_stats.csv"), row.names = FALSE)
 ```
 
 # Figure 1C — sc2glu.2 only (no integration)

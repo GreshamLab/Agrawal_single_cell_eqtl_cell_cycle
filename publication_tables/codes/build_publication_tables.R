@@ -192,7 +192,7 @@ add("S8_eQTLs_per_dataset", "Supp. Table 8", "Fig. 4",
     es %>% group_by(Dataset, n_strains, n_genes_tested) %>%
       summarise(eQTL_associations = sum(eQTLs), unique_eQTL_variants = sum(eQTL_variants),
                 local = sum(local), distant = sum(distant), .groups = "drop") %>%
-      left_join(rd(f) %>% transmute(key = c("YPD.1", "YPD.2", "sc2glu.2", "Flu.1", "Flu.2", "scgal.1")[match(dataset, c("YPD.1", "YPD.2", "synthetic complete", "fluconazole 16 ug/ml", "fluconazole 8 ug/ml", "galactose"))],
+      left_join(rd(f) %>% transmute(key = c("YPD.1", "YPD.2", "sc2glu.2", "Flu.1", "Flu.2", "scgal.1")[match(dataset, c("YPD.1", "YPD.2", "synthetic complete with glucose", "fluconazole 16 ug/ml", "fluconazole 8 ug/ml", "synthetic complete with galactose"))],
                                     Dataset = ds_label[key], eGenes) %>% select(-key), by = "Dataset") %>%
       arrange(match(Dataset, DATASETS$label)),
     c(f_sum, f))
@@ -211,11 +211,13 @@ add("S10_local_distant", "Supp. Table 10", "Fig. 4",
 rel <- "eqtl_plot/data_summary/odds_ratio_enrichment.txt"
 add("S11_eQTL_enrichment", "Supp. Table 11", "Fig. 3F / Fig. 4",
     "Fisher's exact test of each variant type among eQTL variants vs all other types (a = eQTL, b = not eQTL; c/d = other types), FDR-adjusted.",
-    stack_ds(rel), file.path(DATASETS$dir, rel))
+    stack_ds(rel) %>% mutate(VariantType = recode(VariantType, "Gene CNVs" = "Gene-based CNVs")),
+    file.path(DATASETS$dir, rel))
 rel <- "eqtl_plot/data_summary/pleiotropy_summary.txt"
 add("S12_pleiotropy", "Supp. Table 12", "Fig. 4",
     "Pleiotropy: genes affected per eQTL variant, by variant type and dataset.",
-    stack_ds(rel), file.path(DATASETS$dir, rel))
+    stack_ds(rel) %>% mutate(Genetic_variants = recode(Genetic_variants, "Gene CNVs" = "Gene-based CNVs")),
+    file.path(DATASETS$dir, rel))
 
 # ================= mashr =================
 MASH <- file.path(F4M, "mashr")

@@ -9,8 +9,6 @@
 #SBATCH --tasks-per-node=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64gb
-#SBATCH --mail-type=END,FAIL
-#SBATCH --mail-user=aa9679@nyu.edu
 
 # Knit one best-replicate comparison Rmd (YPD.1, sc2glu.2, Flu.1, Flu.2). Submit from codes/:
 #   sbatch --job-name=concordance render_best_replicates.sbatch Fig4.effect-size-comparison-best-replicates.Rmd
